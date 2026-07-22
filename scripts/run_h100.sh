@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH -p sooner_gpu_test_h100
 #SBATCH --gres=gpu:1
-#SBATCH --job-name=tlckv-m1-unif-topk
+#SBATCH --job-name=tlckv-m1-adap-topk.conf
 #SBATCH --output=/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_%j.log
 #SBATCH --error=/home/ahsan/LLM-AnDPro/logs/err_andpro_h100_%j.log
 #SBATCH --time=2-00:00:00
 
-# CONFIG_FILE=config/tlckv-m1-unif-topk.conf sbatch scripts/run_h100.sh
+# CONFIG_FILE=config/tlckv-m1-adap-topk.conf sbatch scripts/run_h100.sh
 
 set -euo pipefail
 

@@ -37,6 +37,40 @@ cd experiments/LongBench
 bash run.sh
 ```
 
+### SLURM Submission (H100)
+
+Use [scripts/submit.sh](scripts/submit.sh) to submit any named config as a SLURM job. It automatically sets the job name and config file — just pass the config name (without the path or `.conf` extension):
+
+```bash
+bash scripts/submit.sh <config-name>
+```
+
+#### All configs — copy-paste commands
+
+```bash
+# Group A — Adaptive budget, Top-K selection
+bash scripts/submit.sh tlckv-pe-m4-adap-topk
+bash scripts/submit.sh tlckv-p-m4-adap-topk
+bash scripts/submit.sh tlckv-m1-adap-topk
+
+# Group B — Uniform budget, Top-K selection
+bash scripts/submit.sh tlckv-pe-m4-unif-topk
+bash scripts/submit.sh tlckv-p-m4-unif-topk
+bash scripts/submit.sh tlckv-m1-unif-topk
+
+# Group C — Adaptive budget, Diversity-aware selection
+bash scripts/submit.sh tlckv-pe-m4-adap-div
+bash scripts/submit.sh tlckv-p-m4-adap-div
+bash scripts/submit.sh tlckv-m1-adap-div
+```
+
+Each call expands to the equivalent of:
+```bash
+sbatch --job-name=<config-name> --export=ALL,CONFIG_FILE=config/<config-name>.conf scripts/run_h100.sh
+```
+
+Logs are written to `/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_<jobid>.log` and `err_andpro_h100_<jobid>.log`.
+
 ---
 
 ## TLC-KV Configuration Reference
