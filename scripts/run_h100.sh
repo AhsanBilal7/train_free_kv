@@ -77,9 +77,19 @@ nvidia-smi -L || true
 export GPU_ID="${GPU_ID:-${CUDA_VISIBLE_DEVICES:-0}}"
 echo "Using GPU_ID=$GPU_ID"
 
+# --- Experiment selection ---
+# Which benchmark under experiments/ to run. Switch benchmarks by changing this
+# one value (or `EXPERIMENT=RULER bash scripts/run_h100.sh`):
+#   LongBench  -> experiments/LongBench
+#   RULER      -> experiments/RULER
+export EXPERIMENT="${EXPERIMENT:-LongBench}"
+echo "Running experiment: $EXPERIMENT"
+
 # --- Path Configuration (defaults pull straight from the Hugging Face Hub) ---
+# NOTE: DATASET_PATH is now dataset-specific and lives in each experiment's
+# run.sh (experiments/<EXPERIMENT>/run.sh). It is only read here if the user
+# exports it explicitly (which then overrides the experiment default).
 export MODEL_PATH="${MODEL_PATH:-mistralai/Mistral-7B-Instruct-v0.2}"
-export DATASET_PATH="${DATASET_PATH:-THUDM/LongBench}"
 
 # =============================================================================
 # KV eviction mode (§3 of the paper)
@@ -118,15 +128,18 @@ export BUDGET="${BUDGET:-1024 256 512 128}"
 echo "Running with BUDGET(s): $BUDGET"
 
 # =============================================================================
-# LongBench dataset subset(s) to evaluate on.
-# Full English set (Chinese-only tasks omitted — Mistral-7B is not tuned for
-# Chinese):
-#   qasper narrativeqa multifieldqa_en hotpotqa 2wikimqa musique trec triviaqa
-#   samsum gov_report qmsum multi_news passage_count passage_retrieval_en
-#   lcc repobench-p
+# Dataset subset(s) to evaluate on — dataset-specific, so the DEFAULT lives in
+# each experiment's run.sh (experiments/<EXPERIMENT>/run.sh):
+#   LongBench -> sub-tasks: qasper narrativeqa multifieldqa_en hotpotqa 2wikimqa
+#                musique trec triviaqa samsum gov_report qmsum multi_news
+#                passage_count passage_retrieval_en lcc repobench-p
+#   RULER     -> sequence-length configs: 4096 8192 16384
+# Set it here (or on the CLI) ONLY to override that per-experiment default, e.g.
+#   DATASET_NAME_LIST="qasper trec"  (LongBench)  or  "4096 8192"  (RULER)
+# Left empty => the experiment's run.sh chooses its own full default set.
 # =============================================================================
-export DATASET_NAME_LIST="${DATASET_NAME_LIST:-qasper narrativeqa multifieldqa_en hotpotqa 2wikimqa musique trec triviaqa samsum gov_report qmsum multi_news passage_count passage_retrieval_en lcc repobench-p}"
-echo "Running with DATASET_NAME_LIST: $DATASET_NAME_LIST"
+export DATASET_NAME_LIST="${DATASET_NAME_LIST:-}"
+echo "Running with DATASET_NAME_LIST: ${DATASET_NAME_LIST:-<per-experiment default>}"
 
 # =============================================================================
 # causal_forward_only — redundancy penalty (ignored by other modes)
@@ -293,9 +306,10 @@ export LAMBDA_V="${LAMBDA_V:-0.0}"
 # =============================================================================
 export BUDGET_TAU="${BUDGET_TAU:-1.0}"
 
-cd experiments/LongBench
+cd "$REPO_ROOT/experiments/$EXPERIMENT"
 bash run.sh
 # Example CLI overrides (uncomment one to use):
+# EXPERIMENT=RULER MODE=causal_lookahead BUDGET="128 256" DATASET_NAME_LIST="4096 8192" bash scripts/run_h100.sh
 # MODE=causal_lookahead BUDGET="128 256" NUM_PARTICLES="4" LOOKAHEAD_LEN="8" DATASET_NAME_LIST="qasper trec" bash scripts/run_h100.sh
 # MODE=causal_lookahead LAMBDA_LOOKAHEAD="0.0" BUDGET="128 256" DATASET_NAME_LIST="qasper trec" bash scripts/run_h100.sh  # window-only (no lookahead)
 

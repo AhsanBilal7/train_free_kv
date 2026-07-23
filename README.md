@@ -18,6 +18,7 @@ datasets
 tiktoken
 jieba
 rouge_score
+pandas          # RULER scorer (experiments/RULER/eval.py)
 ```
 
 ### Installation
@@ -30,10 +31,30 @@ make i
 
 ### Quick Start
 
-To run the experiment on LongBench, you can run the following command:
+Two benchmarks are supported, selected with the `EXPERIMENT` variable:
+
+| `EXPERIMENT` | Benchmark | Dataset (`DATASET_PATH`) | Subsets (`DATASET_NAME_LIST`) |
+|---|---|---|---|
+| `LongBench` *(default)* | [LongBench](experiments/LongBench/) | `THUDM/LongBench` | 16 sub-tasks (qasper, hotpotqa, …) |
+| `RULER` | [RULER](experiments/RULER/) | `simonjegou/ruler` | sequence-length configs: `4096 8192 16384` |
+
+Run the full pipeline (prediction + evaluation) from the repo root, switching
+benchmarks with a single variable:
 
 ```bash
-cd experiments/LongBench
+# LongBench (default)
+bash scripts/run_h100.sh
+
+# RULER — just change the experiment
+EXPERIMENT=RULER bash scripts/run_h100.sh
+```
+
+The dataset and its subset list are defined in each benchmark's own `run.sh`
+(`experiments/<EXPERIMENT>/run.sh`), so switching benchmarks only requires changing
+`EXPERIMENT`. You can still run a benchmark directly (set the GPU yourself):
+
+```bash
+cd experiments/RULER   # or experiments/LongBench
 bash run.sh
 ```
 
@@ -45,8 +66,15 @@ Use [scripts/submit.sh](scripts/submit.sh) to submit any named config as a SLURM
 bash scripts/submit.sh <config-name>
 ```
 
+This defaults to LongBench. To run the **same config on RULER**, set `EXPERIMENT` — it is forwarded to the job via `--export=ALL`:
+
+```bash
+EXPERIMENT=RULER bash scripts/submit.sh <config-name>
+```
+
 #### All configs — copy-paste commands
 
+### For LongBench
 ```bash
 # Group A — Adaptive budget, Top-K selection
 bash scripts/submit.sh tlckv-pe-m4-adap-topk
@@ -64,10 +92,30 @@ bash scripts/submit.sh tlckv-p-m4-adap-div
 bash scripts/submit.sh tlckv-m1-adap-div
 ```
 
+### For RULER
+```bash
+# Group A — Adaptive budget, Top-K selection
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-pe-m4-adap-topk
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-p-m4-adap-topk
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-m1-adap-topk
+
+# Group B — Uniform budget, Top-K selection
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-pe-m4-unif-topk
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-p-m4-unif-topk
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-m1-unif-topk
+
+# Group C — Adaptive budget, Diversity-aware selection
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-pe-m4-adap-div
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-p-m4-adap-div
+EXPERIMENT=RULER bash scripts/submit.sh tlckv-m1-adap-div
+```
+
 Each call expands to the equivalent of:
 ```bash
-sbatch --job-name=<config-name> --export=ALL,CONFIG_FILE=config/<config-name>.conf scripts/run_h100.sh
+sbatch --job-name=<EXPERIMENT>-<config-name> \
+    --export=ALL,EXPERIMENT=<EXPERIMENT>,CONFIG_FILE=config/<config-name>.conf scripts/run_h100.sh
 ```
+(`EXPERIMENT` defaults to `LongBench`; the job name is prefixed with it so LongBench and RULER runs of the same config are easy to tell apart.)
 
 Logs are written to `/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_<jobid>.log` and `err_andpro_h100_<jobid>.log`.
 
@@ -77,10 +125,13 @@ Logs are written to `/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_<jobid>.log` an
 
 `causal_lookahead` implements the full TLC-KV method (Algorithm 1). The named configurations below isolate specific design choices as controlled ablations. Every config uses `MODE=causal_lookahead` with **plain mean score aggregation** (`ROBUST_ALPHA=0.0`, `ROBUST_TOPK_BETA=1.0`) fixed throughout — the three axes that vary are the **particle confidence signal**, the **head-wise budget allocation**, and the **chunk selection rule**.
 
-Each config has a matching `.conf` file in [`config/`](config/) that can be passed directly:
+Each config has a matching `.conf` file in [`config/`](config/) that can be passed directly. These files set only the **method** hyperparameters (mode, budget, particles, aggregation, selection) and are **dataset-agnostic** — the dataset lives in each benchmark's `run.sh` — so the same config runs on either benchmark. Prepend `EXPERIMENT=RULER` to evaluate any of them on RULER:
 ```bash
-CONFIG_FILE=config/<name>.conf bash scripts/run_h100.sh
+CONFIG_FILE=config/<name>.conf bash scripts/run_h100.sh                    # LongBench (default)
+EXPERIMENT=RULER CONFIG_FILE=config/<name>.conf bash scripts/run_h100.sh   # RULER
 ```
+
+> The inline `... bash scripts/run_h100.sh` commands in each config block below run on LongBench by default; prepend `EXPERIMENT=RULER` (and optionally `DATASET_NAME_LIST="4096 8192 16384"`) to run them on RULER instead.
 
 ### Naming key
 
