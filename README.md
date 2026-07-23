@@ -49,6 +49,24 @@ bash scripts/run_h100.sh
 EXPERIMENT=RULER bash scripts/run_h100.sh
 ```
 
+### Analysis / paper figures
+
+The mechanism figures live in `experiments/<BENCHMARK>/figure_making_script/`
+(each figure is a `compute_*.py` that saves a `.npz` + a `plot_*.py` that draws the
+`.png`). One driver runs them all with the same scratch/HF/GPU exports as
+`run_h100.sh`:
+
+```bash
+sbatch scripts/run_figures.sh                        # all 9, LongBench single-doc QA, B=128
+bash   scripts/run_figures.sh                        # same, interactive
+FIGURES="1 2 6" bash scripts/run_figures.sh          # subset
+BENCHMARK=ruler DATASET=8192 bash scripts/run_figures.sh
+BUDGET=256 SAMPLES=5 CONFIG_FILE=config/tlckv-pe-mx-unif-topk.conf bash scripts/run_figures.sh
+PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from saved .npz (no GPU)
+```
+
+See `experiments/LongBench/figure_making_script/README.md` for what each figure shows.
+
 The dataset and its subset list are defined in each benchmark's own `run.sh`
 (`experiments/<EXPERIMENT>/run.sh`), so switching benchmarks only requires changing
 `EXPERIMENT`. You can still run a benchmark directly (set the GPU yourself):
