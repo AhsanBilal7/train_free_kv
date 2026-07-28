@@ -45,6 +45,37 @@ greedy-decoding the answer against the **full** cache, captured non-invasively w
 pass is unchanged). Scoring reuses each layer's own
 `TestTimeLookaheadKVCluster._project_and_score`.
 
+## Resumable (crash-safe) computes
+
+Every `compute_*.py` checkpoints **after each entry** to a pickle on **scratch**
+(`$FIG_CKPT_DIR`, default `/scratch/$USER/lorekv_fig_ckpt/`), keyed to the full
+destination path. On launch it:
+
+- if the final `.npz` already exists (and no checkpoint) → **skips** (nothing to do);
+- else if a checkpoint exists → **resumes**, skipping entries already finished;
+- else → starts fresh.
+
+On success it writes the final `.npz` to the requested (main) folder and deletes the
+scratch checkpoint. So an interrupted/pre-empted run just needs to be relaunched with
+the same arguments — it continues instead of restarting. Delete the scratch
+checkpoint (or the final `.npz`) to force a clean recompute.
+
+## Memory / long samples
+
+Each finished sample is fully released before the next (`common.free_sample`), and
+`collect_and_lookahead` is OOM-guarded: if one sample is too big for the GPU it is
+skipped (marked done) and the run continues instead of crashing. Two knobs help fit
+long-context datasets (e.g. NarrativeQA ~40K tokens) on a shared/near-full GPU — the
+launchers set them, and you can export them for direct runs:
+
+- `FIG_MAX_ANALYSIS_TOKENS` (default 24000 in the launchers, `0`/unset = off) —
+  middle-truncates the analysis prompt so long samples still contribute at a
+  memory-safe length instead of being skipped.
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — reduces allocator fragmentation.
+
+Raise/disable the cap if you own the whole GPU; lower it (or `--samples-per-dataset`,
+`--decode-steps`) if it still OOMs.
+
 ## Datasets
 `--dataset single` (default) = single-doc QA (qasper, narrativeqa, multifieldqa_en);
 `--dataset full` = all 16 English LongBench tasks; or a comma-list of task names.
@@ -84,6 +115,17 @@ PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from saved .npz (
 
 Knobs (all optional env vars): `BENCHMARK` (`longbench`|`ruler`), `DATASET`,
 `BUDGET`, `SAMPLES`, `CONFIG_FILE`, `FIGURES`, `PLOT_ONLY`.
+
+## Inside a real experiment run (`MAKE_FIGURES=1`)
+
+Set `MAKE_FIGURES=1` on a `scripts/run_h100.sh` `causal_lookahead` run and, after
+each prediction finishes, `scripts/make_figures_for_run.sh` writes every figure's
+`.npz` + `.png` **into that run's folder** (`experiments/<EXP>/pred/<out_name>/`):
+`<data_base>__<dataset>.npz` / `<fig_base>__<dataset>.png` per dataset, plus a
+`__combined` pair across all of them. The figures use the run's exact
+hyper-parameters (synthesized into `figure_config.conf` in the run folder), so the
+compute/plot scripts here are reused **unchanged** — only their `--out`/`--data`
+paths are redirected. Scope the cost with `FIG_SAMPLES` / `FIG_LIST`.
 
 ## Running one figure by hand
 ```bash

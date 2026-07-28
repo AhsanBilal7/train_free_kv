@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# --- Load central path/env configuration (.env) when run standalone ---
+_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+set -a
+[[ -f "$_HERE/../../.env" ]] && source "$_HERE/../../.env"
+set +a
+
 # ============================================
 # Path Configuration (override via env vars, or edit the defaults below)
 # ============================================
@@ -63,6 +69,8 @@ for budget in "${budget_scopes[@]}"; do
                                      "alpha=$robust_alpha beta=$robust_topk_beta" \
                                      "lK=$lambda_k lV=$lambda_v tau=$budget_tau"
 
+                                out_name="${mode}_Mistral-7B_${budget}_chunk_${chunk_size}_M_${num_particles}_T_${lookahead_len}_lL_${lambda_lookahead}_lT_${lookahead_temperature}_lH_${lambda_h}_eta_${particle_eta}_alpha_${robust_alpha}_beta_${robust_topk_beta}_lK_${lambda_k}_lV_${lambda_v}_tau_${budget_tau}"
+
                                 CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
                                   --max_length 64000 \
                                   --dataset $DATASET_PATH \
@@ -80,8 +88,22 @@ for budget in "${budget_scopes[@]}"; do
                                   --lambda_k $lambda_k \
                                   --lambda_v $lambda_v \
                                   --budget_tau $budget_tau \
-                                  --out_name "${mode}_Mistral-7B_${budget}_chunk_${chunk_size}_M_${num_particles}_T_${lookahead_len}_lL_${lambda_lookahead}_lT_${lookahead_temperature}_lH_${lambda_h}_eta_${particle_eta}_alpha_${robust_alpha}_beta_${robust_topk_beta}_lK_${lambda_k}_lV_${lambda_v}_tau_${budget_tau}" \
+                                  --out_name "$out_name" \
                                   --dataset_name_list "${dataset_name_list[@]}"
+
+                                # Optional: compute + save analysis figures (npz + png) into this
+                                # run's folder, per-length and combined. Opt-in via MAKE_FIGURES=1.
+                                if [ "${MAKE_FIGURES:-0}" = "1" ]; then
+                                  FIG_BENCHMARK=ruler FIG_BUDGET="$budget" FIG_CHUNK="$chunk_size" \
+                                    FIG_RUN_DIR="$(pwd)/pred/${out_name}" FIG_DATASETS="${dataset_name_list[*]}" \
+                                    FIG_NUM_PARTICLES="$num_particles" FIG_LOOKAHEAD_LEN="$lookahead_len" \
+                                    FIG_LOOKAHEAD_TEMPERATURE="$lookahead_temperature" FIG_LAMBDA_H="$lambda_h" \
+                                    FIG_PARTICLE_ETA="$particle_eta" FIG_ROBUST_ALPHA="$robust_alpha" \
+                                    FIG_ROBUST_TOPK_BETA="$robust_topk_beta" FIG_LAMBDA_LOOKAHEAD="$lambda_lookahead" \
+                                    FIG_LAMBDA_K="$lambda_k" FIG_LAMBDA_V="$lambda_v" FIG_BUDGET_TAU="$budget_tau" \
+                                    FIG_LAMBDA_RED="$lambda_red" FIG_GPU="$GPU_ID" \
+                                    bash ../../scripts/make_figures_for_run.sh || true
+                                fi
 
                               done  # budget_tau
                             done  # lambda_v

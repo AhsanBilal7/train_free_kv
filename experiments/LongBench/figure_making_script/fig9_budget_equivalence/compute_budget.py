@@ -46,6 +46,9 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "budget_data",
         common.build_tag(args.config, model_path, "sweep", args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.score_budget)
@@ -54,19 +57,28 @@ def main():
 
     methods = ["attention", "andpro_window", "lorekv_multi"]
     budgets = list(args.budgets)
-    F_sum = {m: np.zeros(len(budgets)) for m in methods}
-    F_cnt = {m: np.zeros(len(budgets)) for m in methods}
+    state, done = ckpt.load_or({"F_sum": {m: np.zeros(len(budgets)) for m in methods},
+                               "F_cnt": {m: np.zeros(len(budgets)) for m in methods}})
+    F_sum = state["F_sum"]; F_cnt = state["F_cnt"]
+
+    def _flush():
+        ckpt.flush({"F_sum": F_sum, "F_cnt": F_cnt}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         M = cap["M"]; weights = cap["particle_weights"]
 
         for li, layer in enumerate(model.model.layers):
@@ -92,13 +104,15 @@ def main():
                     o_ev = common.attn_outputs(q, kf, vf, mask)
                     F_sum[m][bi] += float(F.cosine_similarity(o_ev, o_full, dim=-1).mean().item())
                     F_cnt[m][bi] += 1
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={cap['n']} fidelity swept", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     save = dict(budgets=np.array(budgets), dataset=args.dataset, methods=np.array(methods))
     for m in methods:
         save[f"fidelity_{m}"] = F_sum[m] / np.maximum(F_cnt[m], 1)
     np.savez(args.out, **save)
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

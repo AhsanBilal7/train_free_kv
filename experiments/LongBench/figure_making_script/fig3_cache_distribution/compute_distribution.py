@@ -84,6 +84,9 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "distribution_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
@@ -91,21 +94,34 @@ def main():
     window_size = model.model.config.window_size
     M = model.model.config.num_particles
 
-    cos_lorekv, cos_attn, rel_lorekv, rel_attn = [], [], [], []
     n_layers = len(model.model.layers)
-    per_layer_cos_lorekv = [[] for _ in range(n_layers)]
-    per_layer_cos_attn = [[] for _ in range(n_layers)]
+    state, done = ckpt.load_or({"cos_lorekv": [], "cos_attn": [], "rel_lorekv": [], "rel_attn": [],
+                               "pl_lk": [[] for _ in range(n_layers)],
+                               "pl_at": [[] for _ in range(n_layers)]})
+    cos_lorekv = state["cos_lorekv"]; cos_attn = state["cos_attn"]
+    rel_lorekv = state["rel_lorekv"]; rel_attn = state["rel_attn"]
+    per_layer_cos_lorekv = state["pl_lk"]; per_layer_cos_attn = state["pl_at"]
+
+    def _flush():
+        ckpt.flush({"cos_lorekv": cos_lorekv, "cos_attn": cos_attn,
+                    "rel_lorekv": rel_lorekv, "rel_attn": rel_attn,
+                    "pl_lk": per_layer_cos_lorekv, "pl_at": per_layer_cos_attn}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         weights = cap["particle_weights"]
 
         for li, layer in enumerate(model.model.layers):
@@ -155,10 +171,11 @@ def main():
             per_layer_cos_lorekv[li].append(float(c_lk.mean()))
             per_layer_cos_attn[li].append(float(c_at.mean()))
 
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={cap['n']} "
               f"meanCos LORE-KV={np.concatenate(cos_lorekv).mean():.4f} attn={np.concatenate(cos_attn).mean():.4f}",
               flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     np.savez(
         args.out,
@@ -168,6 +185,7 @@ def main():
         per_layer_cos_lorekv=np.array([np.mean(x) if x else np.nan for x in per_layer_cos_lorekv]),
         per_layer_cos_attn=np.array([np.mean(x) if x else np.nan for x in per_layer_cos_attn]),
     )
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

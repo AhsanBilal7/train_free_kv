@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -p sooner_gpu_test_h100
+#SBATCH -p sooner_gpu_test_h100_dual
 #SBATCH --gres=gpu:1
 #SBATCH --job-name=tlckv-m1-adap-topk.conf
 #SBATCH --output=/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_%j.log
@@ -14,8 +14,22 @@ set -euo pipefail
 # CLI env-var overrides always win over the config file.
 # Override the config path with: CONFIG_FILE=config/my_sweep.conf bash scripts/run_h100.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Under SLURM, sbatch copies this script into a spool dir (e.g.
+# /var/slurm/spool/slurmd/job<ID>/slurm_script), so BASH_SOURCE-based detection
+# points outside the repo. Fall back to the submit dir when the detected root
+# lacks the experiments/ tree.
+if [[ ! -d "$REPO_ROOT/experiments" && -n "$SLURM_SUBMIT_DIR" ]]; then
+  REPO_ROOT="$SLURM_SUBMIT_DIR"
+fi
 CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/default.conf}"
+
+# --- Load central path/env configuration (.env) ---
+# All machine-specific paths (venv, scratch caches, HF cache, log dir, model)
+# live in $REPO_ROOT/.env. Auto-export everything it defines.
+set -a
+[[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
+set +a
 
 _load_conf() {
     local file="$1"
@@ -39,11 +53,11 @@ else
     echo "WARNING: Config file not found: $CONFIG_FILE (falling back to inline defaults)"
 fi
 
-source /scratch/ahsan/venvs/kv44/bin/activate
+source "${VENV_PATH:?VENV_PATH not set — check .env}/bin/activate"
 
-mkdir -p /home/ahsan/LLM-AnDPro/logs
+mkdir -p "$LOG_DIR"
 
-export CUDA_VISIBLE_DEVICES=0
+# export CUDA_VISIBLE_DEVICES=0
 # Redirect every cache/tmp dir to scratch -- nothing should be written under $HOME.
 export TMPDIR="${TMPDIR:-/scratch/$USER/tmp}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/pip_cache}"
@@ -305,6 +319,27 @@ export LAMBDA_V="${LAMBDA_V:-0.0}"
 # Sweepable: BUDGET_TAU="0.0 0.5 1.0 2.0"
 # =============================================================================
 export BUDGET_TAU="${BUDGET_TAU:-1.0}"
+
+# =============================================================================
+# Analysis figures inside each run (opt-in; causal_lookahead runs only)
+#
+# When MAKE_FIGURES=1, after each causal_lookahead prediction finishes, run.sh
+# also computes + saves every analysis figure's .npz AND .png INTO that run's
+# output folder (experiments/<EXP>/pred/<out_name>/), one artifact PER dataset
+# plus one COMBINED artifact across all datasets in the run. The figures reuse
+# the run's exact hyper-parameters (synthesized into a figure_config.conf).
+#
+# COST: each (figure x dataset) reloads the model, so this is heavy. Scope it
+# with FIG_SAMPLES (samples/dataset), FIG_LIST (which figures), and the run's
+# own DATASET_NAME_LIST. The main experiment is unaffected when MAKE_FIGURES=0.
+#
+# Example:  MAKE_FIGURES=1 FIG_SAMPLES=2 FIG_LIST="1 2 6" \
+#           CONFIG_FILE=config/tlckv-pe-m4-adap-topk.conf bash scripts/run_h100.sh
+# =============================================================================
+export MAKE_FIGURES="${MAKE_FIGURES:-0}"
+export FIG_SAMPLES="${FIG_SAMPLES:-2}"
+export FIG_LIST="${FIG_LIST:-1 2 3 4 5 6 7 8 9}"
+echo "MAKE_FIGURES=$MAKE_FIGURES (FIG_SAMPLES=$FIG_SAMPLES FIG_LIST='$FIG_LIST')"
 
 cd "$REPO_ROOT/experiments/$EXPERIMENT"
 bash run.sh

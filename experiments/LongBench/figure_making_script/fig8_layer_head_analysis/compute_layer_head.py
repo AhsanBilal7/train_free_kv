@@ -46,25 +46,39 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "layer_head_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
     lambda_L = model.model.config.lambda_lookahead
     n_layers = len(model.model.layers)
 
-    E_l = np.zeros(n_layers); E_cnt = np.zeros(n_layers)
-    G_lh = None; MM_lh = None; count_lh = None
+    state, done = ckpt.load_or({"E_l": np.zeros(n_layers), "E_cnt": np.zeros(n_layers),
+                               "G_lh": None, "MM_lh": None, "count_lh": None})
+    E_l = state["E_l"]; E_cnt = state["E_cnt"]
+    G_lh = state["G_lh"]; MM_lh = state["MM_lh"]; count_lh = state["count_lh"]
+
+    def _flush():
+        ckpt.flush({"E_l": E_l, "E_cnt": E_cnt, "G_lh": G_lh,
+                    "MM_lh": MM_lh, "count_lh": count_lh}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         M = cap["M"]; weights = cap["particle_weights"]
 
         for li, layer in enumerate(model.model.layers):
@@ -96,14 +110,16 @@ def main():
             MM_lh[li] += (1.0 - cov_h).cpu().numpy()
             count_lh[li] += 1
 
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={cap['n']} layer/head accumulated", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     E_l = E_l / np.maximum(E_cnt, 1)
-    G_lh = G_lh / np.maximum(count_lh, 1)
-    MM_lh = MM_lh / np.maximum(count_lh, 1)
+    G_lh = (G_lh if G_lh is not None else np.zeros((n_layers, 1))) / np.maximum(count_lh if count_lh is not None else 1, 1)
+    MM_lh = (MM_lh if MM_lh is not None else np.zeros((n_layers, 1))) / np.maximum(count_lh if count_lh is not None else 1, 1)
     np.savez(args.out, budget=args.budget, dataset=args.dataset,
              E_layer=E_l, G_head=G_lh, MM_head=MM_lh)
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

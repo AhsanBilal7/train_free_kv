@@ -9,6 +9,12 @@
 
 set -euo pipefail
 
+# --- Load central path/env configuration (.env) ---
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+set -a
+[[ -f "$HERE/../.env" ]] && source "$HERE/../.env"
+set +a
+
 mkdir -p logs
 
 # Redirect every cache/tmp dir to scratch -- nothing should be written under $HOME.
@@ -32,7 +38,8 @@ export GPU_ID="${GPU_ID:-${CUDA_VISIBLE_DEVICES:-0}}"
 echo "Using GPU_ID=$GPU_ID"
 
 module load Python/3.10.8-GCCcore-12.2.0
-source /scratch/$USER/venvs/crisp_310/bin/activate
+# A100 uses the crisp_310 venv — uncomment that VENV_PATH line in .env.
+source "${VENV_PATH:?VENV_PATH not set — check .env}/bin/activate"
 
 REPO_DIR="${REPO_DIR:-/scratch/$USER/LLM-AnDPro}"
 if [[ ! -d "$REPO_DIR" ]]; then

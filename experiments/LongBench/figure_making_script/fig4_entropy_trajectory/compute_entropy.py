@@ -53,26 +53,40 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "entropy_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
     eta = model.model.config.particle_eta
     lambda_h = model.model.config.lambda_h if model.model.config.lambda_h > 0 else 0.3
 
-    ent_all, logp_all, align_all = [], [], []
     strat_keys = ["single_mean", "single_min", "single_max", "uniform", "logprob", "lorekv"]
-    strat = {k: [] for k in strat_keys}
+    state, done = ckpt.load_or({"ent_all": [], "logp_all": [], "align_all": [],
+                               "strat": {k: [] for k in strat_keys}})
+    ent_all = state["ent_all"]; logp_all = state["logp_all"]; align_all = state["align_all"]
+    strat = state["strat"]
+
+    def _flush():
+        ckpt.flush({"ent_all": ent_all, "logp_all": logp_all,
+                    "align_all": align_all, "strat": strat}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
 
         M = cap["M"]
         logprob = cap["particle_logprob"]      # [M]
@@ -108,10 +122,11 @@ def main():
         strat["uniform"].append(float(np.mean(cov_uniform)))
         strat["logprob"].append(float(np.mean(cov_logprob)))
         strat["lorekv"].append(float(np.mean(cov_lorekv)))
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] "
               f"single(min/mean/max)={strat['single_min'][-1]:.3f}/{strat['single_mean'][-1]:.3f}/"
               f"{strat['single_max'][-1]:.3f}  lorekv={strat['lorekv'][-1]:.3f}", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     np.savez(
         args.out,
@@ -122,6 +137,7 @@ def main():
         strat_mean=np.array([np.mean(strat[k]) for k in strat_keys]),
         strat_std=np.array([np.std(strat[k]) for k in strat_keys]),
     )
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

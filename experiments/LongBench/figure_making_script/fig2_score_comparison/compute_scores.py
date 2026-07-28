@@ -90,6 +90,9 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "score_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
@@ -98,14 +101,23 @@ def main():
 
     methods = ["attention", "single_lookahead", "lorekv_multi"]
     pairs = [("attention", "single_lookahead"), ("attention", "lorekv_multi"), ("single_lookahead", "lorekv_multi")]
-    spearman = {f"{a}|{b}": [] for a, b in pairs}
-    overlap = {f"{a}|{b}": [] for a, b in pairs}
-    rep_profile = None   # dict method -> sorted score curve, from the first sample
+    state, done = ckpt.load_or({"spearman": {f"{a}|{b}": [] for a, b in pairs},
+                               "overlap": {f"{a}|{b}": [] for a, b in pairs},
+                               "rep_profile": None, "rep_raw": None})
+    spearman = state["spearman"]; overlap = state["overlap"]
+    rep_profile = state["rep_profile"]; rep_raw = state["rep_raw"]
+
+    def _flush():
+        ckpt.flush({"spearman": spearman, "overlap": overlap,
+                    "rep_profile": rep_profile, "rep_raw": rep_raw}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"], decode_steps=0, capture_true=False,
         )
@@ -146,9 +158,10 @@ def main():
                 rep_profile = {k: np.sort(v)[::-1].copy() for k, v in m_scores.items()}
                 rep_raw = {k: v.copy() for k, v in m_scores.items()}
 
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={cap['n']} "
               f"overlap(attn,multi)~{np.mean(overlap['attention|lorekv_multi']):.3f}", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     save = dict(
         methods=np.array(methods), budget=args.budget, dataset=args.dataset,
@@ -163,6 +176,7 @@ def main():
             save[f"sorted_{k}"] = rep_profile[k]
             save[f"raw_{k}"] = rep_raw[k]
     np.savez(args.out, **save)
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

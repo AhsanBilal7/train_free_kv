@@ -67,6 +67,22 @@ PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from saved .npz (
 
 See `experiments/LongBench/figure_making_script/README.md` for what each figure shows.
 
+**Figures inside a real run.** Add `MAKE_FIGURES=1` to any `run_h100.sh`
+`causal_lookahead` run to also drop every figure's `.npz` + `.png` into that run's
+own output folder (`experiments/<EXP>/pred/<out_name>/`) — one artifact **per
+dataset** plus one **combined** across all datasets in the run, computed with the
+run's exact hyper-parameters:
+
+```bash
+MAKE_FIGURES=1 FIG_SAMPLES=2 FIG_LIST="1 2 6" \
+  CONFIG_FILE=config/tlckv-m1-adap-topk.conf bash scripts/run_h100.sh
+```
+
+This is opt-in (default off) and heavy — each (figure × dataset) reloads the model,
+so scope it with `FIG_SAMPLES`, `FIG_LIST`, and the run's `DATASET_NAME_LIST`. The
+standalone `scripts/run_figures.sh` (writes into the `figure_making_script/` folders
+instead) remains available for iterating on figures outside a run.
+
 The dataset and its subset list are defined in each benchmark's own `run.sh`
 (`experiments/<EXPERIMENT>/run.sh`), so switching benchmarks only requires changing
 `EXPERIMENT`. You can still run a benchmark directly (set the GPU yourself):
