@@ -29,10 +29,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# --- Load central path/env configuration (.env) ---
+set -a
+[[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
+set +a
+
 # =============================================================================
 # Environment exports (identical policy to scripts/run_h100.sh: nothing under $HOME)
 # =============================================================================
-source /scratch/ahsan/venvs/kv44/bin/activate
+source "${VENV_PATH:?VENV_PATH not set — check .env}/bin/activate"
 
 mkdir -p "$REPO_ROOT/logs"
 
@@ -54,6 +59,16 @@ mkdir -p "$HF_HOME"
 # Matplotlib config/cache dir (headless Agg backend is set inside the plot scripts).
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/scratch/$USER/.cache/matplotlib}"
 mkdir -p "$MPLCONFIGDIR"
+
+# Reduce CUDA fragmentation across long/variable-length samples (the figures free
+# each sample before the next, but expandable segments avoids allocator fragmentation
+# when a longer dataset follows a shorter one).
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+# Cap the prompt length used for the analysis (middle-truncation) so very long samples
+# (e.g. NarrativeQA ~40K) still contribute without OOMing prefill + M cache-clones on a
+# shared GPU. 0 = no cap. Raise it if you have the whole GPU to yourself.
+export FIG_MAX_ANALYSIS_TOKENS="${FIG_MAX_ANALYSIS_TOKENS:-24000}"
 
 # --- GPU selection (same fallback logic as run_h100.sh) ---
 echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-unset}"
