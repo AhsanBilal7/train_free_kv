@@ -65,3 +65,6 @@ explicit = true
 torch = { index = "pytorch-cu121" }
 # Prebuilt wheel: no nvcc, no compile. Covers Ampere (sm_80) and Hopper (sm_90).
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.4.0/flash_attn-2.4.0%2Bcu122torch2.2cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+
+
+# echo 'export UV_PROJECT_ENVIRONMENT=/scratch/user/u.ab353540/uv_envs/train_free_kv; export UV_CACHE_DIR=/scratch/user/u.ab353540/uv_cache; export PATH="/scratch/user/u.ab353540/bin:/scratch/user/u.ab353540/uv_envs/train_free_kv/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
