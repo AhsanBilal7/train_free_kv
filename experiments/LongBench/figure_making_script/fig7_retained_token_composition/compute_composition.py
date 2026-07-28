@@ -87,6 +87,9 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "composition_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
@@ -94,14 +97,20 @@ def main():
     window_size = model.model.config.window_size
 
     methods = ["attention", "andpro_window", "lorekv_multi"]
-    ret_sum = {m: {c: 0.0 for c in CLASSES} for m in methods}   # sum of retention fraction
-    cls_count = {c: 0 for c in CLASSES}
-    total_tokens = 0
+    state, done = ckpt.load_or({"ret_sum": {m: {c: 0.0 for c in CLASSES} for m in methods},
+                               "cls_count": {c: 0 for c in CLASSES}, "total_tokens": 0})
+    ret_sum = state["ret_sum"]; cls_count = state["cls_count"]; total_tokens = state["total_tokens"]
+
+    def _flush():
+        ckpt.flush({"ret_sum": ret_sum, "cls_count": cls_count, "total_tokens": total_tokens}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"], decode_steps=0, capture_true=False,
         )
@@ -133,7 +142,9 @@ def main():
                 ret_frac[m] += mask.float().mean(0).cpu().numpy()[:len(ret_frac[m])]
             n_layers_used += 1
         if n_layers_used == 0:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         for m in methods:
             ret_frac[m] /= n_layers_used
 
@@ -143,8 +154,9 @@ def main():
             for m in methods:
                 ret_sum[m][c] += float(ret_frac[m][i])
         total_tokens += min(n, len(labels))
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={n} labeled", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     retention_rate = {m: np.array([ret_sum[m][c] / cls_count[c] if cls_count[c] else np.nan for c in CLASSES])
                       for m in methods}
@@ -165,6 +177,7 @@ def main():
         save[f"retention_{m}"] = retention_rate[m]
         save[f"enrichment_{m}"] = enrichment[m]
     np.savez(args.out, **save)
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

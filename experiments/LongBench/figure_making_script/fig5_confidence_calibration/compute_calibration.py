@@ -52,6 +52,9 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "calibration_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
@@ -59,18 +62,30 @@ def main():
     lambda_h = model.model.config.lambda_h if model.model.config.lambda_h > 0 else 0.3
     lambda_L = model.model.config.lambda_lookahead
 
-    logp_a, ent_a, comb_a, w_a, ualign_a, urecall_a = [], [], [], [], [], []
+    keys6 = ["logp_a", "ent_a", "comb_a", "w_a", "ualign_a", "urecall_a"]
+    state, done = ckpt.load_or({k: [] for k in keys6})
+    logp_a = state["logp_a"]; ent_a = state["ent_a"]; comb_a = state["comb_a"]
+    w_a = state["w_a"]; ualign_a = state["ualign_a"]; urecall_a = state["urecall_a"]
+
+    def _flush():
+        ckpt.flush({"logp_a": logp_a, "ent_a": ent_a, "comb_a": comb_a,
+                    "w_a": w_a, "ualign_a": ualign_a, "urecall_a": urecall_a}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         M = cap["M"]
         logprob = cap["particle_logprob"]; entropy = cap["particle_entropy"]
         combined = logprob - lambda_h * entropy
@@ -97,16 +112,19 @@ def main():
                 u_recall[m] += common.recall_at_b(s_m, oracle, args.budget)
             n_used += 1
         if n_used == 0:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         u_align /= n_used; u_recall /= n_used
 
         logp_a.append(logprob.numpy()); ent_a.append(entropy.numpy())
         comb_a.append(combined.numpy()); w_a.append(weights.numpy())
         ualign_a.append(u_align); urecall_a.append(u_recall)
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] "
               f"corr(comb,recall)~ per-sample computed in plot; "
               f"best/worst recall={u_recall.max():.3f}/{u_recall.min():.3f}", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     np.savez(
         args.out, budget=args.budget, dataset=args.dataset, lambda_h=lambda_h,
@@ -114,6 +132,7 @@ def main():
         combined=np.concatenate(comb_a), weight=np.concatenate(w_a),
         util_align=np.concatenate(ualign_a), util_recall=np.concatenate(urecall_a),
     )
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

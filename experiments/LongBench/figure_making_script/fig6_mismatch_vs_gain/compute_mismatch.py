@@ -54,6 +54,9 @@ def main():
     args.out = common.default_npz_path(
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "mismatch_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
@@ -61,18 +64,30 @@ def main():
     lambda_L = model.model.config.lambda_lookahead
     window_size = model.model.config.window_size
 
-    mismatch, g_recall, g_fid_win, g_fid_attn, labels = [], [], [], [], []
+    state, done = ckpt.load_or({"mismatch": [], "g_recall": [], "g_fid_win": [],
+                               "g_fid_attn": [], "labels": []})
+    mismatch = state["mismatch"]; g_recall = state["g_recall"]
+    g_fid_win = state["g_fid_win"]; g_fid_attn = state["g_fid_attn"]; labels = state["labels"]
+
+    def _flush():
+        ckpt.flush({"mismatch": mismatch, "g_recall": g_recall, "g_fid_win": g_fid_win,
+                    "g_fid_attn": g_fid_attn, "labels": labels}, done)
 
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         M = cap["M"]; weights = cap["particle_weights"]
 
         cov_win, rec_gain, fid_win, fid_attn = [], [], [], []
@@ -110,16 +125,19 @@ def main():
             fid_attn.append(c_lk - _cos_to_full(q, kf, vf, m_at))
 
         if not cov_win:
-            common.cleanup_clusters(model); continue
+            common.free_sample(model, cap)
+            done.add(key); _flush()
+            continue
         mismatch.append(1.0 - float(np.mean(cov_win)))
         g_recall.append(float(np.mean(rec_gain)))
         g_fid_win.append(float(np.mean(fid_win)))
         g_fid_attn.append(float(np.mean(fid_attn)))
         labels.append(sample["dataset"])
+        done.add(key); _flush()
         print(f"[{sample['dataset']}#{sample['sample_idx']}] mismatch={mismatch[-1]:.3f} "
               f"recall_gain={g_recall[-1]:+.3f} fid_gain(vs win/attn)={g_fid_win[-1]:+.3f}/{g_fid_attn[-1]:+.3f}",
               flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     np.savez(
         args.out, budget=args.budget, dataset=args.dataset,
@@ -127,6 +145,7 @@ def main():
         gain_fid_vs_window=np.array(g_fid_win), gain_fid_vs_attn=np.array(g_fid_attn),
         labels=np.array(labels),
     )
+    ckpt.done()
     print(f"Saved {args.out}")
 
 

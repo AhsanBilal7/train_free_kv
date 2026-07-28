@@ -31,12 +31,15 @@ What this module gives you
 
 No GPU is available on the login node; run these on the cluster (venv kv44).
 """
+import gc
 import json
 import math
 import glob
 import os
+import pickle
 import re
 import sys
+import tempfile
 
 import torch
 import torch.nn.functional as F
@@ -359,6 +362,30 @@ def _clone_dynamic_cache(cache):
 
 @torch.no_grad()
 def collect_and_lookahead(model, input_ids, attention_mask, decode_steps=32, capture_true=True):
+    """OOM-safe wrapper: if a sample is too large for the GPU, release everything and return
+    a skip sentinel (true_queries=None, per_layer=[]) so the caller drops it and continues,
+    instead of crashing the whole run. Otherwise returns the full capture dict."""
+    try:
+        return _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps, capture_true)
+    except torch.cuda.OutOfMemoryError:
+        cfg = model.model.config
+        M = cfg.num_particles
+        for layer in model.model.layers:
+            kvc = layer.self_attn.kv_cluster
+            kvc.reset_lookahead_buffers()
+            kvc.release_collected_state()
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(f"[oom] sample too large for GPU (n={int(input_ids.shape[1])}); skipping and continuing. "
+              f"Lower --max-length or set FIG_MAX_ANALYSIS_TOKENS to include long samples.", flush=True)
+        return {"n": int(input_ids.shape[1]), "M": M, "T": cfg.lookahead_len,
+                "particle_logprob": torch.zeros(M), "particle_entropy": torch.zeros(M),
+                "particle_weights": torch.zeros(M), "eta": float(cfg.particle_eta),
+                "lambda_h": float(cfg.lambda_h), "true_queries": None, "per_layer": []}
+
+
+@torch.no_grad()
+def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=32, capture_true=True):
     """Run collect prefill + M lookahead particles + (optionally) a greedy full-cache decode
     for the TRUE future queries. Returns a dict of captured, per-layer analysis tensors.
 
@@ -367,6 +394,17 @@ def collect_and_lookahead(model, input_ids, attention_mask, decode_steps=32, cap
     (b) the true-decode capture via PostRoPEQueryCapture.
     """
     device = input_ids.device
+    # Optional analysis-length cap (env FIG_MAX_ANALYSIS_TOKENS): the mechanism figures
+    # don't need the full 40K context, and prefill + M cache-clones for that length OOMs
+    # a shared GPU. Middle-truncate (keep head+tail) so very long samples still contribute
+    # at a memory-safe length. 0/unset = no cap (full length).
+    _cap = int(os.environ.get("FIG_MAX_ANALYSIS_TOKENS", "0") or 0)
+    if _cap and input_ids.shape[1] > _cap:
+        print(f"[analysis] truncating prompt {input_ids.shape[1]} -> {_cap} tokens "
+              f"(FIG_MAX_ANALYSIS_TOKENS)", flush=True)
+        half = _cap // 2
+        input_ids = torch.cat([input_ids[:, :half], input_ids[:, -half:]], dim=1)
+        attention_mask = torch.ones_like(input_ids) if attention_mask is not None else None
     n = input_ids.shape[1]
     cfg = model.model.config
     M = cfg.num_particles
@@ -477,6 +515,26 @@ def cleanup_clusters(model):
         kvc = layer.self_attn.kv_cluster
         kvc.reset_lookahead_buffers()
         kvc.release_collected_state()
+    torch.cuda.empty_cache()
+
+
+def free_sample(model, cap=None):
+    """Fully release a finished sample's GPU memory BEFORE the next one is processed.
+
+    cleanup_clusters() only clears the per-layer kv_cluster tensors, but the dict
+    returned by collect_and_lookahead still holds the true-query tensors AND per-layer
+    references to those same K/V tensors -- so nothing is actually freed until `cap`
+    is dropped. This clears `cap` too, then forces a GC pass and empties the CUDA
+    allocator cache. Without it, a finished (up to ~40K-token) sample's memory carries
+    into the next sample's allocation and OOMs when a longer dataset (e.g. NarrativeQA)
+    follows a shorter one (e.g. Qasper)."""
+    for layer in model.model.layers:
+        kvc = layer.self_attn.kv_cluster
+        kvc.reset_lookahead_buffers()
+        kvc.release_collected_state()
+    if isinstance(cap, dict):
+        cap.clear()
+    gc.collect()
     torch.cuda.empty_cache()
 
 
@@ -650,3 +708,81 @@ def png_path_for(npz_path, fig_base, out):
     base = os.path.basename(npz_path)
     tag = base.split("__", 1)[1].rsplit(".npz", 1)[0] if "__" in base else ""
     return os.path.join(d, f"{fig_base}__{tag}.png" if tag else f"{fig_base}.png")
+
+
+# ---------------------------------------------------------------------------
+# Resumable per-entry checkpointing. The heavy figure computes run per sample;
+# each one keeps its running accumulators in a plain dict and, after finishing a
+# sample, flushes that dict + the set of finished entry keys to a pickle on
+# SCRATCH (atomically). On the next launch the compute reloads that pickle and
+# skips already-finished entries, so an interrupted run resumes instead of
+# restarting. The FINAL .npz still lands in the requested (main) folder; the
+# scratch checkpoint is only the crash-safe running copy and is removed on
+# success.
+# ---------------------------------------------------------------------------
+def scratch_ckpt_dir():
+    """Where the per-entry running checkpoints live (scratch, never $HOME)."""
+    d = os.environ.get("FIG_CKPT_DIR")
+    if d:
+        return d
+    user = os.environ.get("USER", "user")
+    if os.path.isdir(f"/scratch/{user}"):
+        return f"/scratch/{user}/lorekv_fig_ckpt"
+    base = os.environ.get("TMPDIR") or tempfile.gettempdir()
+    return os.path.join(base, "lorekv_fig_ckpt")
+
+
+class Checkpoint:
+    """Crash-safe resume for a single compute run, keyed to its final .npz name.
+
+    Usage:
+        ckpt = common.Checkpoint(args.out)
+        state, done = ckpt.load_or({... fresh accumulators ...})
+        for sample in ...:
+            key = common.entry_key(sample)
+            if key in done: continue
+            ... update state[...] ...
+            done.add(key); ckpt.flush(state, done)
+        ... build final arrays from state ...; np.savez(args.out, **save)
+        ckpt.done()          # remove the scratch checkpoint
+    """
+    def __init__(self, final_out):
+        d = scratch_ckpt_dir()
+        os.makedirs(d, exist_ok=True)
+        base = os.path.splitext(os.path.basename(str(final_out)))[0]
+        # Hash the FULL destination path so two runs that share a basename but live in
+        # different run folders (e.g. different budgets) never share a checkpoint.
+        import hashlib
+        h = hashlib.md5(os.path.abspath(str(final_out)).encode()).hexdigest()[:10]
+        self.final_out = final_out
+        self.path = os.path.join(d, f"{base}__{h}.ckpt.pkl")
+
+    def load_or(self, fresh_state):
+        """Return (state, done_set): the resumed accumulators + finished keys, or a
+        fresh copy of `fresh_state` and an empty set if there is no checkpoint."""
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "rb") as f:
+                    blob = pickle.load(f)
+                print(f"[ckpt] resuming from {self.path} ({len(blob['done'])} entries done)", flush=True)
+                return blob["state"], set(blob["done"])
+            except Exception as e:  # corrupt/partial pickle -> start clean
+                print(f"[ckpt] could not read {self.path} ({e}); starting fresh", flush=True)
+        return fresh_state, set()
+
+    def flush(self, state, done):
+        tmp = self.path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump({"state": state, "done": list(done)}, f)
+        os.replace(tmp, self.path)          # atomic on POSIX
+
+    def done(self):
+        try:
+            os.remove(self.path)
+        except OSError:
+            pass
+
+
+def entry_key(sample):
+    """Stable per-entry id used to mark an entry finished (dataset + sample index)."""
+    return f"{sample['dataset']}#{sample['sample_idx']}"

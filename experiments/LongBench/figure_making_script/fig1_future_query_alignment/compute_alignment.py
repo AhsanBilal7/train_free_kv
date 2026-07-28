@@ -58,6 +58,10 @@ def main():
         args.out, args.out_dir, os.path.dirname(os.path.abspath(__file__)), "alignment_data",
         common.build_tag(args.config, model_path, args.budget, args.dataset))
 
+    ckpt = common.Checkpoint(args.out)
+    if os.path.exists(args.out) and not os.path.exists(ckpt.path):
+        print(f"{args.out} already complete; skipping recompute"); return
+
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
@@ -65,20 +69,24 @@ def main():
     lambda_h = model.model.config.lambda_h
 
     strategies = ["prompt_window", "single_traj", "uniform", "logprob", "lorekv"]
-    # per-strategy: list (over samples) of arrays (over m_list) of mean coverage
-    acc = {s: [] for s in strategies}
+    # per-strategy: list (over samples) of arrays (over m_list) of mean coverage; resumable.
+    state, done = ckpt.load_or({"acc": {s: [] for s in strategies}, "n_samples": 0})
+    acc = state["acc"]; n_samples = state["n_samples"]
 
-    n_samples = 0
     for sample in common.load_samples(
         args.benchmark, tokenizer, args.dataset, model_path, dataset_path=args.dataset_path,
         max_length=args.max_length, samples_per_dataset=args.samples_per_dataset,
     ):
+        key = common.entry_key(sample)
+        if key in done:
+            continue
         cap = common.collect_and_lookahead(
             model, sample["input_ids"], sample["attention_mask"],
             decode_steps=args.decode_steps, capture_true=True,
         )
         if cap["true_queries"] is None:
-            common.cleanup_clusters(model)
+            common.free_sample(model, cap)
+            done.add(key); ckpt.flush({"acc": acc, "n_samples": n_samples}, done)
             continue
 
         logprob = cap["particle_logprob"]
@@ -114,9 +122,10 @@ def main():
         for s in strategies:
             acc[s].append(per_m[s])
         n_samples += 1
+        done.add(key); ckpt.flush({"acc": acc, "n_samples": n_samples}, done)
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={cap['n']} "
               f"lorekv@M={args.m_list[-1]}: {per_m['lorekv'][-1]:.4f}", flush=True)
-        common.cleanup_clusters(model)
+        common.free_sample(model, cap)
 
     means = {s: np.nanmean(np.array(acc[s]), axis=0) for s in strategies}
     stds = {s: np.nanstd(np.array(acc[s]), axis=0) for s in strategies}
@@ -131,6 +140,7 @@ def main():
         **{f"mean_{s}": means[s] for s in strategies},
         **{f"std_{s}": stds[s] for s in strategies},
     )
+    ckpt.done()
     print(f"Saved {args.out}  ({n_samples} samples)")
 
 
