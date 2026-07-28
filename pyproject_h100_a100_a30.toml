@@ -1,0 +1,67 @@
+# H100 (sm_90) / A100 (sm_80) / A30 (sm_80)
+#
+#   module load WebProxy GCC/11.3.0 CUDA/12.1.1
+#   export UV_PROJECT_ENVIRONMENT=/scratch/user/$USER/uv_envs/train_free_kv
+#   cp pyproject_h100_a100_a30.toml pyproject.toml
+#   uv sync
+#   make i                     # builds csrc for sm_80 + sm_90
+#
+# The cache lives on scratch via [tool.uv] below. The venv path CANNOT go in
+# this file -- uv has no `project-environment` key -- so export the env var
+# above (put it in ~/.bashrc to make it permanent), or just create the venv on
+# scratch yourself: uv venv --python 3.11 /scratch/user/$USER/uv_envs/train_free_kv
+#
+# Python 3.11 + torch 2.2.2 are forced by flash-attn 2.4.0 (wheels stop at
+# cp311/torch2.2; 2.4.0 is not on PyPI, hence the URL). GCC 11.3.0 is required
+# by `make i` -- GCC 12.x cannot parse torch 2.2's pybind11 headers under nvcc.
+
+[build-system]
+requires = ["setuptools", "wheel", "packaging"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "andpro"
+version = "0.0.1"
+requires-python = ">=3.11,<3.12"
+
+dependencies = [
+    "torch==2.2.2",
+    "flash-attn==2.4.0",
+    "transformers==4.44.2",
+    "tokenizers==0.19.1",
+    "accelerate==0.33.0",
+    "datasets==2.21.0",
+    "numpy==1.26.4",
+    "tiktoken==0.7.0",
+    "jieba==0.42.1",
+    "rouge",
+    "rouge_score",
+    "nltk==3.9.1",
+    "fuzzywuzzy==0.18.0",
+    "python-Levenshtein==0.25.1",
+    "fschat==0.2.36",
+    "sentencepiece==0.2.0",
+    "protobuf==4.25.5",
+    "einops==0.8.0",
+    "tqdm==4.66.5",   # datasets 2.21 needs >=4.66.3, so not the original 4.66.1
+    "matplotlib==3.9.2",
+    "ninja==1.11.1.1",
+    "packaging==24.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.uv]
+# Keep the 20+ GB of wheels off the home quota.
+cache-dir = "/scratch/user/u.ab353540/uv_cache"
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+# Prebuilt wheel: no nvcc, no compile. Covers Ampere (sm_80) and Hopper (sm_90).
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.4.0/flash_attn-2.4.0%2Bcu122torch2.2cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
