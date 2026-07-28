@@ -11,12 +11,18 @@
 # above (put it in ~/.bashrc to make it permanent), or just create the venv on
 # scratch yourself: uv venv --python 3.11 /scratch/user/$USER/uv_envs/train_free_kv
 #
-# Python 3.11 + torch 2.2.2 are forced by flash-attn 2.4.0 (wheels stop at
-# cp311/torch2.2; 2.4.0 is not on PyPI, hence the URL). GCC 11.3.0 is required
-# by `make i` -- GCC 12.x cannot parse torch 2.2's pybind11 headers under nvcc.
+# Python 3.11 + torch 2.1.2 are forced by flash-attn 2.4.0. Its wheels stop at
+# cp311, and its "torch2.2" wheels were built against a torch 2.2 NIGHTLY, before
+# c10::optional became std::optional -- they fail on every released torch 2.2.x
+# with: undefined symbol: _ZN2at4_ops9_pad_enum4call...c10::optional<double>.
+# The torch2.1 wheel below was built against released torch 2.1, so it links.
+# 2.4.0 is not on PyPI at all (only 2.4.0.post1), hence the URL.
+#
+# GCC 11.3.0 is required by `make i` -- GCC 12.x cannot parse torch's bundled
+# pybind11 headers under nvcc.
 
 [build-system]
-requires = ["setuptools", "wheel", "packaging"]
+requires = ["setuptools<81", "wheel", "packaging"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -25,7 +31,7 @@ version = "0.0.1"
 requires-python = ">=3.11,<3.12"
 
 dependencies = [
-    "torch==2.2.2",
+    "torch==2.1.2",
     "flash-attn==2.4.0",
     "transformers==4.44.2",
     "tokenizers==0.19.1",
@@ -47,6 +53,9 @@ dependencies = [
     "matplotlib==3.9.2",
     "ninja==1.11.1.1",
     "packaging==24.1",
+    # torch 2.1.2's cpp_extension imports pkg_resources, which setuptools 81
+    # removed -- `make i` dies with ModuleNotFoundError without this cap.
+    "setuptools>=68,<81",
 ]
 
 [tool.setuptools.packages.find]
@@ -64,7 +73,14 @@ explicit = true
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }
 # Prebuilt wheel: no nvcc, no compile. Covers Ampere (sm_80) and Hopper (sm_90).
-flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.4.0/flash_attn-2.4.0%2Bcu122torch2.2cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+# Must be the torch2.1 asset -- see the ABI note in the header.
+flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.4.0/flash_attn-2.4.0%2Bcu122torch2.1cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
 
 
 # echo 'export UV_PROJECT_ENVIRONMENT=/scratch/user/u.ab353540/uv_envs/train_free_kv; export UV_CACHE_DIR=/scratch/user/u.ab353540/uv_cache; export PATH="/scratch/user/u.ab353540/bin:/scratch/user/u.ab353540/uv_envs/train_free_kv/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+
+# module purge
+# module load WebProxy GCC/11.3.0 CUDA/12.1.1
+# uv sync
+# rm -rf csrc/build csrc/tiny_pkg.egg-info    # old .so was built against torch 2.2.2
+# make i
