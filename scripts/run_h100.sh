@@ -96,6 +96,7 @@ echo "Using GPU_ID=$GPU_ID"
 # one value (or `EXPERIMENT=RULER bash scripts/run_h100.sh`):
 #   LongBench  -> experiments/LongBench
 #   RULER      -> experiments/RULER
+#   NIAH       -> experiments/NIAH  (conventional single-needle Needle-In-A-Haystack)
 export EXPERIMENT="${EXPERIMENT:-LongBench}"
 echo "Running experiment: $EXPERIMENT"
 
@@ -148,8 +149,10 @@ echo "Running with BUDGET(s): $BUDGET"
 #                musique trec triviaqa samsum gov_report qmsum multi_news
 #                passage_count passage_retrieval_en lcc repobench-p
 #   RULER     -> sequence-length configs: 4096 8192 16384
+#   NIAH      -> target context lengths (tokens): 4096 8192 16384
+#                (needle depths are a separate sweep: set NIAH_DEPTHS)
 # Set it here (or on the CLI) ONLY to override that per-experiment default, e.g.
-#   DATASET_NAME_LIST="qasper trec"  (LongBench)  or  "4096 8192"  (RULER)
+#   DATASET_NAME_LIST="qasper trec"  (LongBench)  or  "4096 8192"  (RULER/NIAH)
 # Left empty => the experiment's run.sh chooses its own full default set.
 # =============================================================================
 export DATASET_NAME_LIST="${DATASET_NAME_LIST:-}"
