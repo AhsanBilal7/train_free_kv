@@ -101,10 +101,34 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
 
 def get_pred(model, tokenizer, data, max_length, device, model_name_or_path, out_path, mode=None):
     device = "cuda:0"
+    tmp_path = f"{out_path}_tmp"
+
+    # --- Resume: reuse rows already completed by a prior interrupted run ---
+    # The _tmp file streams one JSON object per finished row (flushed each step).
+    # Count only fully-flushed (valid-JSON) lines; a truncated final line means the
+    # process died mid-write, so we stop there and regenerate that row onward.
     preds = []
     times = []
-    with open(f"{out_path}_tmp", "w", encoding="utf-8") as f:
-        for json_obj in tqdm(data):
+    done = 0
+    if os.path.exists(tmp_path):
+        with open(tmp_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    break  # partial trailing line -> resume from here
+                preds.append(obj["pred"])
+                times.append(obj["time"])
+                done += 1
+        if done:
+            print(f"{tmp_path}: resuming from {done}/{len(data)} completed rows")
+
+    # Append so previously-completed rows are preserved (do NOT truncate).
+    with open(tmp_path, "a", encoding="utf-8") as f:
+        for json_obj in tqdm(data[done:]):
             input_ids, attention_mask = build_ruler_input(
                 tokenizer, json_obj["context"], json_obj["question"], json_obj["answer_prefix"], max_length, device
             )
