@@ -129,12 +129,12 @@ def main():
             tq = cap["true_queries"][li]
             if kvc.full_key_states is None or tq is None:
                 continue
-            key = repeat_kv(kvc.full_key_states, kvc.num_key_value_groups)[0]   # [H,n,D]
+            k_full = repeat_kv(kvc.full_key_states, kvc.num_key_value_groups)[0]   # [H,n,D]
             val = repeat_kv(kvc.full_value_states, kvc.num_key_value_groups)[0]
             q = tq[0]                                                            # [H,Tt,D]
-            H, n, D = key.shape
+            H, n, D = k_full.shape
 
-            key_b = key.unsqueeze(0); val_b = val.unsqueeze(0)
+            key_b = k_full.unsqueeze(0); val_b = val.unsqueeze(0)
             batches = [kvc.window_queries]
             flags = [True]
             for m in range(M):
@@ -148,16 +148,16 @@ def main():
                 s_multi = s_multi + lambda_L * float(weights[m]) * scores[1 + m]
             # attention-only importance (SnapKV-style): mean window attention weight
             qa = kvc.window_queries[0].float()                                  # [H,w,D]
-            aw_logits = torch.matmul(qa, key.transpose(1, 2).float()) / math.sqrt(D)
+            aw_logits = torch.matmul(qa, k_full.transpose(1, 2).float()) / math.sqrt(D)
             s_attn = F.softmax(aw_logits, dim=-1).mean(1)                       # [H,n]
 
             mask_lorekv = head_topb_mask(s_multi, n, args.budget, window_size)
             mask_attn = head_topb_mask(s_attn, n, args.budget, window_size)
 
             q = q.float()
-            o_full = attn_outputs(q, key.float(), val.float())
-            o_lk = attn_outputs(q, key.float(), val.float(), mask_lorekv)
-            o_at = attn_outputs(q, key.float(), val.float(), mask_attn)
+            o_full = attn_outputs(q, k_full.float(), val.float())
+            o_lk = attn_outputs(q, k_full.float(), val.float(), mask_lorekv)
+            o_at = attn_outputs(q, k_full.float(), val.float(), mask_attn)
 
             def cos_rel(o_ev):
                 c = F.cosine_similarity(o_ev, o_full, dim=-1).flatten()          # [H*Tt]

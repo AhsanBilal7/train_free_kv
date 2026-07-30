@@ -24,6 +24,12 @@
 #   BUDGET=256 SAMPLES=5 CONFIG_FILE=config/tlckv-pe-mx-unif-topk.conf bash scripts/run_figures.sh
 #   PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from existing .npz (no GPU needed)
 
+module purge
+module load WebProxy
+module load GCC/11.3.0
+module load CUDA/12.1.1
+
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +39,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 set -a
 [[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
 set +a
+
 
 # =============================================================================
 # Environment exports (identical policy to scripts/run_h100.sh: nothing under $HOME)
@@ -94,7 +101,7 @@ export PLOT_ONLY="${PLOT_ONLY:-0}"                  # 1 = skip compute, only re-
 
 # Default dataset differs by benchmark: LongBench single-doc QA vs a RULER length.
 if [ "$BENCHMARK" = "ruler" ]; then
-    DATASET="${DATASET:-8192}"
+    DATASET="${DATASET:-4096}"
     FIG_DIR="$REPO_ROOT/experiments/RULER/figure_making_script"
 else
     DATASET="${DATASET:-single}"                    # 'single' | 'full' | comma-list of tasks
@@ -104,8 +111,10 @@ fi
 echo "=============================================================="
 echo " BENCHMARK=$BENCHMARK  DATASET=$DATASET  BUDGET=$BUDGET  SAMPLES=$SAMPLES"
 echo " CONFIG_FILE=$CONFIG_FILE"
-echo " FIG_DIR=$FIG_DIR"
+echo " FIG_CKPT_DIR=$FIG_CKPT_DIR"
 echo " FIGURES=$FIGURES   PLOT_ONLY=$PLOT_ONLY"
+echo $FIG_CKPT_DIR
+
 echo "=============================================================="
 
 # Flags shared by every compute_*.py (RULER wrappers accept & pass these through).
@@ -219,3 +228,6 @@ fi
 echo "=============================================================="
 echo " Done. Figures + .npz data written under: $FIG_DIR/figN_*/"
 echo "=============================================================="
+
+
+# for f in 3 4 5 9 8 7 2 1; do echo "===== Running Figure $f ====="; FIGURES="$f" BENCHMARK=ruler bash scripts/run_figures.sh; status=$?; echo "===== Figure $f finished with exit code $status ====="; done

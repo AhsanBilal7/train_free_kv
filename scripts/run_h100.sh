@@ -39,6 +39,13 @@ _load_conf() {
         if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*) ]]; then
             local key="${BASH_REMATCH[1]}"
             local value="${BASH_REMATCH[2]}"
+            # Strip inline comments (`KEY = 0.0   # entropy penalty OFF`).
+            # Values here are numbers, paths, or space-separated sweep lists, so
+            # a '#' preceded by whitespace always starts a comment. Without this,
+            # the comment words leak into the value and each run.sh sweep loop
+            # (`for lambda_h in ${LAMBDA_H}`) iterates over them as parameters.
+            value="${value%%[[:space:]]#*}"
+            [[ "$value" == "#"* ]] && value=""
             value="${value%"${value##*[![:space:]]}"}"  # trim trailing whitespace
             # Only set if the variable is not already in the environment (CLI wins)
             [[ -z "${!key+x}" ]] && export "$key"="$value"

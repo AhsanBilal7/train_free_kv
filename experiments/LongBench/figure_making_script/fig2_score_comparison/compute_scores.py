@@ -129,7 +129,7 @@ def main():
             kvc = layer.self_attn.kv_cluster
             if kvc.full_key_states is None:
                 continue
-            key = repeat_kv(kvc.full_key_states, kvc.num_key_value_groups)
+            k_full = repeat_kv(kvc.full_key_states, kvc.num_key_value_groups)
             val = repeat_kv(kvc.full_value_states, kvc.num_key_value_groups)
             batches = [kvc.window_queries]
             flags = [True]
@@ -138,7 +138,7 @@ def main():
                 q_m = torch.cat(buf, dim=2) if buf else kvc.window_queries[:, :, :0, :]
                 batches.append(q_m); flags.append(False)
 
-            scores = kvc._project_and_score(key, val, batches, flags)   # list [H, n]
+            scores = kvc._project_and_score(k_full, val, batches, flags)   # list [H, n]
             s_win = scores[0]
             s_single = s_win + lambda_L * scores[1]
             s_multi = s_win.clone()
@@ -146,7 +146,7 @@ def main():
                 s_multi = s_multi + lambda_L * float(weights[m]) * scores[1 + m]
 
             m_scores = {
-                "attention": attention_score_layer(kvc, key),
+                "attention": attention_score_layer(kvc, k_full),
                 "single_lookahead": s_single.mean(0).cpu().numpy(),
                 "lorekv_multi": s_multi.mean(0).cpu().numpy(),
             }

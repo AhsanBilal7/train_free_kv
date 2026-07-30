@@ -61,7 +61,7 @@ export REPO_ROOT
 # --- Job definition (all overridable via --export=ALL,VAR=...) ---------------
 export EXPERIMENT="${EXPERIMENT:-RULER}"
 # export MODE="${MODE:-andpro}"
-export BUDGET="${BUDGET:-128 256}"
+export BUDGET="${BUDGET:-512 1024}"
 CONFIG_FILE="${CONFIG_FILE:-config/andpro.conf}"
 # run_h100.sh only checks `-f "$CONFIG_FILE"`, so make a relative path absolute
 # against the repo root -- the compute node's cwd is not guaranteed to be there.
@@ -88,3 +88,11 @@ echo "=============================================================="
 
 # Hand off to the shared launcher (its own #SBATCH header is inert under bash).
 bash "$REPO_ROOT/scripts/run_h100.sh"
+
+
+
+
+# for cfg in config/andpro.conf config/tlckv-m1-adap-div.conf config/tlckv-m1-adap-topk.conf config/tlckv-m1-unif-topk.conf config/tlckv-p-m4-adap-div.conf config/tlckv-p-m4-adap-topk.conf config/tlckv-p-m4-unif-topk.conf config/tlckv-pe-m4-adap-div.conf config/tlckv-pe-m4-adap-topk.conf config/tlckv-pe-m4-unif-topk.conf config/tlckv-pe-mx-adap-div.conf config/tlckv-pe-mx-unif-topk.conf; do echo "===== Running $cfg ====="; EXPERIMENT=NIAH CONFIG_FILE="$cfg" BUDGET=128  bash scripts/run_h100_aces.sh; done
+
+
+
