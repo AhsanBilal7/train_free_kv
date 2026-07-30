@@ -1,6 +1,6 @@
 #!/bin/bash
-#SBATCH -p sooner_gpu_test_h100
-#SBATCH --gres=gpu:1
+#SBATCH -p disc
+#SBATCH --gres=gpu:2
 #SBATCH --job-name=lorekv-figures
 #SBATCH --output=/home/ahsan/LLM-AnDPro/logs/out_figures_%j.log
 #SBATCH --error=/home/ahsan/LLM-AnDPro/logs/err_figures_%j.log
@@ -47,7 +47,9 @@ export PIP_CACHE_DIR="${PIP_CACHE_DIR:-/scratch/$USER/pip_cache}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/scratch/$USER/.cache}"
 export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/scratch/$USER/torch_extensions}"
 export CUDA_CACHE_PATH="${CUDA_CACHE_PATH:-/scratch/$USER/.nv/ComputeCache}"
-mkdir -p "$TMPDIR" "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR" "$CUDA_CACHE_PATH"
+# Crash-safe per-sample figure checkpoints (common.scratch_ckpt_dir reads FIG_CKPT_DIR).
+export FIG_CKPT_DIR="${FIG_CKPT_DIR:-/scratch/$USER/lorekv_fig_ckpt}"
+mkdir -p "$TMPDIR" "$PIP_CACHE_DIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR" "$CUDA_CACHE_PATH" "$FIG_CKPT_DIR"
 
 # Hugging Face caches on scratch.
 export HF_HOME="${HF_HOME:-/scratch/$USER/hf_cache}"
@@ -219,3 +221,7 @@ fi
 echo "=============================================================="
 echo " Done. Figures + .npz data written under: $FIG_DIR/figN_*/"
 echo "=============================================================="
+
+
+
+# for f in 9 8 7 5 4 3 2 1; do echo "===== Running Figure $f ====="; CUDA_VISIBLE_DEVICES=1,2,3 FIGURES="$f" bash scripts/run_figures.sh; status=$?; echo "===== Figure $f finished with exit code $status ====="; done

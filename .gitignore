@@ -8,6 +8,7 @@ __pycache__/
 experiments/LongBench/pred/*
 experiments/LongBench/pred_e/*
 experiments/RULER/pred/*
+experiments/NIAH/pred/*
 
 # Distribution / packaging
 .Python

@@ -12,6 +12,11 @@ set +a
 MODEL_PATH="${MODEL_PATH:-mistralai/Mistral-7B-Instruct-v0.2}"
 DATASET_PATH="${DATASET_PATH:-simonjegou/ruler}"
 
+# Short tag for output folder names, derived from the model (basename of the HF
+# id / local path). Keeps each model's pred/ results separate. Override with
+# MODEL_TAG=... if you want a custom label.
+MODEL_TAG="${MODEL_TAG:-$(basename "$MODEL_PATH")}"
+
 GPU_ID="${GPU_ID:-4}"
 echo "run.sh using GPU_ID=$GPU_ID"
 
@@ -69,7 +74,7 @@ for budget in "${budget_scopes[@]}"; do
                                      "alpha=$robust_alpha beta=$robust_topk_beta" \
                                      "lK=$lambda_k lV=$lambda_v tau=$budget_tau"
 
-                                out_name="${mode}_Mistral-7B_${budget}_chunk_${chunk_size}_M_${num_particles}_T_${lookahead_len}_lL_${lambda_lookahead}_lT_${lookahead_temperature}_lH_${lambda_h}_eta_${particle_eta}_alpha_${robust_alpha}_beta_${robust_topk_beta}_lK_${lambda_k}_lV_${lambda_v}_tau_${budget_tau}"
+                                out_name="${mode}_${MODEL_TAG}_${budget}_chunk_${chunk_size}_M_${num_particles}_T_${lookahead_len}_lL_${lambda_lookahead}_lT_${lookahead_temperature}_lH_${lambda_h}_eta_${particle_eta}_alpha_${robust_alpha}_beta_${robust_topk_beta}_lK_${lambda_k}_lV_${lambda_v}_tau_${budget_tau}"
 
                                 CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
                                   --max_length 64000 \
@@ -128,7 +133,7 @@ for budget in "${budget_scopes[@]}"; do
             --budget $budget \
             --chunk_size $chunk_size \
             --lambda_red $lambda_red \
-            --out_name "${mode}_Mistral-7B_${budget}_chunk_${chunk_size}_red_${lambda_red}" \
+            --out_name "${mode}_${MODEL_TAG}_${budget}_chunk_${chunk_size}_red_${lambda_red}" \
             --dataset_name_list "${dataset_name_list[@]}"
 
         fi
