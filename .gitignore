@@ -180,4 +180,4 @@ experiments/RULER/results_summary.csv
 *.jsonl
 *.json
 *.png
-*.jsonl_tmp
+*.jsonl_tmp*.npz
