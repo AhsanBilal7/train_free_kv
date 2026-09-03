@@ -181,3 +181,4 @@ experiments/RULER/results_summary.csv
 *.json
 *.png
 *.jsonl_tmp*.npz
+*.npz
