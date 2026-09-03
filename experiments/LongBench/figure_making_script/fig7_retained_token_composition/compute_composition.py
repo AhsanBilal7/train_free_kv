@@ -14,7 +14,7 @@ answer/evidence (matches a gold answer span), number, capitalized entity,
 punctuation/boilerplate, other.
 
 Saved: composition_data.npz. Run on the GPU cluster, e.g.:
-  python compute_composition.py --config config/tlckv-pe-m4-adap-topk.conf \
+  python compute_composition.py --config config/lorekv-ent-adap-topk.conf \
          --dataset single --samples-per-dataset 4 --budget 128
 """
 import argparse
@@ -70,7 +70,7 @@ def classify_tokens(ids, tokenizer, answers, window_size):
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"))
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single")
@@ -125,16 +125,19 @@ def main():
             kvc = layer.self_attn.kv_cluster
             if kvc.full_key_states is None:
                 continue
-            key, val = common.get_repeated_kv(kvc)
-            nn = key.shape[2]
+            # k_rep/v_rep, NOT key/val: `key` is this sample's checkpoint entry id, and
+            # shadowing it made the later done.add(key) store a CUDA tensor, so resume
+            # never skipped a finished sample.
+            k_rep, v_rep = common.get_repeated_kv(kvc)
+            nn = k_rep.shape[2]
             if nn != n:
                 # defensive: the analysis uses the prompt-side tokens the cache actually holds
                 n = nn
             batches, flags = common.make_lookahead_batches(kvc, M)
-            scores = kvc._project_and_score(key, val, batches, flags)
+            scores = kvc._project_and_score(k_rep, v_rep, batches, flags)
             s_win, _, s_multi = common.combine_lookahead_scores(scores, weights, lambda_L, M)
             qa = kvc.window_queries[0].float()
-            aw = torch.matmul(qa, key[0].transpose(1, 2).float()) / math.sqrt(key.shape[-1])
+            aw = torch.matmul(qa, k_rep[0].transpose(1, 2).float()) / math.sqrt(k_rep.shape[-1])
             s_attn = F.softmax(aw, dim=-1).mean(1)
             method_score = {"attention": s_attn, "andpro_window": s_win, "lorekv_multi": s_multi}
             for m in methods:

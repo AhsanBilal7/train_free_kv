@@ -5,8 +5,9 @@ A  calibration curve  : bin particles by predicted confidence, plot mean predict
 B  risk-coverage       : keep the most-confident fraction of particles, plot that
                         coverage vs mean alignment error of the kept particles.
 C  correlation bars    : Spearman(signal, oracle utility) for log-prob, -entropy,
-                        combined R_m, and the normalized weight -- the critical
-                        ablation that isolates what entropy adds.
+                        combined R_m, the normalized weight, and the trajectory
+                        disagreement -D_m -- the critical ablation that isolates
+                        what each second term of R_m actually adds.
 """
 import argparse
 import os
@@ -83,9 +84,12 @@ def main():
         "combined $R_m$": d["combined"],
         "weight $\\omega_m$": d["weight"],
     }
+    # the term that replaces entropy in R_m (older .npz files predate it)
+    if "divergence_z" in d:
+        signals["$-\\hat{D}_m$ (disagr.)"] = -d["divergence_z"]
     names = list(signals)
     corr = [_spearman(signals[k], util) for k in names]
-    colors = ["#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+    colors = ["#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"][:len(names)]
     ax3.bar(np.arange(len(names)), corr, color=colors)
     ax3.set_xticks(np.arange(len(names)))
     ax3.set_xticklabels(names, fontsize=8)

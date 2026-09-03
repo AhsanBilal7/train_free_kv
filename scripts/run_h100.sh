@@ -1,12 +1,16 @@
 #!/bin/bash
-#SBATCH -p sooner_gpu_test_h100_dual
-#SBATCH --gres=gpu:1
-#SBATCH --job-name=tlckv-m1-adap-topk.conf
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:h100:1
+#SBATCH --time=2-00:00:00
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=80G
+#SBATCH --job-name=lorekv-ent-adap-topk
 #SBATCH --output=/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_%j.log
 #SBATCH --error=/home/ahsan/LLM-AnDPro/logs/err_andpro_h100_%j.log
-#SBATCH --time=2-00:00:00
 
-# CONFIG_FILE=config/tlckv-m1-adap-topk.conf sbatch scripts/run_h100.sh
+# CONFIG_FILE=config/lorekv-ent-adap-topk.conf sbatch scripts/run_h100.sh
 
 set -euo pipefail
 
@@ -23,13 +27,6 @@ if [[ ! -d "$REPO_ROOT/experiments" && -n "$SLURM_SUBMIT_DIR" ]]; then
   REPO_ROOT="$SLURM_SUBMIT_DIR"
 fi
 CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/default.conf}"
-
-# --- Load central path/env configuration (.env) ---
-# All machine-specific paths (venv, scratch caches, HF cache, log dir, model)
-# live in $REPO_ROOT/.env. Auto-export everything it defines.
-set -a
-[[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
-set +a
 
 _load_conf() {
     local file="$1"
@@ -59,6 +56,20 @@ if [[ -f "$CONFIG_FILE" ]]; then
 else
     echo "WARNING: Config file not found: $CONFIG_FILE (falling back to inline defaults)"
 fi
+
+# --- Load central path/env configuration (.env) ---
+# All machine-specific paths (venv, scratch caches, HF cache, log dir, model)
+# live in $REPO_ROOT/.env. Auto-export everything it defines.
+#
+# ORDER MATTERS: this is sourced AFTER the config file. Every assignment in .env
+# is ${VAR:-default}-guarded, so sourcing it last makes it a pure *fallback*
+# layer and yields the intended precedence CLI > $CONFIG_FILE > .env. Sourcing
+# it first silently broke `MODEL_PATH = ...` in every config: .env exports
+# MODEL_PATH unconditionally, _load_conf skips keys already in the environment,
+# so config/*-llama.conf ran Mistral (its MODEL_PATH was never applied).
+set -a
+[[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
+set +a
 
 source "${VENV_PATH:?VENV_PATH not set — check .env}/bin/activate"
 
@@ -112,6 +123,9 @@ echo "Running experiment: $EXPERIMENT"
 # run.sh (experiments/<EXPERIMENT>/run.sh). It is only read here if the user
 # exports it explicitly (which then overrides the experiment default).
 export MODEL_PATH="${MODEL_PATH:-mistralai/Mistral-7B-Instruct-v0.2}"
+# Echoed because MODEL_TAG (= basename) names every pred/ output folder: if this
+# line does not match the model the config asked for, the run is mislabelled.
+echo "Running with MODEL_PATH: $MODEL_PATH"
 
 # =============================================================================
 # KV eviction mode (§3 of the paper)
@@ -156,8 +170,11 @@ echo "Running with BUDGET(s): $BUDGET"
 #                musique trec triviaqa samsum gov_report qmsum multi_news
 #                passage_count passage_retrieval_en lcc repobench-p
 #   RULER     -> sequence-length configs: 4096 8192 16384
-#   NIAH      -> target context lengths (tokens): 4096 8192 16384
-#                (needle depths are a separate sweep: set NIAH_DEPTHS)
+#   NIAH      -> target context lengths (tokens): 4096 8192 16384 32768
+#                (needle depths are a separate sweep: set NIAH_DEPTHS;
+#                 single vs. multi needle: set NIAH_TASK=single|multi)
+#                Keep every length inside the model's max_position_embeddings
+#                (Mistral-7B-Instruct-v0.2: 32768, Llama-3.1-8B: 131072).
 # Set it here (or on the CLI) ONLY to override that per-experiment default, e.g.
 #   DATASET_NAME_LIST="qasper trec"  (LongBench)  or  "4096 8192"  (RULER/NIAH)
 # Left empty => the experiment's run.sh chooses its own full default set.
@@ -234,32 +251,71 @@ export LOOKAHEAD_TEMPERATURE="${LOOKAHEAD_TEMPERATURE:-1.0}"
 echo "Running with (causal_lookahead) NUM_PARTICLES=$NUM_PARTICLES LOOKAHEAD_LEN=$LOOKAHEAD_LEN LAMBDA_LOOKAHEAD=$LAMBDA_LOOKAHEAD"
 
 # =============================================================================
-# causal_lookahead — particle confidence weighting (Eq. 7-8)
+# causal_lookahead — particle reliability weighting (Eq. 3 / Eq. 6)
 #   (ignored by andpro and causal_forward_only)
 #
-# LAMBDA_H (lambda_H): entropy penalty weight in the per-particle confidence
-#   score R_m (Eq. 7):
-#     R_m = (1/T) * sum_t log p(y_t^m | X, y_{<t}^m)
-#           - lambda_H * (1/T) * sum_t H( p(· | X, y_{<t}^m) )
-#   A particle with high predictive entropy is penalized, reducing its weight
-#   omega_m (Eq. 8) even if its average log-probability is high.
+# For each sampled token define the CENTERED per-step score
 #
-# To DISABLE the entropy penalty (use raw average log-probability only):
-#   LAMBDA_H = 0.0
+#     c_u = log q(y_u | h_u) + H( q(. | h_u) ),        E[c_u | h_u] = 0
 #
-# Sweepable: LAMBDA_H="0.0 0.1 0.3"
+# (the particles are drawn from q itself, so the log-probability term already
+# CONTAINS the entropy; adding H back removes it). A trajectory is then scored as
+#
+#     R_m = BETA * cbar_m  -  GAMMA * Hbar_m  -  LAMBDA_D * Dhat_m
+#     omega = softmax(R)                                   (Eq. 6)
+#
+# Three INDEPENDENT channels, one knob each:
+#   BETA      branch atypicality -- did this particle take steps the model itself
+#             deemed improbable at the contexts it visited?
+#   GAMMA     context uncertainty -- an explicit, deliberate preference for
+#             low-entropy histories (the near-greedy deployment operating point).
+#   LAMBDA_D  ensemble disagreement -- Eq. 4/5, unchanged, off by default.
+#
+# There is NO eta any more: softmax(eta*(b*c - g*H - lD*D)) is exactly
+# softmax((eta*b)*c - (eta*g)*H - (eta*lD)*D), so four symbols carried only three
+# degrees of freedom. It is absorbed into (BETA, GAMMA, LAMBDA_D).
+#
+# Sweepable: BETA="0.0 1.0 2.0"   GAMMA="0.0 1.0 1.3"   LAMBDA_D="0.0 0.3"
 # =============================================================================
-export LAMBDA_H="${LAMBDA_H:-0.0}"
+_BETA_GIVEN="${BETA+set}${GAMMA+set}"      # record before defaulting, for the shim below
+export BETA="${BETA:-1.0}"
+export GAMMA="${GAMMA:-0.0}"
+export LAMBDA_D="${LAMBDA_D:-0.0}"
 
-# PARTICLE_ETA (eta): inverse-temperature (sharpness) of the particle-weight
-#   softmax (Eq. 8):
-#     omega_m = exp(eta * R_m) / sum_r exp(eta * R_r)
-#   eta → 0  → uniform weights (all particles contribute equally regardless of
-#              confidence; confidence weighting is effectively disabled).
-#   eta → ∞  → hard selection of the single most-confident particle.
-#   Soft weighting (finite eta > 0) is preferred so no single particle dominates.
-# Sweepable: PARTICLE_ETA="0.5 1.0 2.0"
-export PARTICLE_ETA="${PARTICLE_ETA:-1.0}"
+# NORMALIZE_TYPICALITY (0/1): use the varentropy-normalized typicality
+#   ctilde_m = cbar_m / sqrt(Vbar_m / T) instead of cbar_m. Var(cbar_m) scales with
+#   the prompt's varentropy (Prop. 3), so a single softmax scale is not calibrated
+#   across prompts; this makes the channel unit-scale by construction. Reported as
+#   an ABLATED SWITCH, not a default -- test V5 decides whether it earns a place.
+export NORMALIZE_TYPICALITY="${NORMALIZE_TYPICALITY:-0}"
+
+# --- Legacy (lambda_H, eta) compatibility shim -------------------------------
+# The pre-reparametrization configs under config/ set LAMBDA_H and PARTICLE_ETA.
+# Since (1/T) sum_u log q(y_u|h_u) = cbar_m - Hbar_m, the old score is exactly
+#   R_old = cbar_m - (1 + LAMBDA_H) * Hbar_m - LAMBDA_D * Dhat_m,
+# so (BETA, GAMMA, LAMBDA_D) = (eta, eta*(1 + LAMBDA_H), eta*LAMBDA_D) reproduces
+# any published run bit-for-bit. Apply the map only when the caller did NOT set the
+# new knobs, so a new-style config always wins.
+#
+# NOTE the correction this makes visible: the old "log-probability only" setting
+# LAMBDA_H = 0 maps to GAMMA = 1 -- a FULL unit of entropy penalty. It was never a
+# no-penalty control. Uniform weights are BETA=GAMMA=LAMBDA_D=0.
+if [[ -n "${LAMBDA_H:-}" || -n "${PARTICLE_ETA:-}" ]]; then
+    _eta="${PARTICLE_ETA:-1.0}"
+    _lh="${LAMBDA_H:-0.0}"
+    if [[ -z "$_BETA_GIVEN" ]]; then
+        BETA="$(python3 -c "print(${_eta})")"
+        GAMMA="$(python3 -c "print(${_eta} * (1.0 + ${_lh}))")"
+        LAMBDA_D="$(python3 -c "print(${_eta} * ${LAMBDA_D})")"
+        export BETA GAMMA LAMBDA_D
+        echo "NOTE: legacy LAMBDA_H=${_lh} PARTICLE_ETA=${_eta} mapped to" \
+             "BETA=$BETA GAMMA=$GAMMA LAMBDA_D=$LAMBDA_D (see paper Prop. 1)."
+    else
+        echo "NOTE: LAMBDA_H/PARTICLE_ETA are set but ignored -- BETA/GAMMA were given explicitly."
+    fi
+fi
+
+echo "Running with (causal_lookahead) reliability weighting: BETA=$BETA GAMMA=$GAMMA LAMBDA_D=$LAMBDA_D NORMALIZE_TYPICALITY=$NORMALIZE_TYPICALITY"
 
 # =============================================================================
 # causal_lookahead — robust aggregation over prompt and lookahead queries (Eq. 15-17)
@@ -278,11 +334,12 @@ export PARTICLE_ETA="${PARTICLE_ETA:-1.0}"
 # =============================================================================
 export ROBUST_ALPHA="${ROBUST_ALPHA:-0.5}"
 
-# ROBUST_TOPK_BETA (beta): fraction of queries used in the robust top-beta
-#   average (Eq. 16). K_beta = ceil(beta * |E|).
-#   beta = 1.0 → all queries kept → TopAvg_beta = Mean → rho = Mean regardless
+# ROBUST_TOPK_BETA (kappa in the paper -- renamed from beta, which now denotes the
+#   Eq. 3 typicality coefficient): fraction of queries used in the robust top-kappa
+#   average (App. C). K_kappa = ceil(kappa * |E|).
+#   kappa = 1.0 → all queries kept → TopAvg = Mean → rho = Mean regardless
 #               of alpha (equivalent to disabling the robust aggregation).
-#   beta = 0.5 → top 50% of per-query scores kept.
+#   kappa = 0.5 → top 50% of per-query scores kept.
 # Sweepable: ROBUST_TOPK_BETA="0.25 0.5 0.75 1.0"
 export ROBUST_TOPK_BETA="${ROBUST_TOPK_BETA:-0.5}"
 
@@ -331,6 +388,26 @@ export LAMBDA_V="${LAMBDA_V:-0.0}"
 export BUDGET_TAU="${BUDGET_TAU:-1.0}"
 
 # =============================================================================
+# causal_lookahead -- perturbation objective (App. C (iii), Table "Ablations")
+#
+# Replaces WHAT Eq. 14 measures for a candidate token under a scoring query. The
+# lookahead queries, the reliability weights omega_m, the lambda_L mixing, the
+# head-budget rule and the selection rule are all untouched, so this is a
+# single-factor control on the deletion score alone:
+#
+#   projected    s_{q,i} = |c_{q,i}| * || W_O v_i - W_O y_q ||   <- the core method
+#   unprojected  s_{q,i} = |c_{q,i}| * ||      v_i -      y_q ||   (W_O -> identity)
+#   attention    s_{q,i} = a_{q,i}                                 (attention mass)
+#
+# The two ablation values append `_obj_<value>` to the run folder; `projected`
+# adds nothing, so every already-collected result keeps its exact folder name.
+#
+# Sweepable: SCORE_OBJECTIVE="projected unprojected attention"
+# =============================================================================
+export SCORE_OBJECTIVE="${SCORE_OBJECTIVE:-projected}"
+echo "Running with (causal_lookahead) SCORE_OBJECTIVE=$SCORE_OBJECTIVE"
+
+# =============================================================================
 # Analysis figures inside each run (opt-in; causal_lookahead runs only)
 #
 # When MAKE_FIGURES=1, after each causal_lookahead prediction finishes, run.sh
@@ -344,7 +421,7 @@ export BUDGET_TAU="${BUDGET_TAU:-1.0}"
 # own DATASET_NAME_LIST. The main experiment is unaffected when MAKE_FIGURES=0.
 #
 # Example:  MAKE_FIGURES=1 FIG_SAMPLES=2 FIG_LIST="1 2 6" \
-#           CONFIG_FILE=config/tlckv-pe-m4-adap-topk.conf bash scripts/run_h100.sh
+#           CONFIG_FILE=config/lorekv-ent-adap-topk.conf bash scripts/run_h100.sh
 # =============================================================================
 export MAKE_FIGURES="${MAKE_FIGURES:-0}"
 export FIG_SAMPLES="${FIG_SAMPLES:-2}"
@@ -357,6 +434,5 @@ bash run.sh
 # EXPERIMENT=RULER MODE=causal_lookahead BUDGET="128 256" DATASET_NAME_LIST="4096 8192" bash scripts/run_h100.sh
 # MODE=causal_lookahead BUDGET="128 256" NUM_PARTICLES="4" LOOKAHEAD_LEN="8" DATASET_NAME_LIST="qasper trec" bash scripts/run_h100.sh
 # MODE=causal_lookahead LAMBDA_LOOKAHEAD="0.0" BUDGET="128 256" DATASET_NAME_LIST="qasper trec" bash scripts/run_h100.sh  # window-only (no lookahead)
-
 
 

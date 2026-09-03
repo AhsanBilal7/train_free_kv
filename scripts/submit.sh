@@ -1,10 +1,10 @@
 #!/bin/bash
 # Usage: bash scripts/submit.sh <config-name>
-#   LongBench (default):  bash scripts/submit.sh tlckv-m1-adap-topk
-#   RULER:                EXPERIMENT=RULER bash scripts/submit.sh tlckv-m1-adap-topk
+#   LongBench (default):  bash scripts/submit.sh lorekv-ent-adap-topk
+#   RULER:                EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-adap-topk
 set -euo pipefail
 
-NAME="${1:?Usage: $0 <config-name>  (e.g. tlckv-m1-adap-topk)}"
+NAME="${1:?Usage: $0 <config-name>  (e.g. lorekv-ent-adap-topk)}"
 # Which benchmark to run (experiments/<EXPERIMENT>/). Selects the dataset via
 # that experiment's run.sh; the config file only carries method hyperparameters.
 EXPERIMENT="${EXPERIMENT:-LongBench}"

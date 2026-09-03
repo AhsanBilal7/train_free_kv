@@ -19,7 +19,7 @@ This script:
      codenames A1/A2/B1/... under config/tlckv-*.conf). Folders that match no
      named config fall back to their folder name as the technique.
   3. Optionally keeps only the folders matching a hyperparameter selection -- given
-     either as a named config you run experiments with (`--config tlckv-pe-m4-adap-topk`,
+     either as a named config you run experiments with (`--config lorekv-ent-adap-topk`,
      read straight from config/<name>.conf) and/or ad-hoc `--filter key=value` pairs.
   4. Prints the accuracies per technique to the terminal.
   5. Writes ONE row per run to a CSV: the technique name, its hyperparameter
@@ -39,52 +39,63 @@ Examples
   python collect_results.py --plot
 
   # only the folders produced by a specific named config (across its budget sweep)
-  python collect_results.py --config tlckv-pe-m4-adap-topk
+  python collect_results.py --config lorekv-ent-adap-topk
 
   # ad-hoc hyperparameter selection
   python collect_results.py --filter mode=causal_lookahead --filter budget=128 --filter lH=0.3
 
   # scope a config to a single budget and write the long form instead
-  python collect_results.py --config tlckv-pe-m4-adap-topk --filter budget=256 --long
+  python collect_results.py --config lorekv-ent-adap-topk --filter budget=256 --long
 """
 import argparse
 import json
 import math
 import os
 import re
+import sys
 
 import pandas as pd
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_DIR = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "config"))
 
-# folder-name token -> nothing (the token IS the key); listed for reference/order
-LOOKAHEAD_KEYS = ["chunk", "M", "T", "lL", "lT", "lH", "eta", "alpha", "beta", "lK", "lV", "tau"]
+# Run folders are named by scripts/run_naming.py, which is also what parses them, so
+# the two can never drift. A causal_lookahead folder looks like
+#   lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_M_<M>_T_<T>
+#       _lL_<lL>_lT_<lT>_nrm_<0|1>_alpha_<alpha>_kappa_<kappa>
+# and parse_run_name expands <cell>/<brule>/<sel> back into the numeric b/g/lD and
+# tau/lK/lV below, so filtering by a .conf file works on both new and legacy folders.
 
-# stable column order for the hyperparameter columns in the wide technique table
-HYPERPARAM_ORDER = ["mode", "model", "budget", "chunk", "M", "T", "lL", "lT", "lH",
-                    "eta", "alpha", "beta", "lK", "lV", "tau", "red"]
+# stable column order for the hyperparameter columns in the wide technique table.
+# cell/brule/sel come first: they are the readable form of b/g/lD/tau/lK/lV.
+HYPERPARAM_ORDER = ["mode", "model", "budget", "cell", "brule", "sel",
+                    "chunk", "M", "T", "lL", "lT",
+                    "b", "g", "lD", "nrm", "alpha", "kappa", "lK", "lV", "tau", "obj", "red"]
 
 # config-file variable  ->  folder-name key
 CONF_TO_KEY = {
     "MODE": "mode",
+    "MODEL_PATH": "model",
     "BUDGET": "budget",
     "NUM_PARTICLES": "M",
     "LOOKAHEAD_LEN": "T",
     "LAMBDA_LOOKAHEAD": "lL",
     "LOOKAHEAD_TEMPERATURE": "lT",
-    "LAMBDA_H": "lH",
-    "PARTICLE_ETA": "eta",
+    "BETA": "b",
+    "GAMMA": "g",
+    "LAMBDA_D": "lD",
+    "NORMALIZE_TYPICALITY": "nrm",
     "ROBUST_ALPHA": "alpha",
-    "ROBUST_TOPK_BETA": "beta",
+    "ROBUST_TOPK_BETA": "kappa",
     "LAMBDA_K": "lK",
     "LAMBDA_V": "lV",
     "BUDGET_TAU": "tau",
+    "SCORE_OBJECTIVE": "obj",
     "LAMBDA_RED": "red",
 }
 
-# folder name: <mode>_<model>_<budget>_chunk_<cs>[<tail>]
-_NAME_RE = re.compile(r"^(?P<mode>.+)_(?P<model>[^_]+)_(?P<budget>\d+)_chunk_(?P<chunk>[^_]+)(?P<tail>.*)$")
+sys.path.insert(0, os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "scripts")))
+from run_naming import parse_run_name  # noqa: E402
 
 
 def norm(v):
@@ -96,18 +107,14 @@ def norm(v):
 
 
 def parse_folder(name):
-    """Folder name -> {mode, model, budget, chunk, ...}. Returns None if unparseable."""
-    m = _NAME_RE.match(name)
-    if not m:
-        return None
-    params = {"mode": m.group("mode"), "model": m.group("model"),
-              "budget": m.group("budget"), "chunk": m.group("chunk")}
-    tail = m.group("tail")
-    if tail:
-        toks = tail.strip("_").split("_")
-        for i in range(0, len(toks) - 1, 2):
-            params[toks[i]] = toks[i + 1]
-    return params
+    """Folder name -> {mode, model, budget, chunk, ...}. Returns None if unparseable.
+
+    Delegates to scripts/run_naming.py, which also GENERATES these names. It handles
+    the current lorekv-* scheme and both pre-reparametrization schemes, translating
+    the latter through Proposition 1 -- so a table can mix folders written before and
+    after the change and the b/g/lD columns still mean the same thing.
+    """
+    return parse_run_name(name)
 
 
 def load_conf(path):
@@ -134,18 +141,33 @@ def conf_to_filter(conf):
     lookahead folder (which has no `red` token).
     """
     mode = conf.get("MODE", ["andpro"])[0]
+    # MODEL_PATH is included so a Mistral folder does not also match the -llama
+    # config: the two differ ONLY in the model, so without it every folder matched
+    # both and the technique label came out as "lorekv-...-llama|lorekv-...".
     if mode == "causal_lookahead":
-        allowed_conf_keys = {"MODE", "BUDGET", "NUM_PARTICLES", "LOOKAHEAD_LEN", "LAMBDA_LOOKAHEAD",
-                             "LOOKAHEAD_TEMPERATURE", "LAMBDA_H", "PARTICLE_ETA", "ROBUST_ALPHA",
-                             "ROBUST_TOPK_BETA", "LAMBDA_K", "LAMBDA_V", "BUDGET_TAU"}
+        allowed_conf_keys = {"MODE", "MODEL_PATH", "BUDGET", "NUM_PARTICLES", "LOOKAHEAD_LEN",
+                             "LAMBDA_LOOKAHEAD",
+                             "LOOKAHEAD_TEMPERATURE", "BETA", "GAMMA", "LAMBDA_D",
+                             "NORMALIZE_TYPICALITY", "ROBUST_ALPHA",
+                             "ROBUST_TOPK_BETA", "LAMBDA_K", "LAMBDA_V", "BUDGET_TAU",
+                             "SCORE_OBJECTIVE"}
     else:
-        allowed_conf_keys = {"MODE", "BUDGET", "LAMBDA_RED"}
+        allowed_conf_keys = {"MODE", "MODEL_PATH", "BUDGET", "LAMBDA_RED"}
 
     filt = {}
     for conf_key, values in conf.items():
         if conf_key not in allowed_conf_keys:
             continue
+        # A config stores the full HF id; folders carry only the basename (MODEL_TAG).
+        if conf_key == "MODEL_PATH":
+            values = [os.path.basename(str(v).rstrip("/")) for v in values]
         filt[CONF_TO_KEY[conf_key]] = {norm(v) for v in values}
+    # App. C (iii): a causal_lookahead config that does not mention SCORE_OBJECTIVE ran
+    # the default projected score, so pin it explicitly. Without this every core config
+    # would also match the _obj_attention / _obj_unprojected folders and the technique
+    # label for those runs would come back as "core|ablation".
+    if mode == "causal_lookahead":
+        filt.setdefault("obj", {"projected"})
     return filt
 
 
@@ -170,13 +192,25 @@ def load_named_configs(config_dir):
 
 
 def budget_free_label(name):
-    """Folder name with the budget token dropped -> a technique label shared across
-    a budget sweep (budget lives in its own column, so runs that differ only in
-    budget collapse onto one technique / one line in the comparison plot)."""
-    m = _NAME_RE.match(name)
-    if not m:
+    """Folder name with the cache-budget token dropped -> a technique label shared
+    across a budget sweep (budget lives in its own column, so runs that differ only
+    in budget collapse onto one technique / one line in the comparison plot).
+
+    Under the current scheme the readable identity is already the leading
+    `lorekv-<cell>-<brule>-<sel>[-<model>]`, so the label is that plus whatever else
+    still varies (M, T, ...). Falls back to the raw name if it does not parse.
+    """
+    p = parse_run_name(name)
+    if not p:
         return name
-    return f"{m.group('mode')}_{m.group('model')}_chunk_{m.group('chunk')}{m.group('tail')}"
+    if p.get("mode") == "causal_lookahead" and p.get("cell"):
+        rest = "_".join(f"{k}{p[k]}" for k in ("M", "T", "nrm") if p.get(k) is not None)
+        if p.get("obj") not in (None, "projected"):
+            rest = f"{rest}_obj{p['obj']}" if rest else f"obj{p['obj']}"
+        model = p.get("model", "")
+        tail = f"_{rest}" if rest else ""
+        return f"lorekv-{p['cell']}-{p['brule']}-{p['sel']}_{model}{tail}"
+    return f"{p.get('mode')}_{p.get('model')}_chunk_{p.get('chunk')}"
 
 
 def technique_name(params, folder, named_configs):

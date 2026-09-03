@@ -17,7 +17,7 @@ shows the fix:
 Saved: entropy_data.npz (read by plot_entropy.py).
 
 Run on the GPU cluster, e.g.:
-  python compute_entropy.py --config config/tlckv-pe-mx-unif-topk.conf \
+  python compute_entropy.py --config config/lorekv-ent-unif-topk.conf \
          --dataset single --samples-per-dataset 4 --budget 128
 """
 import argparse
@@ -33,7 +33,7 @@ import common
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"))
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single")
@@ -59,8 +59,7 @@ def main():
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
-    eta = model.model.config.particle_eta
-    lambda_h = model.model.config.lambda_h if model.model.config.lambda_h > 0 else 0.3
+    gamma_E = model.model.config.particle_gamma if model.model.config.particle_gamma > 1.0 else 1.3
 
     strat_keys = ["single_mean", "single_min", "single_max", "uniform", "logprob", "lorekv"]
     state, done = ckpt.load_or({"ent_all": [], "logp_all": [], "align_all": [],
@@ -98,8 +97,12 @@ def main():
         # strategy coverages, averaged over layers
         cov_uniform, cov_logprob, cov_lorekv = [], [], []
         w_uniform = torch.full((M,), 1.0 / M)
-        w_logprob = common.softmax_weights(logprob, eta)
-        w_lorekv = common.softmax_weights(logprob - lambda_h * entropy, eta)
+        # "log-prob only" is (beta, gamma, lambda_D) = (1, 1, 0): a FULL entropy penalty.
+        w_logprob = common.reliability_weights_from_capture(
+            common.centered_score(logprob, entropy), entropy, beta=1.0, gamma=1.0)
+        # Eq. 3 /E cell: (beta, gamma, lambda_D) = (1, 1 + lambda_H_old, 0).
+        w_lorekv = common.reliability_weights_from_capture(
+            common.centered_score(logprob, entropy), entropy, beta=1.0, gamma=gamma_E)
 
         for li in range(n_layers):
             tq = cap["true_queries"][li]
@@ -130,7 +133,7 @@ def main():
 
     np.savez(
         args.out,
-        budget=args.budget, dataset=args.dataset, lambda_h=lambda_h,
+        budget=args.budget, dataset=args.dataset, gamma_E=gamma_E,
         entropy=np.concatenate(ent_all), logprob=np.concatenate(logp_all),
         align=np.concatenate(align_all),
         strat_keys=np.array(strat_keys),

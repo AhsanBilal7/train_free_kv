@@ -12,12 +12,13 @@ estimated query sets cover them (cosine coverage, common.weighted_coverage):
   * a single lookahead trajectory      (Lookahead Q-Cache style)
   * M trajectories, uniform weights
   * M trajectories, log-probability weighting
-  * M trajectories, LORE-KV log-prob - entropy weighting
+  * M trajectories, log-prob - entropy weighting        (the published rule)
+  * M trajectories, log-prob - trajectory-disagreement  (this method)
 
 Saved: alignment_data.npz (read by plot_alignment.py). No figure is drawn here.
 
 Run on the GPU cluster, e.g.:
-  python compute_alignment.py --config config/tlckv-pe-mx-unif-topk.conf \
+  python compute_alignment.py --config config/lorekv-ent-unif-topk.conf \
          --dataset single --samples-per-dataset 3 --budget 128
 """
 import argparse
@@ -33,8 +34,8 @@ import common
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"),
-                    help="repo .conf whose hyper-parameters (eta, lambda_h, T, ...) drive the run")
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"),
+                    help="repo .conf whose hyper-parameters (beta, gamma, lambda_D, T, ...) drive the run")
     ap.add_argument("--model", default=None, help="override MODEL_PATH from the config")
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single", help="'single' (single-doc QA), 'full', or comma-list")
@@ -65,10 +66,17 @@ def main():
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
-    eta = model.model.config.particle_eta
-    lambda_h = model.model.config.lambda_h
+    # Every rule must be non-degenerate here even if the run's own config switched a
+    # channel off, otherwise the curves would be indistinguishable. gamma_E is
+    # 1 + lambda_H_old, so "entropy" relabels the published /E cell exactly.
+    gamma_E = model.model.config.particle_gamma if model.model.config.particle_gamma > 1.0 else 1.3
+    lambda_d = model.model.config.lambda_d if model.model.config.lambda_d > 0 else 0.3
+    grid = common.weighting_grid(gamma_E=gamma_E, lambda_D=lambda_d)
 
-    strategies = ["prompt_window", "single_traj", "uniform", "logprob", "lorekv"]
+    # "logprob" is (1,1,0) -- the draft's "log-probability only" is a FULL unit of
+    # entropy penalty, not a no-penalty control; "typicality" (1,0,0) is that control,
+    # and "typ_div" (1,0,lambda_D) is disagreement INSTEAD of entropy.
+    strategies = ["prompt_window", "single_traj"] + list(grid)
     # per-strategy: list (over samples) of arrays (over m_list) of mean coverage; resumable.
     state, done = ckpt.load_or({"acc": {s: [] for s in strategies}, "n_samples": 0})
     acc = state["acc"]; n_samples = state["n_samples"]
@@ -95,11 +103,16 @@ def main():
 
         per_m = {s: [] for s in strategies}   # each -> list over m_list of layer-averaged coverage
         for M in args.m_list:
-            lp = logprob[:M]
             en = entropy[:M]
-            w_uniform = torch.full((M,), 1.0 / M)
-            w_logprob = common.softmax_weights(lp, eta)
-            w_lorekv = common.softmax_weights(lp - lambda_h * en, eta)
+            c_bar = common.centered_score(logprob[:M], en)     # cbar = logp_mean + H_mean
+            # D_m is ensemble-relative, so it is recomputed WITHIN each nested prefix
+            # rather than sliced from the full-ensemble value. It is identically zero
+            # for M <= 2 (undefined at 1, degenerate at 2).
+            dz = common.standardize_scores(
+                common.divergence_from_capture(cap["per_layer"], M).cpu())
+            wts = {k: common.reliability_weights_from_capture(
+                       c_bar, en, dz, beta=b, gamma=g, lambda_d=ld)
+                   for k, (b, g, ld) in grid.items()}
 
             layer_cov = {s: [] for s in strategies}
             for li in range(n_layers):
@@ -113,9 +126,8 @@ def main():
 
                 layer_cov["prompt_window"].append(common.weighted_coverage(tq, [win], torch.ones(1)))
                 layer_cov["single_traj"].append(common.weighted_coverage(tq, [looks[0]], torch.ones(1)))
-                layer_cov["uniform"].append(common.weighted_coverage(tq, looks, w_uniform))
-                layer_cov["logprob"].append(common.weighted_coverage(tq, looks, w_logprob))
-                layer_cov["lorekv"].append(common.weighted_coverage(tq, looks, w_lorekv))
+                for k in grid:
+                    layer_cov[k].append(common.weighted_coverage(tq, looks, wts[k]))
             for s in strategies:
                 per_m[s].append(float(np.mean(layer_cov[s])) if layer_cov[s] else np.nan)
 
@@ -124,7 +136,9 @@ def main():
         n_samples += 1
         done.add(key); ckpt.flush({"acc": acc, "n_samples": n_samples}, done)
         print(f"[{sample['dataset']}#{sample['sample_idx']}] n={cap['n']} "
-              f"lorekv@M={args.m_list[-1]}: {per_m['lorekv'][-1]:.4f}", flush=True)
+              f"entropy@M={args.m_list[-1]}: {per_m['entropy'][-1]:.4f} "
+              f"typicality@M={args.m_list[-1]}: {per_m['typicality'][-1]:.4f} "
+              f"typ_div@M={args.m_list[-1]}: {per_m['typ_div'][-1]:.4f}", flush=True)
         common.free_sample(model, cap)
 
     means = {s: np.nanmean(np.array(acc[s]), axis=0) for s in strategies}
@@ -135,7 +149,8 @@ def main():
         m_list=np.array(args.m_list),
         strategies=np.array(strategies),
         n_samples=n_samples,
-        eta=eta, lambda_h=lambda_h, budget=args.budget,
+        gamma_E=gamma_E, lambda_d=lambda_d,
+        grid=np.array([[k, *map(str, v)] for k, v in grid.items()]), budget=args.budget,
         dataset=args.dataset, decode_steps=args.decode_steps,
         **{f"mean_{s}": means[s] for s in strategies},
         **{f"std_{s}": stds[s] for s in strategies},

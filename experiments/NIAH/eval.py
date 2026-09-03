@@ -1,4 +1,7 @@
 import os
+import re
+import sys
+import csv
 import json
 import argparse
 
@@ -9,15 +12,28 @@ import numpy as np
 #
 # Consumes the prediction jsonl files written by pred.py (one per target context
 # length under pred/<out_name>/) and scores each (length, depth) cell with the
-# gkamradt exact-match rule: 1.0 if the needle answer appears as a
-# (case-insensitive, whitespace-trimmed) substring of the model response, else
-# 0.0. A softer word-level recall of the answer is also recorded for a smoother
-# heatmap when desired (NIAH_METRIC=recall).
+# reference ExactMatchScorer (needlehaystack/scorers/exact_match.py): the
+# FRACTION of the expected fragments that appear as (case-insensitive,
+# whitespace-trimmed) substrings of the model response. Single-needle cells
+# carry one fragment, so this is the classic 1.0/0.0 exact match; multi-needle
+# cells are graded (2 of 3 ingredients -> 0.667). A softer word-level recall is
+# also recorded for a smoother heatmap when desired (NIAH_METRIC=recall).
 #
 # For each run we write:
 #   * result.json  — the full (length x depth) score grid + per-length means +
 #                    an overall mean, plus the word-recall grid.
 #   * heatmap.png  — the signature NIAH retrieval heatmap (depth x length).
+#
+# Finally a cross-run SUMMARY TABLE is printed: one row per run, one column per
+# target context length (the per-length mean), plus the overall mean and the
+# number of scored cells. Because a run is only averaged over the lengths that
+# actually produced a final <length>.jsonl, two runs can silently report means
+# over different denominators — the table makes that explicit by marking
+#   '--'   a length that was never run, and
+#   'tmp'  a length that crashed mid-way (only <length>.jsonl_tmp exists, so
+#          pred.py never wrote the final file and it is excluded from the mean).
+# Rows whose length set differs from the most complete one are flagged so the
+# numbers are not compared across unequal grids.
 # -----------------------------------------------------------------------------
 
 # Which score drives result.json's headline means + the heatmap coloring:
@@ -31,31 +47,62 @@ def parse_args(args=None):
     parser.add_argument('--metric', type=str, default=METRIC, choices=["exact_match", "recall"],
                         help="headline metric for result.json + heatmap")
     parser.add_argument('--no_heatmap', action='store_true', help="skip writing heatmap.png")
+    parser.add_argument('--summary_csv', type=str, default=None,
+                        help="also write the cross-run summary table to this CSV path")
     return parser.parse_args(args)
 
 
 def _normalize(s):
+    """needlehaystack/scorers/exact_match.py::_normalize"""
     return s.strip().lower()
 
 
-def exact_match(pred, answers):
-    """1.0 if any gold answer is a substring of the (normalized) prediction."""
-    p = _normalize(pred)
-    return 1.0 if any(_normalize(a) in p for a in answers) else 0.0
+def exact_match(pred, fragments):
+    """Reference ExactMatchScorer: the FRACTION of expected fragments that appear
+    as (case-insensitive, whitespace-trimmed) substrings of the response.
+
+        fragments = needle.metadata["expected_fragments"] or [expected_answer]
+        value     = matches / len(fragments)
+
+    For a single-needle cell `fragments` has one entry, so this reduces exactly
+    to the classic 1.0 / 0.0 exact match. For a multi-needle cell it is graded:
+    2 of 3 pizza ingredients recalled scores 0.667, matching the reference
+    rather than an all-or-nothing (or any-of) rule."""
+    if not fragments:
+        # Defensive: nothing to score against -> treat as miss (reference does the same).
+        return 0.0
+    haystack = _normalize(pred)
+    matches = sum(1 for f in fragments if _normalize(f) in haystack)
+    return matches / len(fragments)
 
 
-def word_recall(pred, answers):
-    """Fraction of the (best) gold answer's words present in the prediction —
-    a graded fallback that produces a smoother heatmap than binary match."""
+def word_recall(pred, fragments):
+    """Fraction of the (best) gold fragment's words present in the prediction —
+    a graded fallback that produces a smoother heatmap than substring match.
+    NOT part of the reference implementation; opt in with NIAH_METRIC=recall."""
     p = set(_normalize(pred).split())
     best = 0.0
-    for a in answers:
+    for a in fragments:
         words = _normalize(a).split()
         if not words:
             continue
         hit = sum(1 for w in words if w in p) / len(words)
         best = max(best, hit)
     return best
+
+
+def row_fragments(obj):
+    """Gold fragments for one prediction row.
+
+    `expected_fragments` is what pred.py writes now. `answer` (a list, mirroring
+    RULER) and the older scalar `needle_answer` are accepted so jsonl files
+    produced before the multi-needle rewrite still score identically — for a
+    single needle all three carry the same one-element list."""
+    frags = obj.get("expected_fragments") or obj.get("answer")
+    if not frags:
+        single = obj.get("needle_answer")
+        frags = [single] if single else []
+    return [f for f in frags if f]
 
 
 def score_length_file(path):
@@ -67,11 +114,12 @@ def score_length_file(path):
             if not line:
                 continue
             obj = json.loads(line)
-            answers = obj.get("answer") or [obj.get("needle_answer", "")]
+            fragments = row_fragments(obj)
             cells.append({
                 "depth": float(obj["depth_percent"]),
-                "exact_match": exact_match(obj["pred"], answers),
-                "recall": word_recall(obj["pred"], answers),
+                "exact_match": exact_match(obj["pred"], fragments),
+                "recall": word_recall(obj["pred"], fragments),
+                "n_fragments": len(fragments),
             })
     return cells
 
@@ -116,9 +164,128 @@ def save_heatmap(grid, lengths, depths, out_path, metric, run_name):
     plt.close(fig)
 
 
+# out_name is built by scripts/run_naming.py, which is also what parses it here, so
+# the summary table can never disagree with what run.sh wrote. causal_lookahead runs
+# are `lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_...`; baselines keep
+# `<mode>_<MODEL_TAG>_<B>_chunk_<cs>_red_<red>`. Both are handled, as are folders
+# written before the reparametrization.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts")))
+from run_naming import parse_run_name  # noqa: E402
+
+
+def split_run_name(run):
+    """-> (label, model_tag, budget). Falls back to ('?', '?', None) if unparsed.
+
+    `label` is the run's identity: the config-style `lorekv-<cell>-<brule>-<sel>`
+    for lookahead runs (readable, and the same string as its .conf file), or the
+    plain mode name for a baseline.
+    """
+    p = parse_run_name(run)
+    if not p or p.get("budget") is None:
+        return "?", "?", None
+    if p["mode"] == "causal_lookahead" and p.get("cell"):
+        label = f"lorekv-{p['cell']}-{p['brule']}-{p['sel']}"
+    else:
+        label = p["mode"]
+    try:
+        budget = int(p["budget"])
+    except (TypeError, ValueError):
+        return label, p.get("model", "?"), None
+    return label, p.get("model", "?"), budget
+
+
+def print_summary_table(summary, metric, csv_path=None):
+    """Cross-run table: rows = runs, cols = target context lengths.
+
+    Each cell is that run's mean over the depths at that length; '--' means the
+    length was never run and 'tmp' means it crashed mid-way (only a _tmp file
+    exists, so it contributes nothing to the mean). OVERALL is the mean over
+    every scored cell and N is how many cells that was — runs with different N
+    average over different denominators and are NOT comparable.
+
+    Rows are grouped by model, since the reference grid ("how many lengths did
+    this sweep actually cover") is only meaningful within one model."""
+    if not summary:
+        return
+
+    all_lengths = sorted({L for row in summary for L in row["all_lengths"]})
+    idx_w = max(3, len(str(len(summary))))
+    col_w = max([7] + [len(str(L)) + 2 for L in all_lengths])
+
+    header = (f"{'#':>{idx_w}}  " + "".join(f"{L:>{col_w}}" for L in all_lengths)
+              + f"{'OVERALL':>10}{'N':>6}  {'COVER':<8}")
+    width = len(header) + 3
+    print("\n" + "=" * width)
+    print(f" NIAH SUMMARY — headline metric: {metric}")
+    print(" '--' = length never run   'tmp' = crashed mid-length (only .jsonl_tmp, excluded from the mean)")
+    print(" N = scored (length x depth) cells; rows with different N are NOT comparable head-to-head.")
+    print("=" * width)
+
+    csv_rows = [["model", "mode", "budget", "run",
+                 *[str(L) for L in all_lengths], "overall", "n_cells", "coverage"]]
+
+    # Group by model, then order within a group by mode/budget so the same
+    # configuration across methods lines up vertically.
+    models = sorted({split_run_name(r["run"])[1] for r in summary})
+    i = 0
+    n_partial_total = 0
+    for model in models:
+        rows = [r for r in summary if split_run_name(r["run"])[1] == model]
+        rows.sort(key=lambda r: (split_run_name(r["run"])[2] or 0, split_run_name(r["run"])[0], r["run"]))
+
+        # Reference grid for THIS model: the most complete coverage anything reached.
+        full = max((set(r["scored_lengths"]) for r in rows), key=len, default=set())
+        max_cells = max((r["n_cells"] for r in rows), default=0)
+
+        print(f"\n--- model: {model}   (reference grid: {sorted(full)} = {max_cells} cells) ---")
+        print(header + "RUN")
+        for row in rows:
+            i += 1
+            cells = []
+            for L in all_lengths:
+                v = row["per_length"].get(L)
+                if v is not None:
+                    cells.append(f"{v:>{col_w}.4f}")
+                elif L in row["tmp_lengths"]:
+                    cells.append(f"{'tmp':>{col_w}}")
+                else:
+                    cells.append(f"{'--':>{col_w}}")
+            overall = f"{row['overall']:.4f}" if row["overall"] is not None else "--"
+            partial = set(row["scored_lengths"]) != full or row["n_cells"] != max_cells
+            n_partial_total += partial
+            mode, _, budget = split_run_name(row["run"])
+            # Coverage marker sits BEFORE the (very long) run name so it stays on screen.
+            cover = "PARTIAL" if partial else "full"
+            print(f"{i:>{idx_w}}  " + "".join(cells) + f"{overall:>10}{row['n_cells']:>6}  "
+                  f"{cover:<8}{row['run']}")
+            csv_rows.append([
+                model, mode, budget, row["run"],
+                *[("" if row["per_length"].get(L) is None else f"{row['per_length'][L]:.4f}")
+                  for L in all_lengths],
+                overall, str(row["n_cells"]), "partial" if partial else "full",
+            ])
+
+    print("\n" + "=" * width)
+    if n_partial_total:
+        print(f" [warn] {n_partial_total}/{len(summary)} runs are PARTIAL — their OVERALL is averaged over")
+        print(f"        fewer cells than the reference grid for their model. Re-run the missing lengths")
+        print(f"        (delete stale *.jsonl_tmp first) before comparing methods on OVERALL.")
+    else:
+        print(f" All {len(summary)} runs cover their model's full grid — OVERALL is comparable.")
+    print("=" * width)
+
+    if csv_path:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(csv_rows)
+        print(f" wrote {csv_path}")
+
+
 if __name__ == '__main__':
     args = parse_args()
     os.makedirs(args.pred_dir, exist_ok=True)
+
+    summary = []
 
     for run in sorted(os.listdir(args.pred_dir)):
         run_path = os.path.join(args.pred_dir, run)
@@ -128,7 +295,20 @@ if __name__ == '__main__':
             [f for f in os.listdir(run_path) if f.endswith(".jsonl") and not f.endswith("_tmp")],
             key=lambda x: int(x.split('.')[0]) if x.split('.')[0].isdigit() else x,
         )
+        # Lengths that started but never finished: pred.py only writes the final
+        # <length>.jsonl after the whole depth loop completes, so a leftover
+        # <length>.jsonl_tmp means that length crashed (OOM, walltime, ...).
+        tmp_lengths = sorted({
+            int(f.split('.')[0]) for f in os.listdir(run_path)
+            if f.endswith(".jsonl_tmp") and f.split('.')[0].isdigit()
+        } - {int(f.split('.')[0]) for f in length_files})
+
         if not length_files:
+            # Nothing scoreable, but still surface it in the table so a run that
+            # crashed on its very first length is not silently invisible.
+            summary.append({"run": run, "per_length": {}, "tmp_lengths": tmp_lengths,
+                            "scored_lengths": [], "all_lengths": tmp_lengths,
+                            "overall": None, "n_cells": 0})
             continue
 
         lengths = [int(f.split('.')[0]) for f in length_files]
@@ -178,5 +358,19 @@ if __name__ == '__main__':
         print(f"\n=== {run} ===")
         for L in lengths:
             print(f"  [{L}] exact_match={per_length[str(L)]['exact_match']} recall={per_length[str(L)]['recall']}")
+        if tmp_lengths:
+            print(f"  [warn] incomplete (only .jsonl_tmp, excluded from the means): {tmp_lengths}")
         print(f"  OVERALL exact_match={scores['average']['exact_match']} recall={scores['average']['recall']}")
         print(f"  wrote {os.path.join(run_path, 'result.json')}")
+
+        summary.append({
+            "run": run,
+            "per_length": {L: per_length[str(L)][args.metric] for L in lengths},
+            "tmp_lengths": tmp_lengths,
+            "scored_lengths": lengths,
+            "all_lengths": sorted(set(lengths) | set(tmp_lengths)),
+            "overall": scores["average"][args.metric],
+            "n_cells": len(flat_em),
+        })
+
+    print_summary_table(summary, args.metric, args.summary_csv)

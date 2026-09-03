@@ -43,7 +43,7 @@ BM="${FIG_BENCHMARK:-longbench}"
 BUDGET="${FIG_BUDGET:-128}"
 RUN_DIR="${FIG_RUN_DIR:?FIG_RUN_DIR (the run output folder) is required}"
 SAMPLES="${FIG_SAMPLES:-2}"
-FIGS="${FIG_LIST:-1 2 3 4 5 6 7 8 9}"
+FIGS="${FIG_LIST:-1 2 3 4 5 6 7 8 9 10}"
 GPU="${FIG_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 read -r -a DATASETS <<< "${FIG_DATASETS:?FIG_DATASETS (space-separated) is required}"
 
@@ -66,8 +66,10 @@ LAMBDA_RED            = ${FIG_LAMBDA_RED:-0.0}
 NUM_PARTICLES         = ${FIG_NUM_PARTICLES:-4}
 LOOKAHEAD_LEN         = ${FIG_LOOKAHEAD_LEN:-8}
 LOOKAHEAD_TEMPERATURE = ${FIG_LOOKAHEAD_TEMPERATURE:-1.0}
-LAMBDA_H              = ${FIG_LAMBDA_H:-0.0}
-PARTICLE_ETA          = ${FIG_PARTICLE_ETA:-1.0}
+BETA                  = ${FIG_BETA:-1.0}
+GAMMA                 = ${FIG_GAMMA:-0.0}
+LAMBDA_D              = ${FIG_LAMBDA_D:-0.0}
+NORMALIZE_TYPICALITY  = ${FIG_NORMALIZE_TYPICALITY:-0}
 ROBUST_ALPHA          = ${FIG_ROBUST_ALPHA:-0.0}
 ROBUST_TOPK_BETA      = ${FIG_ROBUST_TOPK_BETA:-1.0}
 LAMBDA_LOOKAHEAD      = ${FIG_LAMBDA_LOOKAHEAD:-1.0}
@@ -98,6 +100,7 @@ fig_meta() {
     7) echo "fig7_retained_token_composition|compute_composition|plot_composition|composition_data|fig7_retained_token_composition|--budget $BUDGET" ;;
     8) echo "fig8_layer_head_analysis|compute_layer_head|plot_layer_head|layer_head_data|fig8_layer_head_analysis|--budget $BUDGET --decode-steps 24" ;;
     9) echo "fig9_budget_equivalence|compute_budget|plot_budget|budget_data|fig9_budget_equivalence|--budgets 64 128 256 512 1024 --score-budget $BUDGET --decode-steps 24" ;;
+    10) echo "fig10_particle_divergence|compute_divergence|plot_divergence|divergence_data|fig10_particle_divergence|--budget $BUDGET --num-particles 8 --decode-steps 32" ;;
   esac
 }
 

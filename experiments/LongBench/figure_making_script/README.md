@@ -16,8 +16,8 @@ dataset so sweeps never overwrite each other:
 ```
 <data_base>__<conf>__<model>__b<budget>__<dataset>.npz
 <fig_base>__<conf>__<model>__b<budget>__<dataset>.png     # same tag
-# e.g. alignment_data__tlckv-pe-m4-adap-topk__Mistral-7B-Instruct-v0.2__b128__single.npz
-#      fig1_future_query_alignment__tlckv-pe-m4-adap-topk__Mistral-7B-Instruct-v0.2__b128__single.png
+# e.g. alignment_data__lorekv-ent-adap-topk__Mistral-7B-Instruct-v0.2__b128__single.npz
+#      fig1_future_query_alignment__lorekv-ent-adap-topk__Mistral-7B-Instruct-v0.2__b128__single.png
 ```
 
 `plot_*.py` auto-picks the **newest** matching `.npz` in its folder and writes the
@@ -109,7 +109,7 @@ sbatch scripts/run_figures.sh                        # all 9, LongBench single-d
 bash   scripts/run_figures.sh                        # same, interactive
 FIGURES="1 2 6" bash scripts/run_figures.sh          # subset
 BENCHMARK=ruler DATASET=8192 bash scripts/run_figures.sh
-BUDGET=256 SAMPLES=5 CONFIG_FILE=config/tlckv-pe-mx-unif-topk.conf bash scripts/run_figures.sh
+BUDGET=256 SAMPLES=5 CONFIG_FILE=config/lorekv-ent-unif-topk.conf bash scripts/run_figures.sh
 PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from saved .npz (no GPU)
 ```
 
@@ -133,7 +133,7 @@ cd experiments/LongBench/figure_making_script
 
 # Figure 1 (uses config hyper-parameters: eta, lambda_H, T, ...)
 python fig1_future_query_alignment/compute_alignment.py \
-    --config ../../../config/tlckv-pe-mx-unif-topk.conf \
+    --config ../../../config/lorekv-ent-unif-topk.conf \
     --dataset single --samples-per-dataset 3 --budget 128
 python fig1_future_query_alignment/plot_alignment.py
 
@@ -141,6 +141,6 @@ python fig1_future_query_alignment/plot_alignment.py
 ```
 
 Every compute script takes `--config <repo .conf>` (default
-`config/tlckv-pe-m4-adap-topk.conf`), `--budget`, `--samples-per-dataset`,
+`config/lorekv-ent-adap-topk.conf`), `--budget`, `--samples-per-dataset`,
 `--benchmark`, `--dataset`, and `--out`. See each file's docstring for the extras
 (e.g. `--m-list`, `--decode-steps`, `--num-particles`).

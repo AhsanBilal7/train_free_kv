@@ -10,7 +10,11 @@ import argparse
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import gc
+import glob
+import shutil
+import tempfile
 import time
+import zipfile
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm
@@ -18,6 +22,80 @@ from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replac
 from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal
 from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead
 from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
+
+# =============================================================================
+# Offline LongBench loading
+#
+# THUDM/LongBench is a loading-script dataset (LongBench.py + a single data.zip
+# holding all 35 sub-task jsonl files). datasets>=3 dropped script support, so
+# load_dataset("THUDM/LongBench", "<task>") no longer builds anything: it warns
+# "couldn't be found on the Hugging Face Hub", falls back to the arrow cache and
+# raises "Couldn't find cache for THUDM/LongBench for config '<task>-<hash>'"
+# for every sub-task some earlier run never materialised.
+#
+# Extracting that zip once makes all sub-tasks loadable, online or offline.
+# Mirrors figure_making_script/common.py::_longbench_jsonl -- keep the two in
+# sync (same extraction dir, so the first of the two to run serves the other).
+# =============================================================================
+def _hf_cache_roots():
+    roots = [os.environ.get("HF_DATASETS_CACHE"), os.environ.get("HF_HOME"),
+             os.path.join(os.path.expanduser("~"), ".cache", "huggingface")]
+    return [r for r in roots if r]
+
+
+def _find_longbench_zip():
+    hub = os.environ.get("HF_HUB_CACHE")
+    hubs = ([hub] if hub else []) + [os.path.join(r, "hub") for r in _hf_cache_roots()]
+    for h in hubs:
+        hits = sorted(glob.glob(os.path.join(h, "datasets--THUDM--LongBench",
+                                             "snapshots", "*", "data.zip")))
+        if hits:
+            return hits[0]
+    return None
+
+
+def _longbench_jsonl(dataset, dataset_path=None):
+    """Path to a local <dataset>.jsonl, or None if we have to go through the Hub."""
+    # 1. a local directory handed in via --dataset (dir of jsonl, or its parent)
+    if dataset_path and os.path.isdir(dataset_path):
+        for cand in (os.path.join(dataset_path, f"{dataset}.jsonl"),
+                     os.path.join(dataset_path, "data", f"{dataset}.jsonl")):
+            if os.path.exists(cand):
+                return cand
+    # 2. the hub snapshot's data.zip, extracted once and reused afterwards
+    out_dir = os.path.join(_hf_cache_roots()[0], "longbench_jsonl")
+    cand = os.path.join(out_dir, f"{dataset}.jsonl")
+    if os.path.exists(cand):
+        return cand
+    zip_path = _find_longbench_zip()
+    if zip_path is None:
+        return None
+    os.makedirs(os.path.dirname(out_dir), exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=".longbench_", dir=os.path.dirname(out_dir))
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmp)
+        try:
+            os.replace(os.path.join(tmp, "data"), out_dir)   # atomic; publishes all 35 files
+        except OSError:
+            pass                                             # a concurrent job won the race
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return cand if os.path.exists(cand) else None
+
+
+def load_longbench_split(dataset_path, config_name):
+    """load_dataset() for one LongBench sub-task, preferring the local jsonl."""
+    jsonl = _longbench_jsonl(config_name, dataset_path)
+    if jsonl is not None:
+        # Same rows and fields as the script build, no Hub round-trip.
+        return load_dataset("json", data_files=jsonl, split="train")
+    # Hub/arrow-cache path. The data_dir is what produced the hashed offline
+    # cache config names (e.g. 'qasper-ae14b6d15afac659'); dropping it misses
+    # the cache when running offline.
+    return load_dataset(dataset_path, config_name, split="test",
+                        data_dir=f"{dataset_path}/data")
+
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()
@@ -43,14 +121,17 @@ def parse_args(args=None):
     parser.add_argument('--num_particles', default=4, type=int, help="[causal_lookahead] M: number of sampled lookahead continuations (Eq. 4)")
     parser.add_argument('--lookahead_len', default=8, type=int, help="[causal_lookahead] T: length of each lookahead continuation (Eq. 4)")
     parser.add_argument('--lookahead_temperature', default=1.0, type=float, help="[causal_lookahead] sampling temperature used only to generate diverse lookahead particles")
-    parser.add_argument('--lambda_h', default=0.0, type=float, help="[causal_lookahead] lambda_H: entropy penalty weight in the particle confidence score (Eq. 7)")
-    parser.add_argument('--particle_eta', default=1.0, type=float, help="[causal_lookahead] eta: sharpness of the particle-weight softmax (Eq. 8)")
+    parser.add_argument('--beta', default=1.0, type=float, help="[causal_lookahead] beta: TYPICALITY coefficient in Eq. 3 -- weights the centered per-token score c_u = log q(y_u|h_u) + H(q(.|h_u)), whose conditional expectation is zero, so this channel prices branch atypicality with the entropy removed")
+    parser.add_argument('--gamma', default=0.0, type=float, help="[causal_lookahead] gamma: ENTROPY coefficient in Eq. 3 -- an explicit preference for low-uncertainty histories. gamma = 1 + lambda_H_old reproduces a published run")
+    parser.add_argument('--normalize_typicality', default=0, type=int, choices=[0, 1], help="[causal_lookahead] use the varentropy-normalized typicality ctilde = cbar / sqrt(Vbar/T) instead of cbar (Prop. 3). Ablated switch, off by default")
+    parser.add_argument('--lambda_d', default=0.0, type=float, help="[causal_lookahead] lambda_D: trajectory-disagreement coefficient in Eq. 3 -- how atypical particle m's future-query trajectory is w.r.t. the other particles. Identically 0 for M <= 2")
     parser.add_argument('--robust_alpha', default=0.5, type=float, help="[causal_lookahead] alpha: top-beta vs. mean balance in the robust score aggregation (Eq. 17)")
     parser.add_argument('--robust_topk_beta', default=0.5, type=float, help="[causal_lookahead] beta: top-beta fraction of queries used in the robust aggregation (Eq. 16)")
     parser.add_argument('--lambda_lookahead', default=1.0, type=float, help="[causal_lookahead] lambda_L: weight of the particle-weighted lookahead score relative to the window score (Eq. 18)")
     parser.add_argument('--lambda_k', default=0.0, type=float, help="[causal_lookahead] lambda_k: key-similarity diversity penalty in greedy selection (Eq. 21)")
     parser.add_argument('--lambda_v', default=0.0, type=float, help="[causal_lookahead] lambda_v: value-similarity diversity penalty in greedy selection (Eq. 21)")
     parser.add_argument('--budget_tau', default=1.0, type=float, help="[causal_lookahead] tau: how aggressively the head-wise budget favors high-perturbation heads (Eq. 20)")
+    parser.add_argument('--score_objective', default="projected", type=str, choices=["projected", "unprojected", "attention"], help="[causal_lookahead] App. C (iii) perturbation-objective ablation: 'projected' = ||W_O Delta o||, the Eq. 14 core score; 'unprojected' = ||Delta o||, the same leave-one-out effect without the output projection; 'attention' = accumulated attention mass a_{q,i}. All three use the identical window + lookahead queries, reliability weights, allocation and selection")
 
     parser.add_argument('--budget_ratio',type=float,default=0.2,help="floor_alpha budgets for each head")
     return parser.parse_args(args)
@@ -272,8 +353,9 @@ if __name__ == '__main__':
     # config hyperparameters
     def config_compress(model, window_size=32, base_capacity=1024, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, beta = 20, skip=0, gqa_support=False,gqa_func="mean",
                         chunk_size=4, mode="andpro", lambda_red=0.0,
-                        num_particles=4, lookahead_len=8, lookahead_temperature=1.0, lambda_h=0.0, particle_eta=1.0,
-                        robust_alpha=0.5, robust_topk_beta=0.5, lambda_lookahead=1.0, lambda_k=0.0, lambda_v=0.0, budget_tau=1.0):
+                        num_particles=4, lookahead_len=8, lookahead_temperature=1.0, particle_beta=1.0, particle_gamma=0.0, lambda_d=0.0, normalize_typicality=False,
+                        robust_alpha=0.5, robust_topk_beta=0.5, lambda_lookahead=1.0, lambda_k=0.0, lambda_v=0.0, budget_tau=1.0,
+                        score_objective="projected"):
         model.model.config.window_size = window_size
         model.model.config.base_capacity = base_capacity
         model.model.config.kernel_size = kernel_size
@@ -299,14 +381,17 @@ if __name__ == '__main__':
         model.model.config.num_particles = num_particles
         model.model.config.lookahead_len = lookahead_len
         model.model.config.lookahead_temperature = lookahead_temperature
-        model.model.config.lambda_h = lambda_h
-        model.model.config.particle_eta = particle_eta
+        model.model.config.particle_beta = particle_beta
+        model.model.config.particle_gamma = particle_gamma
+        model.model.config.lambda_d = lambda_d
+        model.model.config.normalize_typicality = normalize_typicality
         model.model.config.robust_alpha = robust_alpha
         model.model.config.robust_topk_beta = robust_topk_beta
         model.model.config.lambda_lookahead = lambda_lookahead
         model.model.config.lambda_k = lambda_k
         model.model.config.lambda_v = lambda_v
         model.model.config.budget_tau = budget_tau
+        model.model.config.score_objective = score_objective
 
         return model
 
@@ -316,17 +401,20 @@ if __name__ == '__main__':
     config_compress(model, base_capacity=args.budget, pyram_mode=args.pyram, floor_alpha=args.floor_alpha, gqa_support=args.gqa_support, gqa_func=args.gqa_func,
                     chunk_size=args.chunk_size, mode=args.mode, lambda_red=args.lambda_red,
                     num_particles=args.num_particles, lookahead_len=args.lookahead_len, lookahead_temperature=args.lookahead_temperature,
-                    lambda_h=args.lambda_h, particle_eta=args.particle_eta, robust_alpha=args.robust_alpha, robust_topk_beta=args.robust_topk_beta,
-                    lambda_lookahead=args.lambda_lookahead, lambda_k=args.lambda_k, lambda_v=args.lambda_v, budget_tau=args.budget_tau)
+                    particle_beta=args.beta, particle_gamma=args.gamma, lambda_d=args.lambda_d,
+                    normalize_typicality=bool(args.normalize_typicality),
+                    robust_alpha=args.robust_alpha, robust_topk_beta=args.robust_topk_beta,
+                    lambda_lookahead=args.lambda_lookahead, lambda_k=args.lambda_k, lambda_v=args.lambda_v, budget_tau=args.budget_tau,
+                    score_objective=args.score_objective)
 
     for dataset in datasets:
         if args.e:
-            data = load_dataset(args.dataset, f"{dataset}_e", split='test', data_dir=f"{args.dataset}/data")
+            data = load_longbench_split(args.dataset, f"{dataset}_e")
             if not os.path.exists(f"pred_e/{args.out_name}"):
                 os.makedirs(f"pred_e/{args.out_name}")
             out_path = f"pred_e/{args.out_name}/{dataset}.jsonl"
         else:
-            data = load_dataset(args.dataset, f"{dataset}", split='test', data_dir=f"{args.dataset}/data")
+            data = load_longbench_split(args.dataset, f"{dataset}")
             if not os.path.exists(f"pred/{args.out_name}"):
                 os.makedirs(f"pred/{args.out_name}")
             out_path = f"pred/{args.out_name}/{dataset}.jsonl"

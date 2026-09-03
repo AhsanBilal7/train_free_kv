@@ -176,6 +176,7 @@ experiments/LongBench/runall_*.sh
 experiments/LongBench/results_summary.csv
 experiments/RULER/results_summary.csv
 
+*.currently_running_commands
 *.jsonl
 *.json
 *.png

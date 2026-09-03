@@ -25,8 +25,8 @@ What this module gives you
                                      that STOPS before compress(), so the figures
                                      can read the captured window queries, the M
                                      lookahead particle queries, the full K/V, the
-                                     per-particle (log-prob, entropy, weight), and
-                                     the true decode queries.
+                                     per-particle (log-prob, entropy, trajectory
+                                     divergence, weight), and the true decode queries.
 * scoring helpers reused straight from `TestTimeLookaheadKVCluster`.
 
 No GPU is available on the login node; run these on the cluster (venv kv44).
@@ -38,8 +38,10 @@ import glob
 import os
 import pickle
 import re
+import shutil
 import sys
 import tempfile
+import zipfile
 
 import torch
 import torch.nn.functional as F
@@ -141,8 +143,20 @@ def configure_model(model, conf, budget):
     c.num_particles = conf_get(conf, "NUM_PARTICLES", int, 4)
     c.lookahead_len = conf_get(conf, "LOOKAHEAD_LEN", int, 8)
     c.lookahead_temperature = conf_get(conf, "LOOKAHEAD_TEMPERATURE", float, 1.0)
-    c.lambda_h = conf_get(conf, "LAMBDA_H", float, 0.0)
-    c.particle_eta = conf_get(conf, "PARTICLE_ETA", float, 1.0)
+    # Eq. 3: R_m = beta*cbar_m - gamma*Hbar_m - lambda_D*Dhat_m. Legacy configs that
+    # still carry (LAMBDA_H, PARTICLE_ETA) map onto it exactly via Prop. 1:
+    #   beta = eta, gamma = eta * (1 + lambda_H), lambda_D = eta * lambda_D.
+    _eta = conf_get(conf, "PARTICLE_ETA", float, 1.0)
+    _lh = conf_get(conf, "LAMBDA_H", float, None)
+    c.particle_beta = conf_get(conf, "BETA", float, None)
+    c.particle_gamma = conf_get(conf, "GAMMA", float, None)
+    c.lambda_d = conf_get(conf, "LAMBDA_D", float, 0.0)
+    if c.particle_beta is None or c.particle_gamma is None:
+        c.particle_beta = _eta if c.particle_beta is None else c.particle_beta
+        c.particle_gamma = (_eta * (1.0 + (_lh or 0.0))) if c.particle_gamma is None else c.particle_gamma
+        c.lambda_d = _eta * c.lambda_d
+    c.normalize_typicality = bool(conf_get(conf, "NORMALIZE_TYPICALITY", int, 0))
+    c.divergence_layer_stride = conf_get(conf, "DIVERGENCE_LAYER_STRIDE", int, 1)
     c.robust_alpha = conf_get(conf, "ROBUST_ALPHA", float, 0.5)
     c.robust_topk_beta = conf_get(conf, "ROBUST_TOPK_BETA", float, 0.5)
     c.lambda_lookahead = conf_get(conf, "LAMBDA_LOOKAHEAD", float, 1.0)
@@ -173,6 +187,58 @@ def resolve_datasets(name):
     if name in ("full", "all", "longbench"):
         return FULL_LONGBENCH
     return name.split(",")
+
+
+# All 16 sub-tasks ship inside a single data.zip in the THUDM/LongBench hub
+# snapshot, but datasets>=4 dropped loading-script support: offline,
+# load_dataset() falls back to the arrow cache and raises "Couldn't find cache
+# for THUDM/LongBench for config '<task>-<hash>'" for every task a previous run
+# never materialised. Extracting that zip once makes all of them loadable.
+def _hf_cache_roots():
+    roots = [os.environ.get("HF_DATASETS_CACHE"), os.environ.get("HF_HOME"),
+             os.path.join(os.path.expanduser("~"), ".cache", "huggingface")]
+    return [r for r in roots if r]
+
+
+def _find_longbench_zip():
+    hub = os.environ.get("HF_HUB_CACHE")
+    hubs = ([hub] if hub else []) + [os.path.join(r, "hub") for r in _hf_cache_roots()]
+    for h in hubs:
+        hits = sorted(glob.glob(os.path.join(h, "datasets--THUDM--LongBench",
+                                             "snapshots", "*", "data.zip")))
+        if hits:
+            return hits[0]
+    return None
+
+
+def _longbench_jsonl(dataset, dataset_path=None):
+    """Path to a local <dataset>.jsonl, or None if we have to go through the Hub."""
+    # 1. a local directory handed in via --dataset-path (dir of jsonl, or its parent)
+    if dataset_path and os.path.isdir(dataset_path):
+        for cand in (os.path.join(dataset_path, f"{dataset}.jsonl"),
+                     os.path.join(dataset_path, "data", f"{dataset}.jsonl")):
+            if os.path.exists(cand):
+                return cand
+    # 2. the hub snapshot's data.zip, extracted once and reused afterwards
+    out_dir = os.path.join(_hf_cache_roots()[0], "longbench_jsonl")
+    cand = os.path.join(out_dir, f"{dataset}.jsonl")
+    if os.path.exists(cand):
+        return cand
+    zip_path = _find_longbench_zip()
+    if zip_path is None:
+        return None
+    os.makedirs(os.path.dirname(out_dir), exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=".longbench_", dir=os.path.dirname(out_dir))
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmp)
+        try:
+            os.replace(os.path.join(tmp, "data"), out_dir)   # atomic; publishes all 35 files
+        except OSError:
+            pass                                             # a concurrent job won the race
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return cand if os.path.exists(cand) else None
 
 
 def _build_chat(tokenizer, prompt, model_name):
@@ -214,10 +280,15 @@ def load_longbench_samples(tokenizer, datasets, model_name, dataset_path="THUDM/
     no_chat = {"trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"}
 
     for dataset in datasets:
-        # Match experiments/LongBench/pred.py's load call exactly, including data_dir --
-        # that data_dir is what produced the hashed offline-cache config names
-        # (e.g. 'qasper-ae14b6d15afac659'); omitting it misses the cache offline.
-        data = load_dataset(dataset_path, dataset, split="test", data_dir=f"{dataset_path}/data")
+        jsonl = _longbench_jsonl(dataset, dataset_path)
+        if jsonl is not None:
+            # Offline path: same rows, same fields, no Hub round-trip.
+            data = load_dataset("json", data_files=jsonl, split="train")
+        else:
+            # Match experiments/LongBench/pred.py's load call exactly, including data_dir --
+            # that data_dir is what produced the hashed offline-cache config names
+            # (e.g. 'qasper-ae14b6d15afac659'); omitting it misses the cache offline.
+            data = load_dataset(dataset_path, dataset, split="test", data_dir=f"{dataset_path}/data")
         prompt_format = d2prompt[dataset]
         max_gen = int(d2maxlen[dataset])
         for i, obj in enumerate(data):
@@ -378,10 +449,19 @@ def collect_and_lookahead(model, input_ids, attention_mask, decode_steps=32, cap
         torch.cuda.empty_cache()
         print(f"[oom] sample too large for GPU (n={int(input_ids.shape[1])}); skipping and continuing. "
               f"Lower --max-length or set FIG_MAX_ANALYSIS_TOKENS to include long samples.", flush=True)
-        return {"n": int(input_ids.shape[1]), "M": M, "T": cfg.lookahead_len,
+        T = cfg.lookahead_len
+        return {"n": int(input_ids.shape[1]), "M": M, "T": T,
                 "particle_logprob": torch.zeros(M), "particle_entropy": torch.zeros(M),
-                "particle_weights": torch.zeros(M), "eta": float(cfg.particle_eta),
-                "lambda_h": float(cfg.lambda_h), "true_queries": None, "per_layer": []}
+                "particle_c": torch.zeros(M, T), "particle_H": torch.zeros(M, T),
+                "particle_V": torch.zeros(M, T),
+                "particle_c_bar": torch.zeros(M), "particle_V_bar": torch.zeros(M),
+                "particle_divergence": torch.zeros(M), "particle_divergence_z": torch.zeros(M),
+                "particle_weights": torch.zeros(M), "particle_R": torch.zeros(M),
+                "beta": float(getattr(cfg, "particle_beta", 1.0)),
+                "gamma": float(getattr(cfg, "particle_gamma", 0.0)),
+                "lambda_d": float(getattr(cfg, "lambda_d", 0.0)),
+                "normalize": bool(getattr(cfg, "normalize_typicality", False)),
+                "true_queries": None, "per_layer": []}
 
 
 @torch.no_grad()
@@ -390,7 +470,9 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
     for the TRUE future queries. Returns a dict of captured, per-layer analysis tensors.
 
     Faithful to phases 1-2 of lookahead_runner.generate_with_lookahead; the only additions are
-    (a) recording per-particle logprob & entropy separately (not just the combined R_m), and
+    (a) recording the PER-STEP statistics (c_u, H_u, V_u) and per-particle logprob/entropy
+        separately, not just the combined R_m -- tests V3/V4/V5 need the sequence, and
+        cbar_m = logp_mean + H_mean is exactly recoverable from the two means alone, and
     (b) the true-decode capture via PostRoPEQueryCapture.
     """
     device = input_ids.device
@@ -409,9 +491,14 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
     cfg = model.model.config
     M = cfg.num_particles
     T = cfg.lookahead_len
-    lambda_h = cfg.lambda_h
-    eta = cfg.particle_eta
+    beta = getattr(cfg, "particle_beta", 1.0)
+    gamma = getattr(cfg, "particle_gamma", 0.0)
+    lambda_d = getattr(cfg, "lambda_d", 0.0)
+    normalize = bool(getattr(cfg, "normalize_typicality", False))
+    div_stride = getattr(cfg, "divergence_layer_stride", 1)
     temperature = cfg.lookahead_temperature
+    top_k = getattr(cfg, "lookahead_top_k", None)
+    top_p = getattr(cfg, "lookahead_top_p", None)
 
     # ---- Phase 1: full uncompressed prefill (window queries + full K/V captured per layer) ----
     cfg.lookahead_phase = "collect"
@@ -444,35 +531,57 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
 
     # ---- Phase 2: M sampled lookahead particles (queries captured onto each kv_cluster) ----
     cfg.lookahead_phase = "lookahead"
-    particle_logprob = torch.zeros(M, device=device)
-    particle_entropy = torch.zeros(M, device=device)
+    add_repo_root()
+    from causal_lookahead_snapkv.monkeypatch.lookahead_runner import _shape_logits
+    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import step_stats
+    particle_lp = torch.zeros(M, T, device=device)   # log q(y_u | h_u)
+    particle_c = torch.zeros(M, T, device=device)    # centered score c_u = log q + H
+    particle_H = torch.zeros(M, T, device=device)    # entropy H_u
+    particle_V = torch.zeros(M, T, device=device)    # varentropy V_u
     for m in range(M):
         cfg.lookahead_particle_idx = m
         cache_m = _clone_dynamic_cache(base_cache)
-        probs0 = F.softmax(last_logits / max(temperature, 1e-5), dim=-1)
-        tok = torch.multinomial(probs0, num_samples=1)
-        logps, ents = [], []
+        q0 = torch.log_softmax(_shape_logits(last_logits, temperature, top_k, top_p), dim=-1).exp()
+        tok = torch.multinomial(q0, num_samples=1)
+        lps, cs, hs, vs = [], [], [], []
         pos = n
         for _t in range(T):
             step = model(input_ids=tok, past_key_values=cache_m, use_cache=True,
                          cache_position=torch.tensor([pos], device=device),
                          position_ids=torch.tensor([[pos]], device=device))
             logits = step.logits[:, -1, :].float()
-            logprobs = F.log_softmax(logits, dim=-1)
-            probs = logprobs.exp()
-            ent = -(probs * logprobs).sum(-1)
-            next_tok = torch.multinomial(F.softmax(logits / max(temperature, 1e-5), dim=-1), num_samples=1)
-            logps.append(logprobs.gather(-1, next_tok).squeeze())
-            ents.append(ent.squeeze())
+            z = _shape_logits(logits, temperature, top_k, top_p)
+            next_tok = torch.multinomial(torch.softmax(z, dim=-1), num_samples=1)
+            # Centering law == sampling law, so E[c_u | h_u] = 0 holds exactly.
+            lp_u, h_u, v_u, c_u = step_stats(logits, next_tok.squeeze(-1),
+                                             temperature=temperature, top_k=top_k, top_p=top_p)
+            lps.append(lp_u.squeeze()); cs.append(c_u.squeeze())
+            hs.append(h_u.squeeze()); vs.append(v_u.squeeze())
             cache_m = step.past_key_values
             tok = next_tok
             pos += 1
-        particle_logprob[m] = torch.stack(logps).mean()
-        particle_entropy[m] = torch.stack(ents).mean()
+        particle_lp[m] = torch.stack(lps)
+        particle_c[m] = torch.stack(cs)
+        particle_H[m] = torch.stack(hs)
+        particle_V[m] = torch.stack(vs)
+    particle_logprob = particle_lp.mean(-1)          # kept: the figures index it by name
+    particle_entropy = particle_H.mean(-1)
 
-    # Eq. 5-6: combined confidence and normalized weights (matches the runner / paper).
-    particle_scores = particle_logprob - lambda_h * particle_entropy
-    weights = F.softmax(eta * particle_scores, dim=0)
+    # Eq. 4/5: trajectory disagreement D_m, computed from the SAME per-layer lookahead
+    # query buffers the runner uses (so the figures and the deployed method score
+    # identically). Always computed here -- even when lambda_D == 0 -- because test S4
+    # (the incremental value of disagreement over (cbar, Hbar)) must run on ANY capture.
+    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import (
+        particle_trajectory_divergence, reliability_weights, standardize_disagreement,
+    )
+    particle_divergence = particle_trajectory_divergence(
+        model.model.layers, M, layer_stride=div_stride, device=device)
+    particle_divergence_z = standardize_disagreement(particle_divergence)
+
+    # Eq. 3/6: reliability score and normalized weights (matches the runner / paper).
+    weights, parts = reliability_weights(
+        particle_c, particle_H, particle_V, particle_divergence_z,
+        beta=beta, gamma=gamma, lambda_d=lambda_d, normalize=normalize)
     for layer in model.model.layers:
         layer.self_attn.kv_cluster.set_particle_weights(weights)
 
@@ -499,10 +608,21 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
     return {
         "n": n,
         "M": M, "T": T,
-        "particle_logprob": particle_logprob.cpu(),
-        "particle_entropy": particle_entropy.cpu(),
+        "particle_logprob": particle_logprob.cpu(),      # mean_u log q(y_u|h_u)
+        "particle_entropy": particle_entropy.cpu(),      # Hbar_m
+        "particle_logp_steps": particle_lp.cpu(),        # [M, T] per-step log q
+        "particle_c": particle_c.cpu(),                  # [M, T] centered score c_u
+        "particle_H": particle_H.cpu(),                  # [M, T] entropy H_u
+        "particle_V": particle_V.cpu(),                  # [M, T] varentropy V_u
+        "particle_c_bar": parts["c_bar"].cpu(),          # cbar_m == logp_mean + H_mean
+        "particle_V_bar": parts["V_bar"].cpu(),
+        "particle_typicality": parts["typicality"].cpu(),
+        "particle_R": parts["R"].cpu(),
+        "particle_divergence": particle_divergence.cpu(),
+        "particle_divergence_z": particle_divergence_z.cpu(),
         "particle_weights": weights.cpu(),
-        "eta": float(eta), "lambda_h": float(lambda_h),
+        "beta": float(beta), "gamma": float(gamma), "lambda_d": float(lambda_d),
+        "normalize": bool(normalize),
         "true_queries": true_queries,     # per layer [1, Hq, decode_steps, D] or None
         "per_layer": per_layer,
     }
@@ -571,8 +691,101 @@ def weighted_coverage(true_q, sources, weights):
     return float(cov.mean().item())
 
 
-def softmax_weights(scores, eta):
+def softmax_weights(scores, eta=1.0):
+    """Kept for back-compatibility. eta is NOT identifiable alongside (beta, gamma,
+    lambda_D) -- softmax(eta*(b*c - g*H - lD*D)) == softmax((eta*b)*c - ...) -- so new
+    code should call reliability_weights_from_capture() and leave eta at 1."""
     return F.softmax(eta * scores, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# Eq. 3 in the (beta, gamma, lambda_D) parametrization, evaluated on a capture.
+#
+#   c_u  = log q(y_u | h_u) + H(q(. | h_u)),  E[c_u | h_u] = 0
+#   R_m  = beta * cbar_m - gamma * Hbar_m - lambda_D * Dhat_m
+#
+# cbar_m is exactly recoverable from any existing capture as
+#   cbar_m = (mean log-prob)_m + (mean entropy)_m,
+# so every score-level sweep below re-weights already-captured particles with NO
+# re-decoding. Prop. 1 (nesting) in (beta, gamma, lambda_D) coordinates:
+#
+#   uniform weights                     (0,   0,       0)
+#   draft "log-probability only"        (1,   1,       0)   <- a FULL entropy penalty
+#   draft LORE-KV /E (lambda_H = 0.3)   (1,   1.3,     0)
+#   draft LORE-KV /D (lambda_D = 0.3)   (1,   1,       0.3) <- disagreement ON TOP of it
+#   pure typicality                     (1,   0,       0)   <- unreachable before
+#   disagreement instead of entropy     (1,   0,       0.3) <- what /D was meant to be
+# ---------------------------------------------------------------------------
+def centered_score(logprob_mean, entropy_mean):
+    """cbar_m = mean_u log q(y_u|h_u) + mean_u H_u."""
+    return logprob_mean + entropy_mean
+
+
+def reliability_R(c_bar, H_bar, d_hat=None, beta=1.0, gamma=0.0, lambda_d=0.0,
+                  V_bar=None, T=None, normalize=False):
+    """R_m = beta * (cbar or ctilde) - gamma * Hbar - lambda_D * Dhat."""
+    x = c_bar
+    if normalize:
+        if V_bar is None or not T:
+            raise ValueError("normalize=True needs V_bar and T")
+        x = c_bar / (V_bar / float(T)).clamp_min(1e-8).sqrt()
+    R = beta * x - gamma * H_bar
+    if d_hat is not None and lambda_d:
+        R = R - lambda_d * d_hat
+    return R
+
+
+def reliability_weights_from_capture(c_bar, H_bar, d_hat=None, **kw):
+    return F.softmax(reliability_R(c_bar, H_bar, d_hat, **kw), dim=0)
+
+
+# The (beta, gamma, lambda_D) grid every score-level figure compares. `gamma_E` is
+# 1 + lambda_H_old, so "entropy" relabels the published /E cell exactly.
+def weighting_grid(gamma_E=1.3, lambda_D=0.3):
+    return {
+        "uniform":     (0.0, 0.0,     0.0),
+        "logprob":     (1.0, 1.0,     0.0),
+        "typicality":  (1.0, 0.0,     0.0),
+        "entropy":     (1.0, gamma_E, 0.0),
+        "divergence":  (1.0, 1.0,     lambda_D),
+        "typ_div":     (1.0, 0.0,     lambda_D),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trajectory disagreement D_m (Eq. 7) recomputed from an already-captured sample.
+#
+# collect_and_lookahead() returns D over the FULL ensemble it generated; figures that
+# sweep nested prefixes (fig1's M in {1,2,4,8}) need D restricted to the prefix, since
+# "how atypical is m" is defined relative to whichever particles are actually being
+# combined. This runs the same core math on the captured per-layer query tensors.
+# ---------------------------------------------------------------------------
+@torch.no_grad()
+def divergence_from_capture(per_layer, num_particles, layer_stride=1, device=None):
+    """per_layer: the capture's list of per-layer dicts. Returns D [M] (zeros if M < 2)."""
+    add_repo_root()
+    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import divergence_from_query_stacks
+
+    M = int(num_particles)
+
+    def _stacks():
+        for pl in per_layer[::max(1, int(layer_stride))]:
+            qs = pl.get("lookahead_queries")
+            if not qs or len(qs) < M or any(qs[m] is None for m in range(M)):
+                continue
+            T = min(int(qs[m].shape[2]) for m in range(M))
+            if T == 0:
+                continue
+            yield torch.stack([qs[m][0, :, :T, :] for m in range(M)], dim=0)
+
+    return divergence_from_query_stacks(_stacks(), M, device=device)
+
+
+def standardize_scores(x):
+    """Zero-mean/unit-std across particles, exactly as R_m consumes D_m in the runner."""
+    add_repo_root()
+    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import standardize_particle_scores
+    return standardize_particle_scores(x)
 
 
 # ---------------------------------------------------------------------------

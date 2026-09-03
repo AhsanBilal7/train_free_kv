@@ -21,7 +21,7 @@ so every config recipe in the [top-level README](../../README.md) works here too
 EXPERIMENT=RULER bash scripts/run_h100.sh
 
 # Or via SLURM
-EXPERIMENT=RULER CONFIG_FILE=config/tlckv-pe-m4-adap-topk.conf sbatch scripts/run_h100.sh
+EXPERIMENT=RULER CONFIG_FILE=config/lorekv-ent-adap-topk.conf sbatch scripts/run_h100.sh
 
 # Or directly (GPU must be set manually)
 cd experiments/RULER

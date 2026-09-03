@@ -7,7 +7,7 @@
   C. head query mismatch         MM_lh = 1 - align(window queries, true queries) per head
 
 Saved: layer_head_data.npz. Run on the GPU cluster, e.g.:
-  python compute_layer_head.py --config config/tlckv-pe-m4-adap-topk.conf \
+  python compute_layer_head.py --config config/lorekv-ent-adap-topk.conf \
          --dataset single --samples-per-dataset 3 --budget 128
 """
 import argparse
@@ -28,7 +28,7 @@ def _unit(x, eps=1e-8):
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"))
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single")
@@ -86,15 +86,18 @@ def main():
             tq = cap["true_queries"][li]
             if kvc.full_key_states is None or tq is None:
                 continue
-            key, val = common.get_repeated_kv(kvc)
-            H = key.shape[1]
+            # k_rep/v_rep, NOT key/val: `key` is this sample's checkpoint entry id, and
+            # shadowing it made the later done.add(key) store a CUDA tensor, so resume
+            # never skipped a finished sample.
+            k_rep, v_rep = common.get_repeated_kv(kvc)
+            H = k_rep.shape[1]
             if G_lh is None:
                 G_lh = np.zeros((n_layers, H)); MM_lh = np.zeros((n_layers, H)); count_lh = np.zeros((n_layers, H))
 
             batches, flags = common.make_lookahead_batches(kvc, M)
-            scores = kvc._project_and_score(key, val, batches, flags)
+            scores = kvc._project_and_score(k_rep, v_rep, batches, flags)
             s_win, _, s_multi = common.combine_lookahead_scores(scores, weights, lambda_L, M)
-            oracle = common.oracle_scores(kvc, key, val, tq)
+            oracle = common.oracle_scores(kvc, k_rep, v_rep, tq)
 
             E_l[li] += float(s_multi.clamp_min(0).sum().item()); E_cnt[li] += 1
 

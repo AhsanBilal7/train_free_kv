@@ -11,7 +11,7 @@ Per sample:
                              cos(o_LORE, o_full) - cos(o_attn,   o_full)
 
 Saved: mismatch_data.npz. Run on the GPU cluster, e.g.:
-  python compute_mismatch.py --config config/tlckv-pe-m4-adap-topk.conf \
+  python compute_mismatch.py --config config/lorekv-ent-adap-topk.conf \
          --dataset single --samples-per-dataset 8 --budget 128
 """
 import argparse
@@ -36,7 +36,7 @@ def _cos_to_full(q, key, val, mask):
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"))
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single")
@@ -60,7 +60,6 @@ def main():
     common.apply_lookahead_patch()
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
-    eta = model.model.config.particle_eta
     lambda_L = model.model.config.lambda_lookahead
     window_size = model.model.config.window_size
 
@@ -96,12 +95,15 @@ def main():
             tq = cap["true_queries"][li]
             if kvc.full_key_states is None or tq is None:
                 continue
-            key, val = common.get_repeated_kv(kvc)
+            # k_rep/v_rep, NOT key/val: `key` is this sample's checkpoint entry id, and
+            # shadowing it made the later done.add(key) store a CUDA tensor, so resume
+            # never skipped a finished sample.
+            k_rep, v_rep = common.get_repeated_kv(kvc)
             batches, flags = common.make_lookahead_batches(kvc, M)
-            scores = kvc._project_and_score(key, val, batches, flags)
+            scores = kvc._project_and_score(k_rep, v_rep, batches, flags)
             s_win, _, s_multi = common.combine_lookahead_scores(scores, weights, lambda_L, M)
-            oracle = common.oracle_scores(kvc, key, val, tq)
-            n = key.shape[2]
+            oracle = common.oracle_scores(kvc, k_rep, v_rep, tq)
+            n = k_rep.shape[2]
 
             # mismatch: window-query coverage of the true queries
             cov_win.append(common.weighted_coverage(tq[0], [kvc.window_queries[0]], torch.ones(1)))
@@ -113,10 +115,10 @@ def main():
 
             # attention (SnapKV-style) importance
             qa = kvc.window_queries[0].float()
-            aw = torch.matmul(qa, key[0].transpose(1, 2).float()) / math.sqrt(key.shape[-1])
+            aw = torch.matmul(qa, k_rep[0].transpose(1, 2).float()) / math.sqrt(k_rep.shape[-1])
             s_attn = F.softmax(aw, dim=-1).mean(1)              # [H,n]
 
-            q = tq[0].float(); kf = key[0].float(); vf = val[0].float()
+            q = tq[0].float(); kf = k_rep[0].float(); vf = v_rep[0].float()
             m_lk = common.head_topb_mask(s_multi, n, args.budget, window_size)
             m_wn = common.head_topb_mask(s_win, n, args.budget, window_size)
             m_at = common.head_topb_mask(s_attn, n, args.budget, window_size)

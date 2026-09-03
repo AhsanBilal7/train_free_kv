@@ -17,7 +17,7 @@ match what the eviction actually uses.
 Saved: score_data.npz (read by plot_scores.py).
 
 Run on the GPU cluster, e.g.:
-  python compute_scores.py --config config/tlckv-pe-m4-adap-topk.conf \
+  python compute_scores.py --config config/lorekv-ent-adap-topk.conf \
          --dataset single --samples-per-dataset 3 --budget 128
 """
 import argparse
@@ -69,7 +69,7 @@ def attention_score_layer(kvc, key_states):
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"))
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single")

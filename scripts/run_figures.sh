@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH -p disc
+#SBATCH -p gpu
 #SBATCH --gres=gpu:2
 #SBATCH --job-name=lorekv-figures
-#SBATCH --output=/home/ahsan/LLM-AnDPro/logs/out_figures_%j.log
-#SBATCH --error=/home/ahsan/LLM-AnDPro/logs/err_figures_%j.log
+#SBATCH --output=logs/out_figures_%j.log
+#SBATCH --error=logs/err_figures_%j.log
 #SBATCH --time=1-00:00:00
 #
 # LORE-KV / TLC-KV analysis-figure driver.
@@ -21,7 +21,7 @@
 #   bash   scripts/run_figures.sh                         # same, interactively
 #   FIGURES="1 2 6" bash scripts/run_figures.sh           # only figures 1, 2, 6
 #   BENCHMARK=ruler DATASET=8192 bash scripts/run_figures.sh
-#   BUDGET=256 SAMPLES=5 CONFIG_FILE=config/tlckv-pe-mx-unif-topk.conf bash scripts/run_figures.sh
+#   BUDGET=256 SAMPLES=5 CONFIG_FILE=config/lorekv-ent-unif-topk.conf bash scripts/run_figures.sh
 #   PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from existing .npz (no GPU needed)
 
 module purge
@@ -95,10 +95,10 @@ nvidia-smi -L || true
 # Figure-run configuration (override any of these via env vars / CLI)
 # =============================================================================
 export BENCHMARK="${BENCHMARK:-longbench}"          # longbench | ruler
-export CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/tlckv-pe-m4-adap-topk.conf}"
+export CONFIG_FILE="${CONFIG_FILE:-$REPO_ROOT/config/lorekv-ent-adap-topk.conf}"
 export BUDGET="${BUDGET:-128}"                      # tightest budget is most diagnostic
 export SAMPLES="${SAMPLES:--1}"                      # samples per dataset/sub-task (-1 = all samples)
-export FIGURES="${FIGURES:-1 2 3 4 5 6 7 8 9}"      # which figures to (re)build
+export FIGURES="${FIGURES:-1 2 3 4 5 6 7 8 9 10}"   # which figures to (re)build
 export PLOT_ONLY="${PLOT_ONLY:-0}"                  # 1 = skip compute, only re-draw
 
 # Default dataset differs by benchmark: LongBench single-doc QA vs a RULER length.
@@ -227,9 +227,35 @@ if want 9; then
   python "$D/plot_budget.py"
 fi
 
+# =============================================================================
+# Figure 10 — particle trajectory disagreement D_m (the term that replaced the
+#   entropy penalty in the confidence score R_m, Eq. 7)
+#
+#   Panels A/B relate each particle's D_m and its predictive entropy to that
+#   particle's ORACLE utility on the SAME particles, so the two signals can be
+#   compared directly; panel C ranks every signal by Spearman correlation with
+#   utility; panel D re-weights the identical particles under uniform / log-prob /
+#   log-prob-entropy / log-prob-disagreement weights and compares the resulting
+#   coverage of Q_future (weights are the only thing that differs -- no extra
+#   test-time compute enters the comparison).
+#
+#   Needs M >= 2 to be meaningful (D_m is undefined for a single particle), hence
+#   --num-particles 8, matching figures 4 and 5.
+# =============================================================================
+if want 10; then
+  echo "### Figure 10: particle trajectory divergence vs. utility"
+  D="$FIG_DIR/fig10_particle_divergence"
+  [ "$PLOT_ONLY" = "1" ] || python "$D/compute_divergence.py" "${COMMON[@]}" \
+        --budget "$BUDGET" --num-particles 8 --decode-steps 32
+  python "$D/plot_divergence.py"          # add --utility align for the coverage-based utility
+fi
+
 echo "=============================================================="
 echo " Done. Figures + .npz data written under: $FIG_DIR/figN_*/"
 echo "=============================================================="
 
 
-# for f in 3 4 5 9 8 7 2 1; do echo "===== Running Figure $f ====="; FIGURES="$f" BENCHMARK=ruler bash scripts/run_figures.sh; status=$?; echo "===== Figure $f finished with exit code $status ====="; done
+# for f in 9 8 7 2 1; do echo "===== Running Figure $f ====="; FIGURES="$f" BENCHMARK=ruler bash scripts/run_figures.sh; status=$?; echo "===== Figure $f finished with exit code $status ====="; done
+
+
+# for f in 5 9 8 7 3 2 1; do echo "===== Running Figure $f ====="; FIGURES="$f" CONFIG_FILE=config/lorekv-ent-unif-topk.conf SAMPLES=200 BENCHMARK=ruler bash scripts/run_figures.sh; status=$?; if [ "$status" -eq 0 ]; then echo "===== Figure $f completed successfully ====="; else echo "===== Figure $f failed with status $status; continuing ====="; fi; done

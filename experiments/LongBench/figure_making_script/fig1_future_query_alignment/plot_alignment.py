@@ -2,7 +2,9 @@
 
   x-axis : number of lookahead particles M
   y-axis : cosine coverage of the true full-cache decode queries
-  curves : prompt-window / single trajectory / uniform-M / log-prob-M / LORE-KV-M
+  curves : prompt-window / single trajectory, then one per (beta, gamma, lambda_D)
+           cell of the Eq. 3 weighting grid (uniform / log-prob / typicality /
+           entropy / disagreement / disagreement-instead-of-entropy)
 """
 import argparse
 import os
@@ -19,9 +21,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STYLE = {
     "prompt_window": ("Prompt-window queries", "#7f7f7f", "o", "--"),
     "single_traj":   ("Single trajectory (M=1)", "#1f77b4", "s", "--"),
-    "uniform":       ("Multi-traj, uniform", "#2ca02c", "^", "-"),
-    "logprob":       ("Multi-traj, log-prob weighted", "#ff7f0e", "D", "-"),
-    "lorekv":        ("Multi-traj, LORE-KV (log-prob − entropy)", "#d62728", "*", "-"),
+    # Labels are the (beta, gamma, lambda_D) coordinates of Eq. 3. Note that the
+    # draft's "log-probability only" is (1, 1, 0) -- a FULL unit of entropy penalty --
+    # while (1, 0, 0) is the actual no-entropy control.
+    "uniform":       (r"Uniform  $(0,0,0)$", "#2ca02c", "^", "-"),
+    "logprob":       (r"Log-prob  $(1,1,0)$", "#ff7f0e", "D", "-"),
+    "typicality":    (r"Typicality  $(1,0,0)$", "#9467bd", "v", "-"),
+    "entropy":       (r"Entropy (/E)  $(1,\gamma,0)$", "#1f77b4", "*", "-"),
+    "divergence":    (r"Disagreement (/D)  $(1,1,\lambda_D)$", "#8c564b", "P", "-"),
+    "typ_div":       (r"Disagreement, no entropy  $(1,0,\lambda_D)$", "#d62728", "X", "-"),
+    # legacy keys from pre-reparametrization .npz files
+    "lorekv":        (r"Log-prob $-$ entropy (legacy)", "#1f77b4", "*", ":"),
+    "lorekv_div":    (r"Log-prob $-$ disagreement (legacy)", "#d62728", "P", ":"),
 }
 
 
@@ -40,6 +51,8 @@ def main():
 
     fig, ax = plt.subplots(figsize=(6.4, 4.6))
     for key, (label, color, marker, ls) in STYLE.items():
+        if f"mean_{key}" not in d:
+            continue          # .npz predates this strategy (or is a legacy capture)
         mean = d[f"mean_{key}"]
         std = d[f"std_{key}"]
         # prompt-window & single-trajectory are M-independent -> draw flat reference lines

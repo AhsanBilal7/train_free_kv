@@ -15,7 +15,7 @@ full output. A method that preserves the decode-time distribution keeps cosine n
 Saved: distribution_data.npz (read by plot_distribution.py).
 
 Run on the GPU cluster, e.g.:
-  python compute_distribution.py --config config/tlckv-pe-m4-adap-topk.conf \
+  python compute_distribution.py --config config/lorekv-ent-adap-topk.conf \
          --dataset single --samples-per-dataset 2 --budget 128 --decode-steps 16
 """
 import argparse
@@ -63,7 +63,7 @@ def attn_outputs(q, k, v, mask=None):
 @torch.no_grad()
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "tlckv-pe-m4-adap-topk.conf"))
+    ap.add_argument("--config", default=os.path.join(common.CONFIG_DIR, "lorekv-ent-adap-topk.conf"))
     ap.add_argument("--model", default=None)
     ap.add_argument("--benchmark", default="longbench", choices=["longbench", "ruler"])
     ap.add_argument("--dataset", default="single")
