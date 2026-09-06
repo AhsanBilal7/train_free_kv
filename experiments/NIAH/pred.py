@@ -114,7 +114,8 @@ def parse_args(args=None):
     parser.add_argument("-d", '--dataset', type=str, default=None, help="unused for NIAH; kept for parity with the shared run.sh contract")
     parser.add_argument("--out_name", type=str, required=True)
     parser.add_argument('--compress_args_path', type=str, default=None, help="unused; kept for parity with LongBench run.sh")
-    parser.add_argument('--mode', type=str, choices=['ada', 'fix', "andpro", "critical", 'test', "slm", "causal_forward_only", "causal_lookahead"], help="KV-eviction mode (same set as LongBench/RULER)")
+    # 'full' and 'test' are the same unpatched full-cache path; see LongBench/pred.py.
+    parser.add_argument('--mode', type=str, choices=['ada', 'fix', "andpro", "critical", 'full', 'test', "slm", "causal_forward_only", "causal_lookahead"], help="KV-eviction mode (same set as LongBench/RULER)")
     parser.add_argument('--floor_alpha',type=float,default=0.2,help="floor_alpha budgets for each head")
     parser.add_argument('--gqa_support',action='store_true', default=False, help="init gqa_support")
     parser.add_argument('--gqa_func',type=str, default="mean", help="gqa operation:optional max mean")

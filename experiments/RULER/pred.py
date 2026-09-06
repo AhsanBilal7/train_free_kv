@@ -46,7 +46,12 @@ def parse_args(args=None):
     parser.add_argument("-d", '--dataset', type=str, required=True)
     parser.add_argument("--out_name", type=str, required=True)
     parser.add_argument('--compress_args_path', type=str, default=None, help="Path to the compress args (unused; kept for parity with LongBench run.sh)")
-    parser.add_argument('--mode', type=str, choices=['ada', 'fix', "andpro", "critical", 'test', "slm", "causal_forward_only", "causal_lookahead"], help="Ada mode, fix mode, andpro mode, criticalkv mode, causal_forward_only (Training-Free Causal AnDPro), causal_lookahead (Training-Free Test-Time Lookahead Causal KV Eviction), or normal")
+    # 'full' and 'test' are the same thing -- neither installs a hijack, so the model
+    # decodes from the complete KV cache. 'full' is the name to use: it is what the
+    # Full Cache row of every results table is, and out_name is built from this string,
+    # so a run stored as test_<model>_... reads like a throwaway rather than the
+    # uncompressed reference. 'test' is kept only so older commands still parse.
+    parser.add_argument('--mode', type=str, choices=['ada', 'fix', "andpro", "critical", 'full', 'test', "slm", "causal_forward_only", "causal_lookahead"], help="Ada mode, fix mode, andpro mode, criticalkv mode, full (uncompressed reference; 'test' is a legacy alias), causal_forward_only (Training-Free Causal AnDPro), causal_lookahead (Training-Free Test-Time Lookahead Causal KV Eviction), or normal")
     parser.add_argument('--floor_alpha',type=float,default=0.2,help="floor_alpha budgets for each head")
     parser.add_argument('--gqa_support',action='store_true', default=False, help="init gqa_support")
     parser.add_argument('--gqa_func',type=str, default="mean", help="gqa operation:optional max mean")
