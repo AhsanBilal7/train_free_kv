@@ -94,6 +94,11 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
             [{"role": "user", "content": user_content}],
             add_generation_prompt=True,
             return_tensors="pt",
+            # Qwen3 is a hybrid reasoning model and opens a <think> block by
+            # default, which consumes the whole short answer budget. This is its
+            # template's own non-thinking switch; templates that do not use the
+            # variable (Mistral, Llama) ignore the extra keyword.
+            enable_thinking=False,
         )
         if answer_prefix:
             prefix_ids = tokenizer(answer_prefix, add_special_tokens=False, return_tensors="pt").input_ids

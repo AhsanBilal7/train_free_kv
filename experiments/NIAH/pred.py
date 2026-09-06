@@ -324,6 +324,9 @@ def build_niah_input(tokenizer, context_text, question, guidance, max_length, de
             [{"role": "user", "content": user_content}],
             add_generation_prompt=True,
             return_tensors="pt",
+            # See build_ruler_input in experiments/RULER/pred.py: Qwen3's
+            # non-thinking switch, ignored by templates that do not use it.
+            enable_thinking=False,
         )
     else:
         input_ids = tokenizer(user_content, truncation=False, return_tensors="pt").input_ids
