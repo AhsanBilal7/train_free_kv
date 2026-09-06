@@ -1,19 +1,9 @@
-"""andpro_ext_flash_attn2_forward -- andpro_snapkv's attention hijack for the models_ext backbones.
+"""andpro_ext_flash_attn2_forward -- andpro_snapkv's hijack for the models_ext backbones (Ministral3).
 
-GENERATED from andpro_snapkv/monkeypatch/andpro_llama_hijack.py by
-scripts/gen_ext_hijacks.py; do not edit by hand. Re-run the generator after any
-change to the Llama hijack so the two stay in lockstep.
-
-Qwen3 and Ministral3 are expressed in the Llama idiom (see models_ext/), so the
-model body, the causal mask, the cache and `prepare_inputs_for_generation` are
-all inherited from Llama and reused as-is by the replace_* functions in
-andpro_snapkv/monkeypatch/monkeypatch.py. Only the attention forward has to be
-re-emitted, because the vendored attention classes define their own `forward`
-and would otherwise shadow whatever is patched onto LlamaFlashAttention2.
-
-The body below is the Llama one with a single edit: the three q/k/v projections
-and their `.view(...).transpose(1, 2)` reshapes are replaced by the backbone's
-`project_qkv`, and an optional post-RoPE `scale_query` hook is applied.
+GENERATED from andpro_snapkv/monkeypatch/andpro_llama_hijack.py by scripts/gen_ext_hijacks.py;
+do not edit by hand. Re-run the generator after any change to the Llama hijack
+so the two stay in lockstep. See that script's docstring for what is edited and
+why.
 """
 
 from typing import List, Optional, Tuple, Union
@@ -55,10 +45,9 @@ def andpro_ext_flash_attn2_forward(
 
     bsz, q_len, _ = hidden_states.size()
 
-    # The one place these backbones differ from Llama: Qwen3 RMS-normalizes q and k
-    # per head before RoPE, and both models size their heads from config.head_dim.
-    # `project_qkv` is defined on the model's own attention class (models_ext), so
-    # this single forward serves every backbone registered there.
+    # The one place this backbone differs from Llama: it sizes its heads from
+    # config.head_dim. `project_qkv` is defined on the model's own attention class
+    # (models_ext), so this single forward serves every backbone registered there.
     query_states, key_states, value_states = self.project_qkv(hidden_states)
 
     if position_embeddings is None:

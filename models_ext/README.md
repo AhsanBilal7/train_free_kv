@@ -1,4 +1,4 @@
-# `models_ext` — backbones the pinned Transformers cannot load
+# `models_ext` — backbones beyond the pinned Transformers release
 
 ## Why this exists
 
@@ -13,29 +13,24 @@ Every eviction method in this repo is a monkeypatch. `adaptive_snapkv`,
 
 `*FlashAttention2` was deleted in transformers 4.48, when attention moved behind
 `ALL_ATTENTION_FUNCTIONS`. The repo is therefore pinned to **transformers 4.44.2**,
-and two of the backbones the paper reports were released after that pin:
+and the two backbones added on top of Mistral-7B-Instruct-v0.2 and
+Llama-3.1-8B-Instruct each need something under that pin — but not the same thing.
 
-| backbone | `model_type` | needs |
+| backbone | `model_type` | situation |
 |---|---|---|
-| `Qwen/Qwen3-8B` | `qwen3` | transformers ≥ 4.51 |
-| `mistralai/Ministral-3-8B-Instruct-2512` | `mistral3` / `ministral3` | transformers 5.x |
+| `Qwen/Qwen2.5-14B-Instruct` | `qwen2` | **native to 4.44**, no vendoring; but its 4.44 implementation predates the rotary refactor, so it needs its own hijack forwards |
+| `mistralai/Ministral-3-8B-Instruct-2512` | `mistral3` / `ministral3` | added in transformers 5.x; **vendored** here |
 
-Upgrading transformers to reach them would invalidate all four hijacks at once, on
-backbones whose results are already in the paper. So instead the two architectures
-are re-expressed here in the 4.44 Llama idiom. Both subclass
-`transformers.models.llama.modeling_llama`, which means they expose exactly the
-surface the hijacks patch and inherit Llama's cache, causal mask, rotary plumbing
-and generation input prep unchanged.
+Upgrading transformers to reach Ministral-3 would invalidate all four hijacks at
+once, on backbones whose results are already in the paper. So it is re-expressed
+here in the 4.44 Llama idiom: `modeling_ministral3.py` subclasses
+`transformers.models.llama.modeling_llama`, exposing exactly the surface the
+hijacks patch and inheriting Llama's cache, causal mask, rotary plumbing and
+generation input prep unchanged.
 
-## What is actually different from Llama
+## What is actually different
 
-Almost nothing, which is why this is tractable.
-
-**Qwen3** (`modeling_qwen3.py`)
-* per-head RMSNorm on q and k, after the head split and before RoPE;
-* `head_dim` read from the config rather than `hidden_size // num_heads`.
-
-**Ministral3** (`modeling_ministral3.py`)
+**Ministral3** (`modeling_ministral3.py`), vs. Llama:
 * a YaRN inverse-frequency schedule. 4.44 *has* a `"yarn"` branch, but an older
   one: it takes the correction range from `max_position_embeddings` (262144)
   instead of `original_max_position_embeddings` (16384), and derives the attention
@@ -46,42 +41,63 @@ Almost nothing, which is why this is tractable.
   length scaling). It is exactly 1.0 below 16384 tokens and 1.069 in the
   16384–32767 band.
 
-Both hooks (`project_qkv`, `scale_query`) live on the attention class, so each
-eviction package needs **one** extra function — the attention forward — rather than
-a whole new hijack file. Those are generated from the package's Llama hijack by
+Both are exposed as hooks on the attention class (`project_qkv`, `scale_query`),
+so each eviction package needs one extra attention forward and nothing else.
+
+**Qwen2**, vs. Llama in 4.44: the attention forward takes no
+`position_embeddings`; the rotary module is table-based (`rotary_emb(x, seq_len=…)`)
+and `apply_rotary_pos_emb` indexes that table with `position_ids`; and the model
+forward therefore neither computes nor threads `position_embeddings` through the
+layers. So the package supplies a Qwen2 model forward as well as an attention one.
+
+The one substantive decision in that port: **`seq_len` for the rotary table must
+come from the positions being served, not from the cache.** In the post-eviction
+phase the flattened per-head cache reports a length of 1 while `position_ids`
+keeps counting, so a cache-derived length yields a table thousands of rows short.
+The patched model forward computes `_rope_seq_len` once per call (reading it off a
+device tensor is a synchronization, and 48 layers × every decode step adds up) and
+the attention layers read it from the config.
+
+All of these files are generated from each package's own Llama hijack by
 `scripts/gen_ext_hijacks.py`, so they cannot drift from it.
 
 ## Checkpoint preparation
 
 Neither backbone is loaded straight from the Hub.
 
-`scripts/prepare_qwen3_local.py` writes `$SCRATCH/models/Qwen3-8B`: weights
+`scripts/prepare_local_checkpoint.py` writes `$SCRATCH/models/<name>`: weights
 symlinked, everything else copied, and `tokenizer.json` rewritten from the
 `["a","b"]` merge format (tokenizers ≥ 0.20) to the `"a b"` form that tokenizers
-0.19 parses. Without that rewrite the tokenizer load dies with
-`data did not match any variant of untagged enum ModelWrapper`. A local directory
-also sidesteps a cache-layout trap: `.env` points `TRANSFORMERS_CACHE` at `$HF_HOME`
-while `huggingface_hub` downloads into `$HF_HOME/hub`, and ACES compute nodes have
-no outbound network to cover the difference.
+0.19 parses, *when needed* — Qwen2.5-14B-Instruct already ships the old format and
+is copied through untouched. A local directory also sidesteps a cache-layout trap:
+`.env` points `TRANSFORMERS_CACHE` at `$HF_HOME` while `huggingface_hub` downloads
+into `$HF_HOME/hub`, and ACES compute nodes have no outbound network to cover the
+difference.
 
-`scripts/convert_ministral3.py` writes `$SCRATCH/models/Ministral-3-8B-Instruct-2512`:
-the published checkpoint is a `Mistral3ForConditionalGeneration` (Pixtral vision
-tower + `ministral3` text model, every text weight under a `language_model.`
-prefix), and the script keeps the text tensors, renames them, drops the vision
-tower and the projector, and flattens `config.text_config` into a standalone
-config. Convert the **`-BF16`** repo: the default one is FP8-quantized.
+`scripts/convert_ministral3.py` writes
+`$SCRATCH/models/Ministral-3-8B-Instruct-2512`: the published checkpoint is a
+`Mistral3ForConditionalGeneration` (Pixtral vision tower + `ministral3` text model,
+every text weight under a `language_model.` prefix), and the script keeps the text
+tensors, renames them, drops the vision tower and the projector, and flattens
+`config.text_config` into a standalone config. Convert the **`-BF16`** repo: the
+default one is FP8-quantized.
 
 ## Correctness
 
-`scripts/validate_models_ext.py` runs the same checkpoint on the same tokens under
-both implementations, in two processes because they need different transformers
-releases, and compares logits. In **float32 with eager attention** the two are
-expected to agree exactly; bfloat16 with sdpa does not, because torch 2.1 and
-torch 2.6 select different sdpa backends and the disagreement on the largest
-logits reaches ~12 while top-1 still agrees on 99.5% of positions. That is kernel
-noise, not a modelling difference, and float32/eager is what settles the question.
+Two checks, both scripted.
 
-Recorded results (Qwen3-8B, 256 tokens, float32, eager):
+**1. Vendored vs. upstream** (`scripts/validate_models_ext.py`). Runs the same
+checkpoint on the same tokens under both implementations — two processes, because
+they need different transformers releases — and compares logits. In **float32 with
+eager attention** the two are expected to agree exactly; bfloat16 with sdpa does
+not, because torch 2.1 and torch 2.6 select different sdpa backends and the
+disagreement on the largest logits reaches ~12 while top-1 still agrees on 99.5% of
+positions. That is kernel noise, not a modelling difference, and float32/eager is
+what settles the question.
+
+Recorded (Ministral-3-8B, 256 tokens, float32, eager; upstream side loads the
+original Mistral3 vision-language wrapper, so this validates the text-tower
+extraction and the modelling code together):
 
 ```
   max |a-b|          0.00000
@@ -89,19 +105,24 @@ Recorded results (Qwen3-8B, 256 tokens, float32, eager):
   top-1 agreement    100.0000%  (256/256 positions)
 ```
 
-The Qwen3 tokenizer rewrite is checked separately: the rewritten and original
-files produce identical ids on a mixed ASCII/unicode/whitespace/code probe, and
-`apply_chat_template(..., enable_thinking=False)` returns the identical string
-under both stacks.
+**2. Patched vs. stock prefill** (`scripts/smoke_ext_backbones.py`). The eviction
+pipeline's "collect" phase evicts nothing, so its logits must equal the unpatched
+model's. This is what exercises the rewritten Qwen2 rotary path end to end.
+Recorded for both backbones: `max |diff| 0.000000, argmax match`. The same script
+then decodes a 4k-token needle prompt under `causal_lookahead`, `andpro` and
+`critical` at B=128 and checks the answer comes back.
 
 ## Evaluation-protocol notes
 
-* **Qwen3 runs in non-thinking mode.** It is a hybrid reasoning model; under the
-  default template it opens a `<think>` block and spends the whole short LongBench
-  budget inside it, so every answer comes back empty. `pred.py`'s `build_chat`
-  passes `enable_thinking=False`, the template's own switch, which emits an
-  already-closed empty think block.
+* **Qwen2.5-Instruct uses its ChatML template** (`pred.py`'s `build_chat`), which
+  prepends the model's own ~20-token default system message. Without the template
+  the model continues the document instead of answering. `enable_thinking=False` is
+  passed and is inert for Qwen2.5 — its template does not read the variable — but
+  guards against a hybrid-reasoning Qwen checkpoint silently spending the whole
+  short generation budget inside a `<think>` block.
 * **Ministral3 uses plain `[INST]…[/INST]`**, not the packaged chat template. That
   template injects a multi-hundred-token "Le Chat" system prompt (with the current
   date and tool-use instructions) ahead of every prompt, which would change the
   long-context input the eviction methods are being compared on.
+* Qwen2.5-14B is roughly twice the parameters of the other three backbones
+  (~28 GB in bf16 before the KV cache), so it is correspondingly slower per sample.

@@ -214,7 +214,7 @@ The lookahead term changes the eviction decision rather than merely rescaling pr
 For the core method, $\operatorname{Alloc}$ uniformly splits the available per-layer budget across heads, while $\operatorname{Select}$ retains the top-scoring tokens for each head. The final cache is obtained as $\mathcal{R}^{l,h}{\mathrm{final}}=\mathcal{P}\cup\mathcal{R}^{l,h}$ and $(\mathbf{K}^{l,h}{\star},\mathbf{V}^{l,h}{\star})=\operatorname{Gather}(\mathbf{K}^{l,h},\mathbf{V}^{l,h},\mathcal{R}^{l,h}{\mathrm{final}})$. The sampled lookahead continuations are then discarded, and decoding proceeds only with the compressed cache. Optional adaptive allocation and diversity-aware selection are disabled in the core method and are studied separately in Appendix~\ref{sec:ablation_components}.
 
 \section{Experiments} \label{subsec:setup}
-We follow AnDPro’s evaluation protocol \citep{geng2026accurate}, comparing all methods under matched cache budgets, backbones, and observation windows. We evaluate \textbf{LongBench} \citep{bai2024longbench}, \textbf{RULER} \citep{hsieh2024ruler}, and \textbf{NIAH} \citep{kamradt2023needle} on Mistral-7B-Instruct-v0.2 \citep{jiang2023mistral} and Llama-3.1-8B-Instruct \citep{dubey2024llama}, with $B\in{128,256,512,1024}$. \textcolor{teal}{Because both backbones predate the method, we additionally evaluate LongBench on two more recent instruction-tuned models of comparable size, Qwen3-8B and Ministral-3-8B-Instruct-2512, under the identical pipeline and budgets; these test whether the prompt-to-future query mismatch LORE-KV exploits is a property of the two original backbones or of long-context decoding more generally (Appendix~\ref{app:new_backbones}).} Shared settings and LORE-KV hyperparameters are given in Table~\ref{tab:hyperparams}, and LongBench dataset details in Table~\ref{tab:longbench_datasets}. Results appear in Sections~\ref{subsec:longbench}, \ref{subsec:niah}, and~\ref{subsec:ruler}, with efficiency and mechanism analysis in Sections~\ref{subsec:efficiency} and~\ref{subsec:mechanism}, ablations in Table~\ref{tab:ablation_summary} following Appendix~\ref{sec:ablation_components}, and implementation details in Appendix~\ref{app:experimental_details}. We report both \lorekvE{} and \lorekvD{} under an otherwise identical pipeline; they differ only in reliability coefficients (Table~\ref{tab:hyperparams}), although the two-coefficient change means they are not a single-factor contrast (Proposition~1). Their definitions and score-level comparison are provided in Appendices~\ref{app:reparam_grid} and~\ref{app:divergence}.
+We follow AnDPro’s evaluation protocol \citep{geng2026accurate}, comparing all methods under matched cache budgets, backbones, and observation windows. We evaluate \textbf{LongBench} \citep{bai2024longbench}, \textbf{RULER} \citep{hsieh2024ruler}, and \textbf{NIAH} \citep{kamradt2023needle} on Mistral-7B-Instruct-v0.2 \citep{jiang2023mistral} and Llama-3.1-8B-Instruct \citep{dubey2024llama}, with $B\in{128,256,512,1024}$. \textcolor{teal}{Because both backbones predate the method, we additionally evaluate LongBench on two further instruction-tuned models, Qwen2.5-14B-Instruct and Ministral-3-8B-Instruct-2512, under the identical pipeline and budgets; these test whether the prompt-to-future query mismatch LORE-KV exploits is a property of the two original backbones or of long-context decoding more generally (Appendix~\ref{app:new_backbones}).} Shared settings and LORE-KV hyperparameters are given in Table~\ref{tab:hyperparams}, and LongBench dataset details in Table~\ref{tab:longbench_datasets}. Results appear in Sections~\ref{subsec:longbench}, \ref{subsec:niah}, and~\ref{subsec:ruler}, with efficiency and mechanism analysis in Sections~\ref{subsec:efficiency} and~\ref{subsec:mechanism}, ablations in Table~\ref{tab:ablation_summary} following Appendix~\ref{sec:ablation_components}, and implementation details in Appendix~\ref{app:experimental_details}. We report both \lorekvE{} and \lorekvD{} under an otherwise identical pipeline; they differ only in reliability coefficients (Table~\ref{tab:hyperparams}), although the two-coefficient change means they are not a single-factor contrast (Proposition~1). Their definitions and score-level comparison are provided in Appendices~\ref{app:reparam_grid} and~\ref{app:divergence}.
 
 \begin{table}[t]
 \caption{LongBench results on Mistral-7B-Instruct-v0.2.}
@@ -905,7 +905,7 @@ This work uses publicly available models and benchmarks and involves no human su
 
 \subsection*{Reproducibility Statement}
 
-LORE-KV is training-free and modifies no model weights. The complete methodology and algorithm are provided in Section~\ref{sec:methodology} and Algorithm~\ref{alg:lorekv}. Hyperparameters are reported in Table~\ref{tab:hyperparams}, implementation details in Appendix~\ref{app:implementation}, and dataset and evaluation settings in Appendix~\ref{app:ruler_results} and Table~\ref{tab:longbench_datasets}. Ablations and mechanism-analysis protocols are provided in Tables~\ref{tab:ablation_summary}-\ref{tab:ruler_ablation} and Appendix~\ref{app:mechanism_protocol}. \textcolor{teal}{Every eviction method here is implemented as a monkeypatch over a single pinned Transformers release, which predates two of the four backbones; those two are therefore run through re-expressions of their architectures against that release, each verified to reproduce the reference implementation's logits exactly in float32 (Appendix~\ref{app:new_backbones}).}
+LORE-KV is training-free and modifies no model weights. The complete methodology and algorithm are provided in Section~\ref{sec:methodology} and Algorithm~\ref{alg:lorekv}. Hyperparameters are reported in Table~\ref{tab:hyperparams}, implementation details in Appendix~\ref{app:implementation}, and dataset and evaluation settings in Appendix~\ref{app:ruler_results} and Table~\ref{tab:longbench_datasets}. Ablations and mechanism-analysis protocols are provided in Tables~\ref{tab:ablation_summary}-\ref{tab:ruler_ablation} and Appendix~\ref{app:mechanism_protocol}. \textcolor{teal}{Every eviction method here is implemented as a monkeypatch over a single pinned Transformers release, which predates one of the four backbones; that one is therefore run through a re-expression of its architecture against that release, verified to reproduce the reference implementation's logits exactly in float32 (Appendix~\ref{app:new_backbones}).}
 
 \bibliography{main}
 \bibliographystyle{iclr2027_conference}
@@ -1394,7 +1394,7 @@ used in these tests.
 \textcolor{purple}{LongBench results with Mistral follow the protocol of \citet{geng2026accurate}. CriticalKV, AnDPro, and both LORE-KV variants are re-run under one implementation for RULER, NIAH, and LongBench with Llama. The Llama LongBench table reports LaProx values published by \citet{mai2026reformulating} at the same backbone and token budgets; because they come from a separate implementation, LaProx is treated as an external reference rather than a matched run.} Lookahead Q-Cache \citep{wang2025lookahead} is included as the compute-matched end-to-end baseline \textbf{LAQ++}; the corresponding score-level diagnostic is analyzed in Appendix~\ref{app:score_shift}.
 
 \textbf{Backbones and prompt formats.}
-\textcolor{teal}{The four backbones are Mistral-7B-Instruct-v0.2, Llama-3.1-8B-Instruct, Qwen3-8B and Ministral-3-8B-Instruct-2512. Prompts follow each model's own convention and are otherwise identical across methods, so the comparison within a backbone is unaffected: Mistral takes the raw LongBench prompt, matching \citet{geng2026accurate}; Llama-3.1 and Qwen3 use their chat templates; and Ministral-3 uses Mistral's \texttt{[INST]}\,$\cdots$\,\texttt{[/INST]} format rather than its packaged template, which would prepend a several-hundred-token assistant system prompt to every long-context input. Qwen3 is a hybrid reasoning model and is evaluated in its \emph{non-thinking} mode (the template's own \texttt{enable\_thinking=False} setting, which emits an empty closed reasoning block): in thinking mode it consumes the entire short LongBench generation budget inside that block and returns no answer, so this is a requirement of the benchmark rather than a tuning choice. Ministral-3-8B-Instruct-2512 is released as a vision-language checkpoint; we evaluate its text tower, extracted without modifying any weight.}
+\textcolor{teal}{The four backbones are Mistral-7B-Instruct-v0.2, Llama-3.1-8B-Instruct, Qwen2.5-14B-Instruct and Ministral-3-8B-Instruct-2512. Prompts follow each model's own convention and are otherwise identical across methods, so the comparison within a backbone is unaffected: Mistral takes the raw LongBench prompt, matching \citet{geng2026accurate}; Llama-3.1 and Qwen2.5 use their chat templates; and Ministral-3 uses Mistral's \texttt{[INST]}\,$\cdots$\,\texttt{[/INST]} format rather than its packaged template, which would prepend a several-hundred-token assistant system prompt to every long-context input. Qwen2.5-14B-Instruct is also the one backbone of materially different scale, at roughly twice the parameters of the other three. Ministral-3-8B-Instruct-2512 is released as a vision-language checkpoint; we evaluate its text tower, extracted without modifying any weight.}
 
 \textbf{Implementation.}
 Our implementation builds on the Ada-KV framework and uses a single NVIDIA H100 80\,GB GPU. All methods use the same retained cache size at a fixed budget, and adjacent-token grouping follows SnapKV and Ada-KV. Unless stated otherwise, LORE-KV runs at the core configuration of Table~\ref{tab:hyperparams} with all plug-ins disabled, thereby isolating the score in Eq.~\ref{eq:final_score}. The reliability coefficients are the only difference between the two variants.
@@ -1841,7 +1841,7 @@ Table~\ref{tab:ruler_ablation}.
 
 
 
-\subsection{LongBench with Qwen3-8B and Ministral-3-8B-Instruct-2512}
+\subsection{LongBench with Qwen2.5-14B-Instruct and Ministral-3-8B-Instruct-2512}
 \label{app:new_backbones}
 \color{teal}
 
@@ -1849,46 +1849,49 @@ Mistral-7B-Instruct-v0.2 and Llama-3.1-8B-Instruct are the two backbones the
 prior work we compare against reports, which makes them the right choice for a
 matched comparison but a weak test of generality: both predate LORE-KV, and both
 share a dense, full-attention decoder with a comparatively short pretraining
-context. We therefore repeat the LongBench evaluation on two more recent
-instruction-tuned models of similar size --- Qwen3-8B and
+context. We therefore repeat the LongBench evaluation on two further
+instruction-tuned models --- Qwen2.5-14B-Instruct and
 Ministral-3-8B-Instruct-2512 --- holding the pipeline, the budgets, the
 observation window, the chunk size and the reliability coefficients fixed at the
 core configuration of Table~\ref{tab:hyperparams}. Only the backbone changes.
 The two models are useful precisely because they differ from the originals in
-ways that could plausibly interact with the mechanism: Qwen3 normalizes its query
-and key projections per head, which reshapes the geometry the deletion score in
-Eq.~\ref{eq:projected_score} is measured in, and Ministral-3 is trained with a
-YaRN-extended $262$K context and a position-dependent query scale, so its
-prompt-side queries are already adapted to long inputs.
+ways that could plausibly interact with the mechanism: Qwen2.5-14B is roughly
+twice the size of the other three backbones, so it tests whether the gain
+survives a model with more attention heads and more redundant capacity to spare,
+and Ministral-3 is trained with a YaRN-extended $262$K context and a
+position-dependent query scale, so its prompt-side queries are already adapted to
+long inputs.
 
 \textbf{Protocol.} Identical to Appendix~\ref{app:datasets} in every respect
 except the prompt format, which follows each model's own convention and is held
 fixed across methods within a backbone (so the comparison at issue is unaffected).
-Qwen3 is evaluated in non-thinking mode; Ministral-3 uses the plain
+Qwen2.5 uses its ChatML template; Ministral-3 uses the plain
 \texttt{[INST]}\,$\cdots$\,\texttt{[/INST]} format and its text tower, extracted
 from the released vision-language checkpoint without modifying any weight. Both
 choices are stated in Appendix~\ref{app:datasets} and neither is tuned.
 
 \textbf{Implementation note.} Every method compared here is a monkeypatch that
 replaces the attention and model forward passes of one pinned Transformers
-release; the two backbones above were released after it, and upgrading would
-invalidate the patches for the two backbones already reported. Each is therefore
-re-expressed against the pinned release, reusing the shared decoder implementation
-and adding only the two mechanisms that differ (Qwen3's per-head query/key
-normalization; Ministral-3's YaRN frequency schedule and post-rotary query
-scaling). The re-expressions are not assumed correct: each is run against the
-reference implementation on the same checkpoint and the same tokens, and in
-float32 with exact attention the two agree to the last bit --- maximum absolute
-logit difference $0.00000$ and top-1 agreement at every position --- so any
-difference in the tables below is a property of the backbone, not of the port.
-The tokenizers are checked the same way, on a mixed ASCII, Unicode, whitespace
-and code probe.
+release. Ministral-3's architecture was added to that library only afterwards, and
+upgrading would invalidate the patches for the backbones already reported, so it
+is re-expressed against the pinned release: the shared decoder implementation is
+reused and only the two mechanisms that differ are added (its YaRN frequency
+schedule and its post-rotary query scaling). The re-expression is not assumed
+correct. Run against the reference implementation on the same checkpoint and the
+same tokens, in float32 with exact attention, the two agree to the last bit ---
+maximum absolute logit difference $0.00000$ and top-1 agreement at every position
+--- so any difference in the tables below is a property of the backbone, not of
+the port; the tokenizers are checked the same way. Qwen2.5 needs no such
+treatment, being supported by the pinned release directly, but its implementation
+there predates a later refactor of the rotary embedding, so for both backbones we
+additionally verify that the patched uncompressed forward pass reproduces the
+unpatched model's logits exactly.
 
 \color{black}
 
 \begin{table}[t]
-\caption{LongBench results with Qwen3-8B across cache budgets. All rows are matched runs under the single implementation of Appendix~\ref{app:datasets}, at the core configuration of Table~\ref{tab:hyperparams}. \tbd\ denotes a configuration not yet run.}
-\label{tab:longbench_qwen3}
+\caption{LongBench results with Qwen2.5-14B-Instruct across cache budgets. All rows are matched runs under the single implementation of Appendix~\ref{app:datasets}, at the core configuration of Table~\ref{tab:hyperparams}. \tbd\ denotes a configuration not yet run.}
+\label{tab:longbench_qwen2}
 \centering
 \resizebox{\textwidth}{!}{%
 \begin{tabular}{lccccccccccccccccc}

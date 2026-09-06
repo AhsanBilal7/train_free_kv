@@ -38,18 +38,32 @@ def replace_llama_causal():
     transformers.models.llama.modeling_llama.LlamaModel.forward = causal_LlamaModel_forward
 
 
-# --- models_ext backbones (Qwen3, Ministral3); see causal_lookahead_snapkv for the rationale ---
+# ---------------------------------------------------------------------------
+# Extra backbones beyond Mistral and Llama.
+#
+# Ministral3 is vendored in models_ext/ as a Llama subclass, so it reuses this
+# package's Llama model forward and prepare_inputs_for_generation unchanged; only
+# the attention forward is re-emitted, because the vendored attention class
+# defines its own `forward` and would otherwise shadow the LlamaFlashAttention2
+# patch. Qwen2 is native in transformers 4.44 but predates the rotary refactor,
+# so it brings its own model forward too. Both files are generated from the Llama
+# hijack by scripts/gen_ext_hijacks.py.
+# ---------------------------------------------------------------------------
 from models_ext.hijack_targets import apply_ext_hijack
 from causal_andpro_snapkv.monkeypatch.causal_ext_hijack import causal_ext_flash_attn2_forward
-
-
-def replace_qwen3_causal():
-    check_version()
-    apply_ext_hijack("qwen3", causal_ext_flash_attn2_forward,
-                     causal_LlamaModel_forward, causal_prepare_inputs_for_generation_llama)
+from causal_andpro_snapkv.monkeypatch.causal_qwen2_hijack import (
+    causal_qwen2_flash_attn2_forward,
+    causal_qwen2_Qwen2Model_forward,
+)
 
 
 def replace_ministral3_causal():
     check_version()
     apply_ext_hijack("ministral3", causal_ext_flash_attn2_forward,
                      causal_LlamaModel_forward, causal_prepare_inputs_for_generation_llama)
+
+
+def replace_qwen2_causal():
+    check_version()
+    apply_ext_hijack("qwen2", causal_qwen2_flash_attn2_forward,
+                     causal_qwen2_Qwen2Model_forward, causal_prepare_inputs_for_generation_llama)

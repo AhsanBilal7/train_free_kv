@@ -49,26 +49,31 @@ def replace_llama_lookahead():
 
 
 # ---------------------------------------------------------------------------
-# models_ext backbones (Qwen3, Ministral3).
+# Extra backbones beyond Mistral and Llama.
 #
-# Both are Llama subclasses (see models_ext/), so they reuse this package's
-# Llama model forward and prepare_inputs_for_generation unchanged; only the
-# attention forward is re-emitted, because the vendored attention classes define
-# their own `forward` and would otherwise shadow the LlamaFlashAttention2 patch.
+# Ministral3 is vendored in models_ext/ as a Llama subclass, so it reuses this
+# package's Llama model forward and prepare_inputs_for_generation unchanged; only
+# the attention forward is re-emitted, because the vendored attention class
+# defines its own `forward` and would otherwise shadow the LlamaFlashAttention2
+# patch. Qwen2 is native in transformers 4.44 but predates the rotary refactor,
+# so it brings its own model forward too. Both files are generated from the Llama
+# hijack by scripts/gen_ext_hijacks.py.
 # ---------------------------------------------------------------------------
 from models_ext.hijack_targets import apply_ext_hijack
-from causal_lookahead_snapkv.monkeypatch.causal_lookahead_ext_hijack import (
-    causal_lookahead_ext_flash_attn2_forward,
+from causal_lookahead_snapkv.monkeypatch.causal_lookahead_ext_hijack import causal_lookahead_ext_flash_attn2_forward
+from causal_lookahead_snapkv.monkeypatch.causal_lookahead_qwen2_hijack import (
+    causal_lookahead_qwen2_flash_attn2_forward,
+    causal_lookahead_qwen2_Qwen2Model_forward,
 )
-
-
-def replace_qwen3_lookahead():
-    check_version()
-    apply_ext_hijack("qwen3", causal_lookahead_ext_flash_attn2_forward,
-                     causal_lookahead_LlamaModel_forward, prepare_inputs_for_generation_lookahead_llama)
 
 
 def replace_ministral3_lookahead():
     check_version()
     apply_ext_hijack("ministral3", causal_lookahead_ext_flash_attn2_forward,
                      causal_lookahead_LlamaModel_forward, prepare_inputs_for_generation_lookahead_llama)
+
+
+def replace_qwen2_lookahead():
+    check_version()
+    apply_ext_hijack("qwen2", causal_lookahead_qwen2_flash_attn2_forward,
+                     causal_lookahead_qwen2_Qwen2Model_forward, prepare_inputs_for_generation_lookahead_llama)

@@ -68,9 +68,10 @@ def replace_mistral_slm():
     transformers.models.mistral.modeling_mistral.MistralModel.forward = slm_MistralModel_forward
 
 
-
 # ---------------------------------------------------------------------------
-# models_ext backbones (Qwen3, Ministral3); see causal_lookahead_snapkv for the rationale.
+# Extra backbones beyond Mistral and Llama; see causal_lookahead_snapkv for the
+# rationale. Both files are generated from the Llama hijack by
+# scripts/gen_ext_hijacks.py.
 #
 # `adaptive` covers BOTH the `ada` and the `critical` modes -- pred.py routes
 # critical through replace_*_adaptive and the criterion is selected at runtime
@@ -78,15 +79,19 @@ def replace_mistral_slm():
 # ---------------------------------------------------------------------------
 from models_ext.hijack_targets import apply_ext_hijack
 from adaptive_snapkv.monkeypatch.adaptive_ext_hijack import adaptive_ext_flash_attn2_forward
-
-
-def replace_qwen3_adaptive():
-    check_version()
-    apply_ext_hijack("qwen3", adaptive_ext_flash_attn2_forward,
-                     adaptive_LlamaModel_forward, ada_prepare_inputs_for_generation_llama)
+from adaptive_snapkv.monkeypatch.adaptive_qwen2_hijack import (
+    adaptive_qwen2_flash_attn2_forward,
+    adaptive_qwen2_Qwen2Model_forward,
+)
 
 
 def replace_ministral3_adaptive():
     check_version()
     apply_ext_hijack("ministral3", adaptive_ext_flash_attn2_forward,
                      adaptive_LlamaModel_forward, ada_prepare_inputs_for_generation_llama)
+
+
+def replace_qwen2_adaptive():
+    check_version()
+    apply_ext_hijack("qwen2", adaptive_qwen2_flash_attn2_forward,
+                     adaptive_qwen2_Qwen2Model_forward, ada_prepare_inputs_for_generation_llama)

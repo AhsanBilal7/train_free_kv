@@ -1,28 +1,26 @@
 #!/usr/bin/env python
-"""Materialize Qwen/Qwen3-8B as a local checkpoint this repo's pinned stack can read.
+"""Materialize a Hub checkpoint as a local directory this repo's pinned stack can read.
 
-Two things stand between the published repo and `from_pretrained` here, neither of
-them about the model weights:
+Two things stand between a Hub id and `from_pretrained` here, neither about the
+model weights:
 
 1. Cache layout. `.env` sets TRANSFORMERS_CACHE to $HF_HOME while huggingface_hub
    downloads into $HF_HOME/hub, and ACES compute nodes have no outbound network to
    paper over the difference -- so a Hub id resolves on the login node and fails on
    a worker. A plain local directory (weights symlinked, so no second copy) is
-   immune to both.
+   immune to both, and its basename becomes a clean MODEL_TAG.
 
-2. tokenizer.json format. Qwen3's file was written by tokenizers >= 0.20, which
-   stores BPE merges as ["a", "b"] pairs; tokenizers 0.19 (pinned by transformers
-   4.44) only parses the older "a b" string form and dies with
+2. tokenizer.json format. Files written by tokenizers >= 0.20 store BPE merges as
+   ["a", "b"] pairs; tokenizers 0.19 (pinned by transformers 4.44) only parses the
+   older "a b" string form and dies with
        Exception: data did not match any variant of untagged enum ModelWrapper
-   The two encode identically -- Qwen3 is byte-level BPE, so no merge piece can
-   contain a literal space and the join is unambiguous -- and this script asserts
-   that before writing.
+   The rewrite is applied only when needed and is checked for losslessness first
+   (see models_ext/tokenizer_compat.py). A checkpoint already in the old format is
+   copied through untouched.
 
 Run once, from the repo root:
-    python scripts/prepare_qwen3_local.py --out "$SCRATCH/models/Qwen3-8B"
-
-Then verify the rewritten tokenizer against the original with
-scripts/validate_models_ext.py's tokenizer check (see models_ext/README.md).
+    python scripts/prepare_local_checkpoint.py --src Qwen/Qwen2.5-14B-Instruct \
+        --out "$SCRATCH/models/Qwen2.5-14B-Instruct"
 """
 
 import argparse
@@ -37,10 +35,9 @@ from models_ext.tokenizer_compat import downgrade_merges
 WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pth")
 
 
-
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", default="Qwen/Qwen3-8B", help="Hub id or local snapshot directory")
+    ap.add_argument("--src", required=True, help="Hub id or local snapshot directory")
     ap.add_argument("--out", required=True)
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
@@ -61,15 +58,19 @@ def main():
         if os.path.islink(dst_path) or os.path.exists(dst_path):
             os.remove(dst_path)
         if name.endswith(WEIGHT_SUFFIXES):
-            # Symlink through to the blob: the shards are 16 GB and never edited.
+            # Symlink through to the blob: the shards are tens of GB and never edited.
             os.symlink(os.path.realpath(src_path), dst_path)
         elif name == "tokenizer.json":
             tok = json.load(open(src_path))
             n = downgrade_merges(tok)
-            # Keep the untouched original next to it, so the rewrite is auditable.
-            shutil.copyfile(src_path, os.path.join(out, "tokenizer.json.upstream"))
-            json.dump(tok, open(dst_path, "w"), ensure_ascii=False)
-            print(f"tokenizer.json: rewrote {n} merges to the tokenizers<0.20 string form")
+            if n:
+                # Keep the untouched original next to it, so the rewrite is auditable.
+                shutil.copyfile(src_path, os.path.join(out, "tokenizer.json.upstream"))
+                json.dump(tok, open(dst_path, "w"), ensure_ascii=False)
+                print(f"tokenizer.json: rewrote {n} merges to the tokenizers<0.20 string form")
+            else:
+                shutil.copyfile(src_path, dst_path)
+                print("tokenizer.json: already in the tokenizers<0.20 merge format, copied as-is")
         else:
             shutil.copyfile(src_path, dst_path)
 

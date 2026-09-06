@@ -4,14 +4,14 @@
 scripts/validate_models_ext.py checks that the vendored modelling code IS the
 upstream model. This checks the other half: that each package's hijack actually
 drives it -- prefill capture, lookahead rollout, compression and the flattened
-varlen decode -- on Qwen3 and Ministral3, not just on Llama.
+varlen decode -- on Qwen2 and Ministral3, not just on Llama.
 
 It runs the same setup pred.py does (same replace_* calls, same config_compress
 fields, same flash_attention_2 load), on one long synthetic prompt, and prints
 what comes out. A mode passes if it decodes non-empty text without raising; the
 text itself is a sanity read, not an assertion.
 
-    python scripts/smoke_ext_backbones.py --model "$SCRATCH/models/Qwen3-8B" \
+    python scripts/smoke_ext_backbones.py --model "$SCRATCH/models/Qwen2.5-14B-Instruct" \
         --modes causal_lookahead andpro critical --budget 128
 """
 
@@ -28,27 +28,27 @@ from models_ext import register_extra_architectures
 register_extra_architectures()
 
 from adaptive_snapkv.monkeypatch.monkeypatch import (
-    replace_llama_adaptive, replace_ministral3_adaptive, replace_mistral_adaptive, replace_qwen3_adaptive,
+    replace_llama_adaptive, replace_ministral3_adaptive, replace_mistral_adaptive, replace_qwen2_adaptive,
 )
 from andpro_snapkv.monkeypatch.monkeypatch import (
-    replace_llama_andpro, replace_ministral3_andpro, replace_mistral_andpro, replace_qwen3_andpro,
+    replace_llama_andpro, replace_ministral3_andpro, replace_mistral_andpro, replace_qwen2_andpro,
 )
 from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
 from causal_lookahead_snapkv.monkeypatch.monkeypatch import (
-    replace_llama_lookahead, replace_ministral3_lookahead, replace_mistral_lookahead, replace_qwen3_lookahead,
+    replace_llama_lookahead, replace_ministral3_lookahead, replace_mistral_lookahead, replace_qwen2_lookahead,
 )
 
 # Same grouping pred.py uses: `critical` and `ada` share the adaptive hijack and
 # differ only in the criterion selected from model.config.mode at runtime.
 PATCHERS = {
     "causal_lookahead": [replace_mistral_lookahead, replace_llama_lookahead,
-                         replace_qwen3_lookahead, replace_ministral3_lookahead],
+                         replace_qwen2_lookahead, replace_ministral3_lookahead],
     "andpro": [replace_mistral_andpro, replace_llama_andpro,
-               replace_qwen3_andpro, replace_ministral3_andpro],
+               replace_qwen2_andpro, replace_ministral3_andpro],
     "critical": [replace_mistral_adaptive, replace_llama_adaptive,
-                 replace_qwen3_adaptive, replace_ministral3_adaptive],
+                 replace_qwen2_adaptive, replace_ministral3_adaptive],
     "ada": [replace_mistral_adaptive, replace_llama_adaptive,
-            replace_qwen3_adaptive, replace_ministral3_adaptive],
+            replace_qwen2_adaptive, replace_ministral3_adaptive],
 }
 
 # A prompt long enough to leave real eviction candidates outside the protected set
@@ -121,6 +121,51 @@ def run_mode(model_path, mode, budget, n_tokens, max_gen):
     return n_ctx, text.strip()
 
 
+def prefill_equivalence(model_path, n_tokens):
+    """Patched "collect"-phase prefill must equal the stock model's prefill.
+
+    The collect phase evicts nothing -- it is plain causal attention plus the
+    capture of window queries and full K/V -- so its logits must match the
+    unpatched model exactly. This is the check that actually exercises the
+    rewritten rotary path: Qwen2's 4.44 rotary is table-based and indexed by
+    position_ids, so the hijack has to size the table from the positions being
+    served rather than from the cache, and getting that wrong shows up here.
+
+    Both sides load in the same process, so the patch has to be installed AFTER
+    the stock reference is computed.
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    ids = tokenizer(build_prompt(tokenizer, n_tokens), return_tensors="pt").input_ids.to("cuda:0")
+
+    def last_logits():
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path, torch_dtype=torch.bfloat16, device_map="cuda:0",
+            attn_implementation="flash_attention_2", trust_remote_code=True,
+        ).eval()
+        config_compress(model, 128, "causal_lookahead")
+        with torch.no_grad():
+            out = model(input_ids=ids, use_cache=True)
+        # The hijacked model forward keeps only the last position; index from the
+        # end so the same expression works for both.
+        v = out.logits[0, -1].float().cpu()
+        del model, out
+        torch.cuda.empty_cache()
+        return v
+
+    stock = last_logits()
+    for patch in PATCHERS["causal_lookahead"]:
+        patch()
+    patched = last_logits()
+
+    diff = (stock - patched).abs()
+    agree = int(stock.argmax()) == int(patched.argmax())
+    print(f"  stock vs patched prefill: max |diff| {diff.max():.6f}, "
+          f"mean {diff.mean():.6f}, argmax {'match' if agree else 'DIFFER'}")
+    return diff.max().item() == 0.0 and agree
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
@@ -128,9 +173,19 @@ def main():
     ap.add_argument("--budget", type=int, default=128)
     ap.add_argument("--n-tokens", type=int, default=4000)
     ap.add_argument("--max-gen", type=int, default=32)
+    ap.add_argument("--skip-prefill-check", action="store_true")
     args = ap.parse_args()
 
     failures = []
+    if not args.skip_prefill_check:
+        print(f"\n===== {os.path.basename(args.model)} · patched-vs-stock prefill =====", flush=True)
+        try:
+            if not prefill_equivalence(args.model, args.n_tokens):
+                failures.append(("prefill-equivalence", "patched prefill differs from stock"))
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            failures.append(("prefill-equivalence", f"{type(exc).__name__}: {exc}"))
     for mode in args.modes:
         print(f"\n===== {os.path.basename(args.model)} · {mode} · B={args.budget} =====", flush=True)
         try:
@@ -151,6 +206,9 @@ def main():
             print("  needle NOT recovered (allowed at this budget; check it is not gibberish)")
 
     print("\n===== summary =====")
+    if not args.skip_prefill_check:
+        bad = [m for m, _ in failures if m == "prefill-equivalence"]
+        print(f"  {'prefill-equivalence':18s} {'FAIL' if bad else 'ok'}")
     for mode in args.modes:
         bad = [m for m, _ in failures if m == mode]
         print(f"  {mode:18s} {'FAIL' if bad else 'ok'}")

@@ -6,7 +6,7 @@ string form and fails the whole load with
 
     Exception: data did not match any variant of untagged enum ModelWrapper
 
-Both Qwen3 and Ministral-3 ship the new form. The two encodings are equivalent
+Ministral-3 ships the new form. The two encodings are equivalent
 for byte-level BPE, where no merge piece can contain a literal space (spaces are
 the 'G-dot' byte), so the join back to a string is unambiguous -- and
 `downgrade_merges` refuses rather than guesses if that ever stops being true.
