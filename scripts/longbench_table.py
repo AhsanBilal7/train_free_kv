@@ -1,0 +1,140 @@
+#!/usr/bin/env python
+"""Emit the LaTeX body of a LongBench results table from pred/.
+
+The paper's per-backbone tables (tab:longbench_qwen2, tab:longbench_ministral3)
+are 16 datasets x 4 methods x 4 budgets plus a Full Cache row. Typing that by
+hand from 34 result directories is where transcription errors come from, so this
+reads the predictions, scores them with experiments/LongBench/eval.py's own
+scorer, and prints rows ready to paste.
+
+Scores are recomputed from the .jsonl files rather than read from result.json:
+run.sh writes result.json at the end of a sweep, so a run that is still in
+flight -- or was resumed across allocations -- can have a stale one.
+
+A cell with no predictions prints \\tbd, and a row's Avg. is \\tbd unless all 16
+datasets are present, so a partially finished table is never silently averaged
+over a subset.
+
+Usage (from experiments/LongBench):
+    python ../../scripts/longbench_table.py --backbone qwen2
+    python ../../scripts/longbench_table.py --backbone ministral3 --budgets 128 256
+"""
+
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.getcwd())                      # experiments/LongBench, for eval.py
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+# Column order and headers exactly as the paper's tables have them.
+DATASETS = [
+    ("narrativeqa", "NrtvQA"), ("qasper", "Qasper"), ("multifieldqa_en", "MF-en"),
+    ("hotpotqa", "HotpotQA"), ("2wikimqa", "2WikiMQA"), ("musique", "Musique"),
+    ("gov_report", "GovReport"), ("qmsum", "QMSum"), ("multi_news", "MultiNews"),
+    ("trec", "TREC"), ("triviaqa", "TriviaQA"), ("samsum", "SAMSum"),
+    ("passage_count", "PCount"), ("passage_retrieval_en", "PRe"),
+    ("lcc", "Lcc"), ("repobench-p", "RB-P"),
+]
+
+# backbone key -> (MODEL_TAG used in folder names, run_naming suffix)
+BACKBONES = {
+    "mistral":    ("Mistral-7B-Instruct-v0.2", ""),
+    "llama":      ("Llama-3.1-8B-Instruct", "-llama"),
+    "qwen2":      ("Qwen2.5-14B-Instruct", "-qwen2"),
+    "ministral3": ("Ministral-3-8B-Instruct-2512", "-ministral3"),
+}
+
+# The lookahead cells differ only in reliability coefficients (Table 3 of the paper).
+LOOKAHEAD_CELLS = {"ent": ("1.0", "1.3", "0.0"), "dis": ("1.0", "1.0", "0.3")}
+
+
+def lookahead_dir(cell, model_tag, budget):
+    from scripts.run_naming import build_run_name
+    beta, gamma, lam_d = LOOKAHEAD_CELLS[cell]
+    return build_run_name(
+        mode="causal_lookahead", model_tag=model_tag, budget=budget, chunk_size=4,
+        num_particles=4, lookahead_len=8, lambda_lookahead="1.0",
+        lookahead_temperature="1.0", beta=beta, gamma=gamma, lambda_d=lam_d,
+        normalize_typicality="0", robust_alpha="0.0", robust_topk_beta="1.0",
+        lambda_k="0.0", lambda_v="0.0", budget_tau="0.0", score_objective="projected",
+    )
+
+
+def score_dir(pred_root, folder):
+    """{dataset: score} for whatever this run has finished. Missing dir -> {}.
+
+    `folder` may be a list of candidate names: the baselines' out_name gained a
+    `_red_<lambda>` suffix at some point, so the earliest Mistral runs are stored
+    as andpro_<tag>_<B>_chunk_4 while everything since is ..._chunk_4_red_0.0.
+    The first candidate that exists wins.
+    """
+    from eval import scorer, dataset2metric
+    candidates = [folder] if isinstance(folder, str) else list(folder)
+    roots = pred_root if isinstance(pred_root, (list, tuple)) else [pred_root]
+    path = next((os.path.join(r, c) for c in candidates for r in roots
+                 if os.path.isdir(os.path.join(r, c))), None)
+    if path is None:
+        return {}
+    out = {}
+    for ds, _ in DATASETS:
+        f = os.path.join(path, f"{ds}.jsonl")
+        if not os.path.exists(f) or ds not in dataset2metric:
+            continue
+        preds, answers, all_classes = [], [], None
+        with open(f) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                o = json.loads(line)
+                preds.append(o["pred"]); answers.append(o["answers"])
+                all_classes = o.get("all_classes")
+        if preds:
+            out[ds] = scorer(ds, preds, answers, all_classes)[0]
+    return out
+
+
+def row(label, scores):
+    cells = [f"{scores[ds]:.2f}" if ds in scores else r"\tbd" for ds, _ in DATASETS]
+    complete = len(scores) == len(DATASETS)
+    avg = f"{sum(scores.values()) / len(DATASETS):.2f}" if complete else r"\tbd"
+    return f"{label} & " + " & ".join(cells) + f" & {avg} \\\\"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backbone", required=True, choices=sorted(BACKBONES))
+    ap.add_argument("--budgets", nargs="+", type=int, default=[128, 256, 512, 1024])
+    # Completed runs get moved off to scratch by scripts/archive_runs_to_scratch.sh,
+    # so a table can span both locations; roots are searched in order.
+    ap.add_argument("--pred-root", nargs="+",
+                    default=["pred", "/scratch/user/u.ab353540/train_free_kv_archive/LongBench/pred"])
+    args = ap.parse_args()
+
+    model_tag, _ = BACKBONES[args.backbone]
+    print(r"\toprule")
+    print("Method & " + " & ".join(h for _, h in DATASETS) + r" & Avg. \\")
+    print(r"\midrule")
+    print(row("Full Cache", score_dir(args.pred_root,
+              [f"full_{model_tag}_128_chunk_4_red_0.0", f"test_{model_tag}_128_chunk_4_red_0.0"])))
+
+    for b in args.budgets:
+        print()
+        print(r"\midrule")
+        print(r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b)
+        print(r"\midrule")
+        for label, folder in (
+            ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4_red_0.0",
+                            f"critical_{model_tag}_{b}_chunk_4"]),
+            ("AnDPro",     [f"andpro_{model_tag}_{b}_chunk_4_red_0.0",
+                            f"andpro_{model_tag}_{b}_chunk_4"]),
+            (r"\lorekvE",  lookahead_dir("ent", model_tag, b)),
+            (r"\lorekvD",  lookahead_dir("dis", model_tag, b)),
+        ):
+            print(row(label, score_dir(args.pred_root, folder)))
+    print(r"\bottomrule")
+
+
+if __name__ == "__main__":
+    main()
