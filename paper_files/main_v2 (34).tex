@@ -1868,7 +1868,15 @@ fixed across methods within a backbone (so the comparison at issue is unaffected
 Qwen2.5 uses its ChatML template; Ministral-3 uses the plain
 \texttt{[INST]}\,$\cdots$\,\texttt{[/INST]} format and its text tower, extracted
 from the released vision-language checkpoint without modifying any weight. Both
-choices are stated in Appendix~\ref{app:datasets} and neither is tuned.
+choices are stated in Appendix~\ref{app:datasets} and neither is tuned. One
+further difference is forced by the backbone rather than chosen: prompts for
+Qwen2.5-14B are truncated to $31{,}500$ tokens, its $32{,}768$-token context
+window less the largest generation budget, where the other three backbones are
+evaluated untruncated. NarrativeQA reaches roughly $64$K tokens, which lies
+outside the range this model was trained and rotary-configured for. The
+truncation is applied identically to every method, so the comparison within this
+backbone -- which is what the table reports -- is unaffected; only the
+cross-backbone input lengths differ.
 
 \textbf{Implementation note.} Every method compared here is a monkeypatch that
 replaces the attention and model forward passes of one pinned Transformers
