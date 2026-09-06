@@ -17,11 +17,19 @@ import time
 import zipfile
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
-from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm
-from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replace_llama_andpro
-from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal
-from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead
+from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm, replace_qwen3_adaptive, replace_ministral3_adaptive
+from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replace_llama_andpro, replace_qwen3_andpro, replace_ministral3_andpro
+from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal, replace_qwen3_causal, replace_ministral3_causal
+from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead, replace_qwen3_lookahead, replace_ministral3_lookahead
 from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
+
+# Qwen3 and Ministral3 postdate the transformers pin (see models_ext/); registering
+# them with the Auto* factories is what lets `-m Qwen/Qwen3-8B` resolve at all. It is
+# a no-op for every backbone transformers already knows, so it runs unconditionally
+# and must run before load_model_and_tokenizer.
+from models_ext import register_extra_architectures
+
+register_extra_architectures()
 
 # =============================================================================
 # Offline LongBench loading
@@ -165,6 +173,25 @@ def build_chat(tokenizer, prompt, model_name):
                 tokenize=False,
                 add_generation_prompt=True
         )
+    elif "qwen3" in model_name.lower():
+        # Qwen3 is a hybrid reasoning model. Under its default template it opens a
+        # <think> block and spends the whole (short) LongBench generation budget
+        # inside it, so every answer comes back empty. `enable_thinking=False` is
+        # the template's own switch for that: it emits an already-closed, empty
+        # think block, which is the documented non-thinking operating point.
+        prompt = [{"role": "user", "content": prompt}]
+        prompt = tokenizer.apply_chat_template(
+                prompt,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+        )
+    elif "ministral" in model_name.lower():
+        # Mistral's instruction format. Deliberately NOT the packaged chat template:
+        # that one injects a multi-hundred-token "Le Chat" system prompt (with the
+        # current date and tool-use instructions) ahead of every prompt, which would
+        # change the long-context input the eviction methods are being compared on.
+        prompt = f"[INST]{prompt}[/INST]"
     return prompt
 
 def post_process(response, model_name):
@@ -172,6 +199,13 @@ def post_process(response, model_name):
         response = response.strip().replace("Assistant:", "")
     elif "internlm" in model_name:
         response = response.split("<eoa>")[0]
+    elif "qwen3" in model_name.lower():
+        # build_chat closes the think block in the prompt, so a well-behaved
+        # generation has none. Strip one anyway: a stray </think> otherwise counts
+        # as part of the answer string in every LongBench metric.
+        if "</think>" in response:
+            response = response.split("</think>")[-1]
+        response = response.strip()
     return response
 
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name_or_path, out_path, mode=None):
@@ -323,18 +357,26 @@ if __name__ == '__main__':
         print("Ada mode")
         replace_mistral_adaptive()
         replace_llama_adaptive()
+        replace_qwen3_adaptive()
+        replace_ministral3_adaptive()
     elif args.mode == "andpro":
         print("Andpro mode")
         replace_mistral_andpro()
         replace_llama_andpro()
+        replace_qwen3_andpro()
+        replace_ministral3_andpro()
     elif args.mode == "causal_forward_only":
         print("Training-Free Causal AnDPro mode: causal_forward_only")
         replace_mistral_causal()
         replace_llama_causal()
+        replace_qwen3_causal()
+        replace_ministral3_causal()
     elif args.mode == "causal_lookahead":
         print("Training-Free Test-Time Lookahead Causal KV Eviction mode: causal_lookahead")
         replace_mistral_lookahead()
         replace_llama_lookahead()
+        replace_qwen3_lookahead()
+        replace_ministral3_lookahead()
     elif args.mode == "fix":
         print("Fix mode")
         replace_mistral_fixed()
@@ -347,6 +389,8 @@ if __name__ == '__main__':
         print("Criticalkv mode")
         replace_mistral_adaptive()
         replace_llama_adaptive()
+        replace_qwen3_adaptive()
+        replace_ministral3_adaptive()
     else:
         print("Base mode")
 

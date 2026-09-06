@@ -14,11 +14,19 @@ import gc
 import time
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
-from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm
-from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replace_llama_andpro
-from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal
-from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead
+from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm, replace_qwen3_adaptive, replace_ministral3_adaptive
+from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replace_llama_andpro, replace_qwen3_andpro, replace_ministral3_andpro
+from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal, replace_qwen3_causal, replace_ministral3_causal
+from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead, replace_qwen3_lookahead, replace_ministral3_lookahead
 from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
+
+# Qwen3 and Ministral3 postdate the transformers pin (see models_ext/); registering
+# them with the Auto* factories is what lets `-m Qwen/Qwen3-8B` resolve at all. It is
+# a no-op for every backbone transformers already knows, so it runs unconditionally
+# and must run before load_model_and_tokenizer.
+from models_ext import register_extra_architectures
+
+register_extra_architectures()
 
 # -----------------------------------------------------------------------------
 # Needle-In-A-Haystack (NIAH) prediction driver.
@@ -569,18 +577,26 @@ if __name__ == '__main__':
         print("Ada mode")
         replace_mistral_adaptive()
         replace_llama_adaptive()
+        replace_qwen3_adaptive()
+        replace_ministral3_adaptive()
     elif args.mode == "andpro":
         print("Andpro mode")
         replace_mistral_andpro()
         replace_llama_andpro()
+        replace_qwen3_andpro()
+        replace_ministral3_andpro()
     elif args.mode == "causal_forward_only":
         print("Training-Free Causal AnDPro mode: causal_forward_only")
         replace_mistral_causal()
         replace_llama_causal()
+        replace_qwen3_causal()
+        replace_ministral3_causal()
     elif args.mode == "causal_lookahead":
         print("Training-Free Test-Time Lookahead Causal KV Eviction mode: causal_lookahead")
         replace_mistral_lookahead()
         replace_llama_lookahead()
+        replace_qwen3_lookahead()
+        replace_ministral3_lookahead()
     elif args.mode == "fix":
         print("Fix mode")
         replace_mistral_fixed()
@@ -593,6 +609,8 @@ if __name__ == '__main__':
         print("Criticalkv mode")
         replace_mistral_adaptive()
         replace_llama_adaptive()
+        replace_qwen3_adaptive()
+        replace_ministral3_adaptive()
     else:
         print("Base mode")
 

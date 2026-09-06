@@ -46,3 +46,29 @@ def replace_llama_lookahead():
     transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_lookahead_llama
     transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = causal_lookahead_llama_flash_attn2_forward
     transformers.models.llama.modeling_llama.LlamaModel.forward = causal_lookahead_LlamaModel_forward
+
+
+# ---------------------------------------------------------------------------
+# models_ext backbones (Qwen3, Ministral3).
+#
+# Both are Llama subclasses (see models_ext/), so they reuse this package's
+# Llama model forward and prepare_inputs_for_generation unchanged; only the
+# attention forward is re-emitted, because the vendored attention classes define
+# their own `forward` and would otherwise shadow the LlamaFlashAttention2 patch.
+# ---------------------------------------------------------------------------
+from models_ext.hijack_targets import apply_ext_hijack
+from causal_lookahead_snapkv.monkeypatch.causal_lookahead_ext_hijack import (
+    causal_lookahead_ext_flash_attn2_forward,
+)
+
+
+def replace_qwen3_lookahead():
+    check_version()
+    apply_ext_hijack("qwen3", causal_lookahead_ext_flash_attn2_forward,
+                     causal_lookahead_LlamaModel_forward, prepare_inputs_for_generation_lookahead_llama)
+
+
+def replace_ministral3_lookahead():
+    check_version()
+    apply_ext_hijack("ministral3", causal_lookahead_ext_flash_attn2_forward,
+                     causal_lookahead_LlamaModel_forward, prepare_inputs_for_generation_lookahead_llama)

@@ -1,0 +1,2489 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2027_conference,times}
+
+\input{math_commands.tex}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{url}
+% hyperref must be loaded AFTER amsmath, otherwise \eqref expands to
+% "equation~N" instead of "(N)".  This was the cause of the "Eq. equation 10"
+% strings in the previous build.
+\usepackage{hyperref}
+
+\usepackage{subcaption}
+\captionsetup[subfigure]{font=small, labelfont=bf, skip=2pt}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{wrapfig}
+
+\usepackage{xcolor}
+\definecolor{bestblue}{HTML}{14479E}
+\definecolor{secondorange}{HTML}{BF5B04}
+\newcommand{\best}[1]{\textcolor{bestblue}{\textbf{#1}}}
+\newcommand{\second}[1]{\textcolor{secondorange}{#1}}
+\newcommand{\rankkey}{\best{best} and \second{second-best}}
+\newcommand{\tbd}{\textcolor{red}{--}}
+% The two reliability variants of the particle score R_m (Eq. 3), as points of the
+% (beta, gamma, lambda_D) plane: /E = (1, 1.3, 0) prices context uncertainty through
+% the entropy channel; /D = (1, 1, 0.3) adds trajectory disagreement on top of a full
+% unit of that entropy penalty.  Everything else is identical.
+\newcommand{\lorekvE}{LORE-KV\,/E}
+\newcommand{\lorekvD}{LORE-KV\,/D}
+\title{Sampling the Future: Monte-Carlo Query Estimation for KV Cache Eviction}
+\author{Antiquus S.~Hippocampus, Natalia Cerebro \& Amelie P. Amygdale \thanks{ Use footnote for providing further information
+about author (webpage, alternative address)---\emph{not} for acknowledging
+funding agencies.  Funding acknowledgements go at the end of the paper.} \\
+Department of Computer Science\\
+Cranberry-Lemon University\\
+Pittsburgh, PA 15213, USA \\
+\texttt{\{hippo,brain,jen\}@cs.cranberry-lemon.edu} \\
+\And
+Ji Q. Ren \& Yevgeny LeNet \\
+Department of Computational Neuroscience \\
+University of the Witwatersrand \\
+Joburg, South Africa \\
+\texttt{\{robot,net\}@wits.ac.za} \\
+\AND
+Coauthor \\
+Affiliation \\
+Address \\
+\texttt{email}
+}
+
+\newcommand{\fix}{\marginpar{FIX}}
+\newcommand{\new}{\marginpar{NEW}} \usepackage[textsize=tiny]{todonotes}
+ \newcommand{\todom}[1]{\todo[color=magenta!10, inline]{\small MV: #1}}
+
+
+\begin{document}
+
+
+\maketitle
+
+\begin{abstract}
+
+\textcolor{teal}{Most KV-cache eviction methods ask, in effect, \emph{which memory appeared important while reading the prompt?''} We instead ask, \emph{which memory will matter while answering?''} Since the queries used during decoding are unknown at eviction time, prior lookahead methods approximate them with a surrogate continuation. We instead cast future-aware eviction as distributional estimation over plausible future queries. We introduce \textbf{LORE-KV} (\emph{\textbf{\underline{L}}ookahead \textbf{\underline{O}}utput-perturbation with \textbf{\underline{R}}eliability-weighted \textbf{\underline{E}}nsembles for \textbf{\underline{K}}ey--\textbf{\underline{V}}alue caches}), a training-free method that samples $M$ short continuations, evaluates projected leave-one-out attention-output perturbation on their query states, and softly aggregates the trajectories using branch typicality, predictive entropy, and optionally query-space disagreement. The lookahead trajectories are discarded before final generation, requiring no training, auxiliary model, or modification of the base LLM. Across LongBench, RULER, and Needle-in-a-Haystack, LORE-KV performs consistently well, with the largest gains under aggressive compression. The $M$-ablations and compute-matched lookahead controls show that the improvement persists beyond single-surrogate lookahead, while reliability weighting provides robustness to unrepresentative sampled futures.}
+
+\end{abstract}
+
+
+\section{Introduction}
+\label{sec:introduction}
+Autoregressive large language models (LLMs) rely on key--value (KV) caching to reuse previously computed hidden states during decoding. Although KV caching accelerates generation, its memory and bandwidth costs grow with sequence length and batch size, making long-context inference increasingly expensive \citep{behnam2025rocketkv,li2025kvtuner,lancucki2025hyperscaling}. KV-cache eviction reduces this cost by retaining only a subset of KV pairs, with existing methods estimating importance using recency or attention sinks \citep{xiao2023streamingllm}, accumulated or prompt-end attention \citep{zhang2023h2o,liu2023scissorhands,li2024snapkv}, or key-space geometry \citep{devoto2024simple,park2026keydiff}.
+
+A key limitation is that eviction is performed before the queries that will actually use the retained cache are known. Most methods therefore estimate importance from prompt-side queries, which can differ from future decoding queries. Lookahead Q-Cache reduces this mismatch using a surrogate continuation \citep{wang2025lookahead}, while learned approaches predict future utility through trained retention modules \citep{ahn2026lookaheadkv,moschella2026learning,bui2026make,yang2026indexmem}. However, a single continuation captures only one possible future, while learned approaches require additional training and model-specific parameters. Moreover, attention magnitude alone does not fully capture deletion impact because value vectors also determine a token's contribution \citep{guo2024criticalkv}; output-aware methods such as AnDPro and LaProx improve this scoring criterion but remain largely tied to the available query states \citep{geng2026accurate,mai2026reformulating}.
+
+\textcolor{teal}{We propose \textbf{\underline{LORE-KV}} (\emph{\textbf{\underline{L}}ookahead \textbf{\underline{O}}utput-Perturbation with \textbf{\underline{R}}eliability-weighted \textbf{\underline{E}}nsembles}), a training-free method that treats future-aware eviction as an estimation problem: estimate the \emph{expected projected deletion cost of a cached token under the distribution of plausible future queries}. LORE-KV approximates this expectation with multiple short Monte-Carlo continuations from the frozen model, evaluates projected leave-one-out output perturbation on their query states, and softly reweights the sampled futures using branch typicality, predictive entropy, and optional query-space disagreement. This generalizes a single surrogate continuation to an estimate over plausible futures without offline training, auxiliary predictors, or modifications to the base LLM.}
+
+
+
+\textbf{Contributions.}
+\textcolor{teal}{Our contributions are threefold. \textbf{First}, we identify and empirically characterize the \emph{query-reference mismatch} between prompt-side and future decoding queries, and show that LORE-KV's gain increases with this mismatch (Figure~\ref{fig:mismatch_vs_gain}). \textbf{Second}, we instantiate this distributional formulation with multiple sampled future-query trajectories, projected deletion scoring, and entropy/disagreement-based soft reliability weighting. \textbf{Third}, the $M$-ablations in Tables~\ref{tab:ablation_summary} and~\ref{tab:ruler_ablation}, together with the compute-matched LAQ++ comparison, isolate the benefit beyond prompt-only and single-surrogate lookahead.}
+
+\section{Methodology} \label{sec:methodology}
+LORE-KV has three stages: (i) Monte-Carlo estimation of future queries using $M$ short continuations (Section~\ref{subsec:lookahead}); (ii) reliability weighting using likelihood, entropy, or ensemble disagreement (Section~\ref{subsec:confidence}); and (iii) projected counterfactual scoring of KV eviction impact (Sections~\ref{subsec:deletion}-\ref{subsec:core_score}). Algorithm~\ref{alg:lorekv} summarizes the method, Table~\ref{tab:hyperparams} lists the hyperparameters, and Appendices~\ref{app:method_details} and~\ref{sec:ablation_components} provide implementation details and ablations.
+
+\subsection{Problem Setup} \label{subsec:problem_setup}
+Let $f_\theta$ denote a frozen pretrained transformer language model, whose parameters $\theta$ remain fixed throughout. Given a prompt $X=(x_1,\ldots,x_n)$, a single prefill pass produces the cached keys and values $\mathbf{K}^{l,h}=\{\mathbf{k}^{l,h}_{1},\ldots,\mathbf{k}^{l,h}_{n}\}$ and $\mathbf{V}^{l,h}=\{\mathbf{v}^{l,h}_{1},\ldots,\mathbf{v}^{l,h}_{n}\}$ for each layer $l\in\{1,\ldots,L\}$ and KV head $h\in\{1,\ldots,H\}$, together with the prompt-window queries $\mathcal{Q}^{l,h}_{\mathcal{W}}$. Let $\mathcal{W}={n-w+1,\ldots,n}$ be the prompt-end window and $\mathcal{B}$ the optional structural-token positions (Appendix~\ref{app:setup_details}). We protect the first token as an attention sink \citep{xiao2023streamingllm}, giving $\mathcal{P}={1}\cup\mathcal{W}\cup\mathcal{B}$ and eviction candidates $\mathcal{C}={1,\ldots,n}\setminus\mathcal{P}$.
+
+\subsection{Test-Time Lookahead Query Construction} \label{subsec:lookahead}
+Prompt-side queries may poorly represent the response-side queries used during generation. \textcolor{teal}{To estimate utility across plausible response-side computations rather than a single future,} LORE-KV uses a small, fixed test-time budget before final decoding to sample $M$ short lookahead continuations from the frozen model:
+\begin{equation}
+Y^{(m)}\sim f_\theta(\cdot\mid X),\qquad
+Y^{(m)}=\{y^{(m)}_1,\ldots,y^{(m)}_T\},\qquad
+m=1,\ldots,M,
+\label{eq:lookahead_cont}
+\end{equation}
+where $T$ is small. The continuations are used as temporary probes for estimating future decoding queries. To keep the reliability score correctly centered, each trajectory is evaluated under the same distribution from which it is sampled (Section~\ref{subsec:confidence}). For each trajectory $m$, we store its lookahead query states as $ \mathcal{Q}^{(m),l,h}_{\mathrm{look}} = \left\{ \mathbf{q}^{(m),l,h}_{1}, \ldots, \mathbf{q}^{(m),l,h}_{T} \right\}, $ and combine them with the prompt-window queries for scoring:
+\begin{equation}
+\mathcal{Q}^{l,h}_{\mathrm{score}}
+=
+\mathcal{Q}^{l,h}_{\mathcal{W}}
+\cup
+\left(
+\bigcup_{m=1}^{M}
+\mathcal{Q}^{(m),l,h}_{\mathrm{look}}
+\right).
+\label{eq:score_queries}
+\end{equation}
+\textcolor{teal}{The $M$ lookahead trajectories form Monte-Carlo samples of plausible response-side query states (Figure~\ref{fig:montecarlo_queries})} for subsequent KV scoring. Figure~\ref{fig:future_query_alignment} shows that $\mathcal{Q}^{l,h}_{\mathrm{score}}$ better covers the true future queries than $\mathcal{Q}^{l,h}_{\mathcal{W}}$ alone, while Appendix~\ref{app:lookahead_details} relates this construction to the single-surrogate special case.
+
+\begin{figure}[t]
+  \color{teal}
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/montecarlo_queries.pdf}
+  \caption{\textbf{What the $M$ trajectories are.} The lookahead trajectories of one LongBench
+  prompt ($M=8$, $T=8$), shown as the query states they contribute.
+  \textbf{(a)} Every marker is one post-RoPE query vector of a single attention head (layer $16$,
+  head $18$): the $w$ prompt-end window queries, the $M\!\times\!T$ queries of the sampled
+  continuations, and the queries the model issues while actually answering. The vectors are
+  $d$-dimensional, so they are shown in the plane of the first two principal components of their
+  pooled set --- one frame common to all three sources, PC$1$ and PC$2$ together carrying $37\%$
+  of the variance --- and each trajectory is drawn as a path through its own steps. The sampled
+  queries fall among the true decoding queries; the prompt window occupies a separate region,
+  which is the query-reference mismatch of Section~\ref{sec:introduction} made visible.
+  \textbf{(b)} Coverage of $\mathcal{Q}_{\mathrm{future}}$, Eq.~\ref{eq:coverage}, over nested
+  prefixes of the same draw against the prompt-window reference; it saturates by
+  $M\!\approx\!4$. The trajectories are concrete continuations: here every one recovers the
+  answer span the model goes on to produce (``South West Ultras''), and the branches that then
+  drift into degenerate text receive the smallest reliability weights ($\omega\approx0.02$
+  against $0.31$), which is the weighting limiting the influence of an unrepresentative sample.
+  Mistral-7B-Instruct-v0.2.}
+  \label{fig:montecarlo_queries}
+\end{figure}
+
+\subsection{Particle Reliability Weighting: Entropy and Trajectory Disagreement} \label{subsec:confidence}
+The lookahead trajectories can differ in reliability, so LORE-KV assigns each a weight. \textcolor{teal}{These weights robustify the finite-sample estimate by limiting the influence of uncertain or atypical branches.} Let $u\in{1,\ldots,T}$ index the $T$ lookahead steps, and let $h^{(m)}u=(X,y^{(m)}{<u})$ denote the context of trajectory $m$ at step $u$. Let $q(\cdot\mid h)$ be the sampling distribution. Raw log-probability mixes two effects: whether the sampled token is atypical for its local context and how uncertain that context is. We separate these channels with the centered score
+\begin{equation}
+ c^{(m)}_u
+ =\log q\!\left(y^{(m)}_u\mid h^{(m)}_u\right)
+ +H\!\left(q(\cdot\mid h^{(m)}_u)\right),
+ \label{eq:centered_score}
+\end{equation}
+for which $\mathbb{E}[c^{(m)}_u\mid h^{(m)}_u]=0$. With $\bar c_m=\tfrac1T\sum_u c^{(m)}_u$ and $\bar H_m=\tfrac1T\sum_u H(q(\cdot\mid h^{(m)}_u))$, trajectory reliability is
+\begin{equation}
+ R_m=\beta\,\bar c_m-\gamma\,\bar H_m-\lambda_D\,\hat D_m,
+ \label{eq:confidence}
+\end{equation}
+where $\bar c_m$ captures how atypical a trajectory is relative to its local uncertainty, $\bar H_m$ penalizes uncertain trajectories, and $\hat D_m$ measures standardized query-space disagreement with the other particles. We combine these signals into a reliability score $R_m$ and convert the scores into soft particle weights,
+\begin{equation}
+\omega_m
+= \frac{\exp(R_m)}
+{\sum_{r=1}^{M}\exp(R_r)},
+\label{eq:particle_weight}
+\end{equation}
+so that more reliable trajectories contribute more to the final estimate. We use soft rather than hard weighting because reliability is only an approximate indicator of trajectory utility. Our default variant, \emph{\lorekvE}, uses entropy-based uncertainty, while \emph{\lorekvD} additionally incorporates query-space disagreement. The two variants use the same sampled trajectories and differ only in their reliability coefficients. Details, edge cases, and coefficient settings are given in Appendix~\ref{app:reliability_details} and Table~\ref{tab:hyperparams}, with controls in Table~\ref{tab:ablation_summary}.
+
+\subsection{Closed-Form Counterfactual Deletion Effect} \label{subsec:deletion}
+With the scoring queries in hand, we now specify \emph{what} is measured for each candidate token. For a scoring query $\mathbf{q}^{l,h}$ and candidate token $i\in\mathcal{C}$, the full-cache attention weight is
+$a^{l,h}_{q,i}=\operatorname{Softmax}_i\!\left((\mathbf{q}^{l,h})^\top\mathbf{k}^{l,h}_{i}/\sqrt{d}\right)$,
+where $d$ is the head dimension, and the corresponding full-cache attention output is
+$\mathbf{o}^{l,h}_{q}=\sum_{j=1}^{n}a^{l,h}_{q,j}\mathbf{v}^{l,h}_{j}$.
+We write
+$(a^{l,h}_{q,i},\mathbf{o}^{l,h}_{q})
+=\operatorname{Attn}(\mathbf{q}^{l,h},\mathbf{K}^{l,h},\mathbf{V}^{l,h})$
+for this full-cache attention weight--output pair. If token $i$ is removed and the remaining attention weights are renormalized, the post-deletion output becomes
+$\mathbf{o}^{l,h}_{q,-i}
+=\sum_{j\neq i}\frac{a^{l,h}_{q,j}}{1-a^{l,h}_{q,i}+\epsilon}\mathbf{v}^{l,h}_{j}
+=\frac{\mathbf{o}^{l,h}_{q}-a^{l,h}_{q,i}\mathbf{v}^{l,h}_{i}}
+{1-a^{l,h}_{q,i}+\epsilon}$,
+where $\epsilon$ prevents numerical instability. The corresponding leave-one-out deletion effect is therefore
+\begin{equation}
+\Delta\mathbf{o}^{l,h}_{q,i}
+=\mathbf{o}^{l,h}_{q}-\mathbf{o}^{l,h}_{q,-i}
+\approx
+\frac{a^{l,h}_{q,i}}{1-a^{l,h}_{q,i}+\epsilon}
+\left(\mathbf{v}^{l,h}_{i}-\mathbf{o}^{l,h}_{q}\right).
+\label{eq:deletion_effect}
+\end{equation}
+Eq.~\ref{eq:deletion_effect} shows why attention alone is insufficient: a token is important only when it receives non-negligible attention and its value meaningfully differs from the current attention output.
+
+\textbf{Output-projection-aware causal score.}
+Let $\mathbf{W}^{O}_{l,h}$ denote the output-projection block for head $h$ in layer $l$. LORE-KV scores the residual-stream impact of deleting token $i$ as
+\begin{equation}
+e^{l,h}_{q,i}
+=
+\left\|
+\mathbf{W}^{O}_{l,h}\Delta\mathbf{o}^{l,h}_{q,i}
+\right\|_2^2 .
+\label{eq:projected_score}
+\end{equation}
+Unlike raw attention, this score measures the deletion effect after projection into the model stream. Further details are given in Appendix~\ref{app:lookahead_details}. Figure~\ref{fig:cache_distribution} evaluates the resulting cache fidelity, while Figure~\ref{fig:layer_head_analysis} shows how the perturbation is distributed across layers and heads.
+
+\subsection{Core Score, Selection, and Compressed Cache}
+\label{subsec:core_score}
+For each token $i$, we collect perturbation scores over the prompt-window queries, $\mathcal{E}^{l,h}_{i,\mathcal{W}} =\{e^{l,h}_{q,i}:q\in\mathcal{Q}^{l,h}_{\mathcal{W}}\}$, and each lookahead trajectory, $\mathcal{E}^{l,h}_{i,m} =\{e^{l,h}_{q,i}:q\in\mathcal{Q}^{(m),l,h}_{\mathrm{look}}\}$. Using mean aggregation, $\rho(\mathcal{E})=\operatorname{Mean}(\mathcal{E})$, with further details in Appendix~\ref{sec:ablation_components}, the final token score is
+\begin{equation}
+S^{l,h}_{i}
+=\rho(\mathcal{E}^{l,h}_{i,\mathcal{W}})
++\lambda_L\sum_{m=1}^{M}\omega_m\,\rho(\mathcal{E}^{l,h}_{i,m}),
+\label{eq:final_score}
+\end{equation}
+The lookahead term changes the eviction decision rather than merely rescaling prompt-side importance: at $B=128$, about 20\% of retained tokens differ from the prompt-only rule (Figure~\ref{fig:score_comparison}). \textcolor{teal}{With uniform particle weights, the lookahead term in Eq.~\ref{eq:final_score} is a Monte-Carlo estimate of expected projected deletion cost; the entropy/disagreement weights provide a soft robustness correction to that finite sample.} Table~\ref{tab:ablation_summary} further isolates the contribution of the future-aware estimator through the corresponding ablations. Two operators turn these scores into a compressed cache, and both reduce to their simplest form in the core method:
+\begin{equation}
+\{B_{l,h}\}_{h}=\operatorname{Alloc}\!\left(B_l,\{E_{l,h}\}_{h};\tau\right),
+\qquad
+\mathcal{R}^{l,h}=\operatorname{Select}\!\left(\mathbf{S}^{l,h},B_{l,h}\right).
+\label{eq:alloc_select}
+\end{equation}
+For the core method, $\operatorname{Alloc}$ uniformly splits the available per-layer budget across heads, while $\operatorname{Select}$ retains the top-scoring tokens for each head. The final cache is obtained as $\mathcal{R}^{l,h}{\mathrm{final}}=\mathcal{P}\cup\mathcal{R}^{l,h}$ and $(\mathbf{K}^{l,h}{\star},\mathbf{V}^{l,h}{\star})=\operatorname{Gather}(\mathbf{K}^{l,h},\mathbf{V}^{l,h},\mathcal{R}^{l,h}{\mathrm{final}})$. The sampled lookahead continuations are then discarded, and decoding proceeds only with the compressed cache. Optional adaptive allocation and diversity-aware selection are disabled in the core method and are studied separately in Appendix~\ref{sec:ablation_components}.
+
+\section{Experiments} \label{subsec:setup}
+We follow AnDPro’s evaluation protocol \citep{geng2026accurate}, comparing all methods under matched cache budgets, backbones, and observation windows. We evaluate \textbf{LongBench} \citep{bai2024longbench}, \textbf{RULER} \citep{hsieh2024ruler}, and \textbf{NIAH} \citep{kamradt2023needle} on Mistral-7B-Instruct-v0.2 \citep{jiang2023mistral} and Llama-3.1-8B-Instruct \citep{dubey2024llama}, with $B\in{128,256,512,1024}$. \textcolor{teal}{Because both backbones predate the method, we additionally evaluate LongBench on two more recent instruction-tuned models of comparable size, Qwen3-8B and Ministral-3-8B-Instruct-2512, under the identical pipeline and budgets; these test whether the prompt-to-future query mismatch LORE-KV exploits is a property of the two original backbones or of long-context decoding more generally (Appendix~\ref{app:new_backbones}).} Shared settings and LORE-KV hyperparameters are given in Table~\ref{tab:hyperparams}, and LongBench dataset details in Table~\ref{tab:longbench_datasets}. Results appear in Sections~\ref{subsec:longbench}, \ref{subsec:niah}, and~\ref{subsec:ruler}, with efficiency and mechanism analysis in Sections~\ref{subsec:efficiency} and~\ref{subsec:mechanism}, ablations in Table~\ref{tab:ablation_summary} following Appendix~\ref{sec:ablation_components}, and implementation details in Appendix~\ref{app:experimental_details}. We report both \lorekvE{} and \lorekvD{} under an otherwise identical pipeline; they differ only in reliability coefficients (Table~\ref{tab:hyperparams}), although the two-coefficient change means they are not a single-factor contrast (Proposition~1). Their definitions and score-level comparison are provided in Appendices~\ref{app:reparam_grid} and~\ref{app:divergence}.
+
+\begin{table}[t]
+\caption{LongBench results on Mistral-7B-Instruct-v0.2.}
+\label{tab:longbench_mistral}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccccccccccc}
+\toprule
+& \multicolumn{3}{c}{Single-Doc. QA} 
+& \multicolumn{3}{c}{Multi-Doc. QA} 
+& \multicolumn{3}{c}{Summarization} 
+& \multicolumn{3}{c}{Few-shot} 
+& \multicolumn{2}{c}{Synthetic} 
+& \multicolumn{2}{c}{Code} 
+& \\
+\cmidrule(lr){2-4}
+\cmidrule(lr){5-7}
+\cmidrule(lr){8-10}
+\cmidrule(lr){11-13}
+\cmidrule(lr){14-15}
+\cmidrule(lr){16-17}
+Method 
+& NrtvQA & Qasper & MF-en 
+& HotpotQA & 2WikiMQA & Musique 
+& GovReport & QMSum & MultiNews 
+& TREC & TriviaQA & SAMSum 
+& PCount & PRe 
+& Lcc & RB-P 
+& Avg. \\
+\midrule
+
+Full Cache 
+& 26.63 & 32.99 & 49.34 
+& 42.77 & 27.35 & 18.77 
+& 32.87 & 24.24 & 27.10 
+& 71.00 & 86.23 & 42.96 
+& 2.75 & 86.98 
+& 55.33 & 52.87 
+& 42.51 \\
+
+% =====================================================================
+% Budget = 128
+% =====================================================================
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=128$} \\
+\midrule
+
+H2O 
+& 21.19 & 21.66 & 38.60 
+& 30.63 & 20.65 & 12.19 
+& 20.65 & 22.42 & 21.81 
+& 39.00 & 82.52 & 40.68 
+& 2.98 & 79.56 
+& 49.13 & 46.76 
+& 34.40 \\
+
+StreamingLLM 
+& 16.61 & 14.74 & 31.40 
+& 28.05 & 21.36 & 12.08 
+& 18.44 & 18.91 & 19.26 
+& 43.50 & 74.22 & 29.00 
+& 2.75 & 31.65 
+& 41.27 & 38.84 
+& 27.63 \\
+
+SnapKV 
+& 19.17 & 21.40 & 42.93 
+& 36.76 & 22.44 & 15.86 
+& 19.16 & 21.84 & 21.55 
+& 47.50 & 84.15 & 40.24 
+& 2.30 & 68.26 
+& 50.69 & 47.13 
+& 35.09 \\
+
+PyramidKV 
+& 20.16 & 21.77 & 43.55 
+& 36.78 & 23.12 & 14.39 
+& 19.53 & 22.03 & 21.47 
+& 51.00 & 84.62 & 40.24 
+& 2.79 & 70.77 
+& 50.57 & 46.53 
+& 35.58 \\
+
+Ada-KV 
+& 21.79 & 23.03 & 47.07 
+& 38.70 & 22.85 & 15.92 
+& 19.94 & 23.05 & 21.84 
+& 63.00 & 85.36 & 40.01 
+& 3.20 & 72.13 
+& 51.36 & 49.29 
+& 37.41 \\
+
+CriticalKV 
+& 21.55 & 23.27 & 46.67 
+& 38.95 & 24.95 & 16.85 
+& 20.83 & 23.14 & 22.16 
+& 65.00 & 85.53 & 40.02 
+& \best{3.48} & 77.81 
+& 53.58 & 50.98 
+& 38.42 \\
+
+AnDPro 
+& \second{24.84} & 25.14 & 47.33 
+& 39.79 & 23.99 & 17.34 
+& 20.40 & \best{23.45} & 21.94 
+& 67.50 & 85.59 & 40.62 
+& 3.19 & 76.94 
+& 53.77 & 51.55 
+& 38.96 \\
+
+LAQ++(8) 
+& 25.62 & 27.21 & 46.16 
+& 40.60 & 25.93 & 18.44 
+& 21.60 & 23.07 & 22.42 
+& 70.00 & 86.18 & 42.03 
+& 3.51 & 74.81 
+& 54.68 & 50.92 
+& 39.57 \\
+
+\textbf{\lorekvE\ (ours)} 
+& 24.05 & \second{26.85} & \best{47.59} 
+& \second{42.19} & \best{26.39} & \best{19.20} 
+& \second{21.48} & 22.46 & \best{22.78} 
+& \second{69.50} & \best{86.64} & \second{41.08} 
+& \second{3.44} & \second{84.37} 
+& \best{54.90} & \second{51.56} 
+& \second{40.28} \\
+
+\textbf{\lorekvD\ (ours)} 
+& \best{25.14} & \best{27.94} & \second{47.34} 
+& \best{42.26} & \second{25.91} & \second{18.71} 
+& \best{21.54} & \second{23.35} & \second{22.61} 
+& \best{70.00} & \second{86.33} & \best{41.24} 
+& 3.03 & \best{84.51} 
+& \second{54.24} & \best{52.03} 
+& \best{40.39} \\
+
+% =====================================================================
+% Budget = 256
+% =====================================================================
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=256$} \\
+\midrule
+
+H2O 
+& 21.54 & 22.92 & 42.56 
+& 31.07 & 22.53 & 13.76 
+& 22.52 & 22.40 & 23.09 
+& 40.50 & 84.20 & 40.77 
+& \best{3.41} & 86.10 
+& 50.98 & 48.17 
+& 36.03 \\
+
+StreamingLLM 
+& 17.93 & 16.01 & 33.36 
+& 30.71 & 21.30 & 10.08 
+& 20.66 & 19.47 & 22.89 
+& 53.50 & 73.59 & 29.22 
+& 3.00 & 27.77 
+& 42.30 & 39.87 
+& 28.85 \\
+
+SnapKV 
+& 22.37 & 23.74 & 48.13 
+& 38.56 & 22.43 & 15.66 
+& 21.91 & 23.13 & 23.15 
+& 61.50 & 85.45 & 41.42 
+& 3.09 & 84.54 
+& 53.22 & 50.24 
+& 38.66 \\
+
+PyramidKV 
+& 20.09 & 24.00 & 47.33 
+& 38.24 & 22.48 & 16.02 
+& 21.40 & 22.45 & 22.63 
+& 63.00 & 84.93 & 40.98 
+& \second{3.40} & 82.48 
+& 52.78 & 49.36 
+& 38.22 \\
+
+Ada-KV 
+& 23.02 & 25.70 & \second{49.23} 
+& 40.18 & 24.76 & 17.43 
+& 22.17 & 23.21 & 23.48 
+& 67.50 & 85.58 & 41.67 
+& 2.99 & 84.65 
+& 55.07 & 52.17 
+& 39.93 \\
+
+CriticalKV 
+& 23.70 & 26.66 & 49.00 
+& 40.05 & 25.12 & 17.86 
+& 21.99 & 23.35 & 23.45 
+& 68.00 & 86.19 & \second{42.07} 
+& 2.92 & 85.81 
+& 53.81 & 50.42 
+& 40.03 \\
+
+AnDPro 
+& 25.71 & 28.17 & \best{49.31} 
+& 40.04 & 25.81 & \second{18.68} 
+& 21.66 & 23.64 & 23.63 
+& \second{70.50} & \best{86.59} & \best{42.60} 
+& 2.86 & 85.62 
+& 55.74 & 52.87 
+& 40.84 \\
+
+LAQ++(8)
+& 25.23 & 29.16 & 49.24 
+& 41.70 & 26.85 & 18.62 
+& 23.73 & 23.69 & 23.38 
+& 70.50 & 86.24 & 42.54 
+& 3.36 & 86.11 
+& 55.59 & 52.49 
+& 41.15 \\
+
+\textbf{\lorekvE\ (ours)} 
+& \second{25.88} & \second{29.58} & 48.10 
+& \second{42.13} & \best{26.83} & \best{18.90} 
+& \second{23.23} & \second{23.79} & \best{24.07} 
+& \second{70.50} & \second{86.31} & 41.09 
+& 3.27 & \second{89.09} 
+& \best{56.15} & \second{53.12} 
+& \second{41.38} \\
+
+\textbf{\lorekvD\ (ours)} 
+& \best{26.49} & \best{30.22} & 47.96 
+& \best{42.17} & \second{26.56} & 18.63 
+& \best{23.26} & \best{24.28} & \second{23.98} 
+& \best{70.78} & 86.14 & 41.18 
+& 3.04 & \best{89.17} 
+& \second{55.78} & \best{53.38} 
+& \best{41.44} \\
+
+% =====================================================================
+% Budget = 512
+% =====================================================================
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=512$} \\
+\midrule
+
+H2O 
+& 21.72 & 26.03 & 44.81 
+& 32.33 & 23.16 & 14.86 
+& 23.65 & 22.84 & 24.70 
+& 42.00 & 85.22 & 41.57 
+& \best{3.40} & 86.45 
+& 53.04 & 49.68 
+& 37.22 \\
+
+StreamingLLM 
+& 18.76 & 17.17 & 37.09 
+& 30.21 & 21.64 & 9.93 
+& 24.44 & 20.00 & \best{25.57} 
+& 62.00 & 72.36 & 29.95 
+& 2.48 & 18.17 
+& 43.70 & 40.13 
+& 29.60 \\
+
+SnapKV 
+& 24.60 & 27.81 & 48.98 
+& 39.46 & 25.25 & 16.98 
+& 23.70 & 22.96 & 24.37 
+& 67.00 & 85.88 & 41.26 
+& 2.78 & 86.56 
+& 54.81 & 51.71 
+& 40.26 \\
+
+PyramidKV 
+& 23.23 & 27.94 & 48.87 
+& 40.50 & 24.36 & 16.74 
+& 23.22 & 23.16 & 24.37 
+& 67.00 & 85.73 & 41.74 
+& \second{3.16} & 85.67 
+& 54.16 & 50.34 
+& 40.01 \\
+
+Ada-KV 
+& 23.88 & 29.05 & 48.79 
+& 40.44 & 25.30 & 17.66 
+& 23.47 & 23.47 & 24.48 
+& 69.50 & 86.39 & 41.38 
+& 2.94 & 87.56 
+& 56.58 & 52.88 
+& 40.86 \\
+
+CriticalKV 
+& 23.83 & 28.67 & \second{49.13} 
+& 40.18 & 26.18 & 18.19 
+& 23.52 & 23.57 & 24.28 
+& 70.00 & 86.39 & \second{42.16} 
+& 2.82 & 87.55 
+& 56.51 & 52.64 
+& 40.98 \\
+
+AnDPro 
+& 24.87 & \second{30.99} & \best{49.58} 
+& 41.34 & 27.01 & 18.44 
+& 23.40 & 23.76 & 25.01 
+& \second{71.00} & \best{86.74} & \best{43.65} 
+& 2.83 & 86.23 
+& \best{57.46} & 53.61 
+& \second{41.62} \\
+
+LAQ++(8)
+& 25.49 & 30.92 & 49.72 
+& 41.50 & 26.84 & 19.20 
+& 25.67 & 24.04 & 25.31 
+& 71.00 & 86.43 & 43.14 
+& 2.90 & 85.27 
+& 56.80 & 53.54 
+& 41.70 \\
+
+\textbf{\lorekvE\ (ours)} 
+& \second{25.58} & \best{31.14} & 48.98 
+& \second{41.82} & \best{27.41} & \best{19.12} 
+& \second{25.46} & \second{23.97} & \second{25.05} 
+& \second{71.00} & \second{86.49} & 41.92 
+& 2.95 & \second{88.20} 
+& \second{56.85} & \second{53.82} 
+& \best{41.86} \\
+
+\textbf{\lorekvD\ (ours)} 
+& \best{25.98} & 30.90 & 48.89 
+& \best{41.85} & \second{27.23} & \second{18.94} 
+& \best{25.48} & \best{24.30} & 24.99 
+& \best{71.18} & 86.38 & 41.98 
+& 2.80 & \best{88.25} 
+& 56.61 & \best{53.99} 
+& \best{41.86} \\
+
+% =====================================================================
+% Budget = 1024
+% =====================================================================
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=1024$} \\
+\midrule
+
+H2O 
+& 23.90 & 28.62 & 46.46 
+& 37.03 & 24.74 & 15.04 
+& 25.30 & 23.11 & 25.92 
+& 46.00 & 85.93 & 41.80 
+& \best{3.24} & 86.57 
+& 54.46 & 51.01 
+& 38.70 \\
+
+StreamingLLM 
+& 19.42 & 21.69 & 41.75 
+& 32.40 & 22.18 & 11.18 
+& \best{27.13} & 21.09 & \best{26.59} 
+& 67.00 & 71.79 & 30.11 
+& 2.88 & 16.57 
+& 44.82 & 39.76 
+& 31.02 \\
+
+SnapKV 
+& 25.47 & 29.57 & \second{49.33} 
+& 40.90 & 25.53 & \best{19.01} 
+& 25.94 & 23.89 & 26.21 
+& 69.50 & 86.48 & 42.10 
+& \second{2.98} & \best{88.56} 
+& 55.57 & 51.92 
+& 41.44 \\
+
+PyramidKV 
+& 24.21 & 29.86 & 48.93 
+& 40.75 & 25.05 & 18.77 
+& 25.73 & 24.06 & 25.65 
+& 68.50 & 86.31 & 42.25 
+& 2.97 & 87.17 
+& 54.75 & 52.10 
+& 41.07 \\
+
+Ada-KV 
+& 25.60 & 31.15 & 49.02 
+& 41.47 & 27.07 & 18.77 
+& 25.40 & 23.84 & 25.92 
+& 70.50 & \second{86.55} & 43.07 
+& 2.54 & 87.14 
+& 57.27 & \best{53.85} 
+& 41.82 \\
+
+CriticalKV 
+& \second{26.03} & 31.50 & 48.39 
+& 41.73 & \second{27.10} & 18.84 
+& 25.30 & 24.10 & 25.99 
+& \second{71.00} & 86.30 & \second{43.16} 
+& 2.66 & \second{87.23} 
+& 56.69 & 53.20 
+& 41.83 \\
+
+AnDPro 
+& 25.78 & \best{32.54} & \best{49.35} 
+& 42.20 & 26.94 & 18.63 
+& 25.33 & 24.01 & 26.29 
+& \second{71.00} & 86.30 & \best{43.46} 
+& 2.68 & 86.98 
+& 57.18 & \second{53.77} 
+& 42.03 \\
+
+\textbf{\lorekvE\ (ours)} 
+& 25.98 & \second{31.81} & 49.26 
+& \second{43.96} & \best{27.17} & \second{18.91} 
+& 26.98 & \second{24.12} & \second{26.41} 
+& \second{71.00} & \best{86.60} & 42.30 
+& 2.68 & 86.49 
+& \best{57.83} & \second{53.77} 
+& \best{42.20} \\
+
+\textbf{\lorekvD\ (ours)} 
+& \best{26.17} & 31.10 & 49.22 
+& \best{43.97} & 27.08 & 18.82 
+& \second{26.99} & \best{24.28} & 26.38 
+& \best{71.09} & 86.54 & 42.33 
+& 2.61 & 86.51 
+& \second{57.71} & \best{53.85} 
+& \second{42.17} \\
+
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\begin{wraptable}{r}{0.49\textwidth}
+\vspace{-11pt}
+\centering
+\caption{Baseline budgets matching \lorekvE\ on LongBench (Mistral-7B-Instruct-v0.2).}
+\label{tab:budget_equivalence}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lcccc}
+\toprule
+\lorekvE\ budget & 128 & 256 & 512 & 1024 \\
+\midrule
+Ada-KV      & $\sim$332 & $\sim$745 & $>$1024 & $>$1024 \\
+CriticalKV  & $\sim$307 & $\sim$709 & $>$1024 & $>$1024 \\
+AnDPro      & \best{$\sim$208} & \best{$\sim$414} &
+              \best{$\sim$743} & $>$1024 \\
+\midrule
+Saving (\%) & 38.5 & 38.1 & 31.1 & $>0$ \\
+\bottomrule
+\end{tabular}
+\vspace{-8pt}
+\end{wraptable}
+
+\subsection{Evaluation on LongBench} \label{subsec:longbench}
+\textcolor{purple}{Tables~\ref{tab:longbench_mistral} and~\ref{tab:longbench_llama} show that LORE-KV consistently outperforms the matched baselines across both backbones and all cache budgets, with the largest gains under aggressive compression. At $B=128$, for example, LORE-KV reaches $40.39$ versus $38.96$ for AnDPro on Mistral, while the gap narrows as the cache budget increases. This trend also holds against the compute-matched \textbf{LAQ++} extension of Lookahead Q-Cache \citep{wang2025lookahead}, where LORE-KV remains higher on average at every reported budget. \textcolor{teal}{Table~\ref{tab:ablation_summary} further separates the query-reference and multi-rollout effects: at $B=128$, prompt-only scoring gives $35.87$, one rollout gives $39.81$, and the four-particle estimator reaches $40.28$/$40.39$. Thus, a response-side reference provides the first large correction, while sampling multiple plausible futures yields the additional gain.} The small gap between \lorekvE\ and \lorekvD\ indicates that the exact reliability channel is a secondary robustness choice; Appendix~\ref{app:divergence} and Proposition~1 further characterize this distinction. For broader context, comparisons with LaProx \citep{mai2026reformulating}, OBCache \citep{gu2025obcache}, and CAOTE \citep{goel2025caote} in Tables~\ref{tab:longbench_llama} and~\ref{tab:external_comparison} show a favorable accuracy--memory trade-off, with LORE-KV retaining about $98\%$ of full-cache performance at only $6.9\%$ cache retention. Similarly, Table~\ref{tab:expected_attention_comparison} shows that LORE-KV recovers $95.4\%$ of full-cache quality at $1.7\%$ retention, compared with $68.9\%$ at $10\%$ retention for Expected Attention \citep{devoto2025expected}; these external comparisons are contextual rather than fully controlled because their evaluation protocols differ.}
+
+This accuracy advantage also translates into lower cache requirements. As shown in Table~\ref{tab:budget_equivalence}, matching \lorekvE\ at $B=128$ requires the strongest baseline to retain about $208$ tokens, corresponding to a $38.5\%$ cache saving; the saving remains $31.1\%$ at $B=512$. Figure~\ref{fig:budget_equivalence} confirms that this benefit persists across the full budget range, showing that LORE-KV provides a consistently better quality-memory trade-off rather than isolated gains at a few operating points.
+
+\subsection{Evaluation on Needle-in-a-Haystack (NIAH)}\label{subsec:niah}
+The same quality-memory advantage extends to long-context retrieval. On NIAH with Llama-3.1-8B-Instruct and $B=1024$, \lorekvE\ achieves the highest exact-match score ($0.977$), compared with $0.955$ for CriticalKV and $0.932$ for AnDPro, with the same ordering under word recall. As shown in Figure~\ref{fig:niah-heatmap}, differences are concentrated at greater context lengths and needle depths, where prompt-side queries provide a weaker signal of the evidence needed during decoding. Figure~\ref{fig:retained_token_composition} supports this mechanism, showing that LORE-KV retains answer-bearing tokens more often at the same cache budget.
+
+
+\begin{table}[t]
+\caption{RULER accuracy averaged over 13 tasks at 4K, 8K, and 16K context lengths.
+\textbf{Avg.} is the mean across lengths.}
+\label{tab:ruler_main}
+\centering
+\begin{tabular}{lcccccccc}
+\toprule
+& \multicolumn{4}{c}{Mistral-7B-Instruct-v0.2}
+& \multicolumn{4}{c}{Llama-3.1-8B-Instruct} \\
+\cmidrule(lr){2-5}\cmidrule(lr){6-9}
+Method & 4K & 8K & 16K & Avg. & 4K & 8K & 16K & Avg. \\
+\midrule
+
+\multicolumn{9}{c}{\textit{Budget} $=128$} \\
+\midrule
+CriticalKV
+& 43.83 & 38.75 & 36.08 & 39.55
+& 50.72 & 48.85 & 45.06 & 48.21 \\
+
+AnDPro
+& 54.85 & 50.06 & 45.20 & 50.04
+& 60.06 & 58.42 & 52.80 & 57.09 \\
+
+\textbf{\lorekvE\ (ours)}
+& \best{58.40} & \best{55.77} & \best{51.05} & \best{55.07}
+& \best{64.27} & \best{63.43} & \best{56.05} & \best{61.25} \\
+
+\textbf{\lorekvD\ (ours)}
+& \second{58.31} & \second{55.74} & \second{51.00} & \second{55.02}
+& \second{64.20} & \second{63.32} & \second{55.98} & \second{61.17} \\
+
+\midrule
+\multicolumn{9}{c}{\textit{Budget} $=256$} \\
+\midrule
+CriticalKV
+& 63.89 & 56.74 & 51.95 & 57.53
+& 65.55 & 60.74 & 58.25 & 61.51 \\
+
+AnDPro
+& \second{71.05} & 64.08 & 57.91 & 64.35
+& 71.62 & 66.98 & 63.25 & 67.28 \\
+
+\textbf{\lorekvE\ (ours)}
+& \best{71.51} & \best{65.52} & \best{59.94} & \best{65.66}
+& \best{72.22} & \best{68.34} & \best{65.80} & \best{68.78} \\
+
+\textbf{\lorekvD\ (ours)}
+& 69.77 & \second{64.56} & \second{58.98} & \second{64.44}
+& \second{72.10} & \second{68.22} & \second{65.73} & \second{68.69} \\
+
+\midrule
+\multicolumn{9}{c}{\textit{Budget} $=512$} \\
+\midrule
+CriticalKV
+& 79.26 & 67.75 & 63.65 & 70.22
+& 79.25 & 69.02 & 67.38 & 71.88 \\
+
+AnDPro
+& \second{83.42} & 72.06 & \second{67.12} & \second{74.20}
+& 82.71 & 72.58 & 70.28 & 75.19 \\
+
+\textbf{\lorekvE\ (ours)}
+& \best{83.69} & \best{72.82} & \best{68.28} & \best{74.93}
+& \best{83.12} & \best{73.46} & \best{71.60} & \best{76.06} \\
+
+\textbf{\lorekvD\ (ours)}
+& 81.67 & \second{72.18} & 64.98 & 72.94
+& \second{83.05} & \second{73.35} & \second{71.53} & \second{75.98} \\
+
+\midrule
+\multicolumn{9}{c}{\textit{Budget} $=1024$} \\
+\midrule
+CriticalKV
+& 88.78 & 83.05 & 80.25 & 84.03
+& 88.35 & 83.26 & \best{81.72} & 84.44 \\
+
+AnDPro
+& \second{90.97} & \second{85.31} & \second{82.06} & \second{86.11}
+& 93.38 & 85.94 & 79.37 & 86.23 \\
+
+\textbf{\lorekvE\ (ours)}
+& \best{91.11} & \best{85.74} & \best{82.75} & \best{86.53}
+& \best{93.60} & \best{86.40} & \second{79.98} & \best{86.66} \\
+
+\textbf{\lorekvD\ (ours)}
+& 89.88 & 84.51 & 81.53 & 85.31
+& \second{93.50} & \second{86.29} & 79.87 & \second{86.55} \\
+
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Evaluation on RULER: Sweeping Context Length at a Fixed Task}
+\label{subsec:ruler}
+RULER provides a controlled test of our query-reference hypothesis by evaluating the same $13$ tasks at $4$K, $8$K, and $16$K contexts with fixed lookahead cost. Table~\ref{tab:ruler_main} shows that \lorekvE\ achieves the best overall average across all model-budget settings and the best per-length result in $23$ of $24$ cases, with the gains concentrated on aggregation-style tasks (Tables~\ref{tab:ruler_mistral_full} and~\ref{tab:ruler_llama_full}). The advantage is strongest under aggressive compression and longer contexts: at $B=128$, \lorekvE\ improves over AnDPro by about $5.0$ points on Mistral and $4.2$ points on Llama overall, while on Mistral the gain increases from $3.55$ points at $4$K to $5.85$ at $16$K. At $B=1024$, the margin shrinks to roughly $0.4$ points, with the only per-length exception occurring for Llama at $16$K, where CriticalKV reaches $81.72$ versus $79.98$ for \lorekvE. Since the lookahead cost is unchanged across context lengths and budgets, this pattern supports the intended mechanism: future-aware scoring becomes most useful when the retained cache is small and prompt-side queries are least representative of later decoding needs, consistent with Figure~\ref{fig:mismatch_vs_gain}. \textcolor{teal}{The matched $M$-ablation in Table~\ref{tab:ruler_ablation} additionally isolates the benefit of multiple futures: at 4K, the score rises from $56.90$ with one rollout to $58.40$ with four at $B=128$, and from $68.45$ to $71.51$ at $B=256$.} \lorekvD\ closely tracks \lorekvE\ throughout Table~\ref{tab:ruler_main}; their low-budget comparison is analyzed separately in Appendix~\ref{app:reparam_grid}.
+
+The same quality-memory trend appears on the fixed $4$K setting, where cache-retention rates are directly comparable. Table~\ref{tab:external_comparison} shows that \lorekvE\ reaches $83.12$ at $12.5\%$ retention, already exceeding OBCache \citep{gu2025obcache} at $20\%$, and reaches $93.60$ at $25\%$ retention versus $88.40$ for OBCache at $40\%$. RULER-4K also provides an exactly budget-matched comparison with Expected Attention \citep{devoto2025expected}: at $1{,}024$ retained tokens, \lorekvE\ obtains $93.60$ versus $75.90$ (Appendix~\ref{app:expected_attention}). We treat this comparison as contextual because Expected Attention is query-agnostic by design, but its direction is consistent with the mismatch analysis in Figure~\ref{fig:mismatch_vs_gain}. Finally, the compute-matched \textbf{LAQ++} baseline \citep{wang2025lookahead} reaches $51.57$, $62.81$, and $69.83$ on Llama at $B=128,256,512$, compared with $61.25$, $68.78$, and $76.06$ for \lorekvE\ (Table~\ref{tab:ruler_main}), further showing that the gains cannot be explained by lookahead compute alone. LAQ++ results for Mistral, $B=1024$, and the per-length/per-task settings are unavailable and are therefore not included in Tables~\ref{tab:ruler_main}, \ref{tab:ruler_mistral_full}, and~\ref{tab:ruler_llama_full}.
+
+\begin{table*}[t]
+\color{purple}
+\centering
+\caption{Accuracy-memory trade-off on Llama-3.1-8B-Instruct across LongBench and RULER-4K. Recovery is measured relative to Full Cache (\lorekvD{} on LongBench and \lorekvE{} on RULER-4K).}
+\label{tab:external_comparison}
+
+\small
+\setlength{\tabcolsep}{7pt}
+\renewcommand{\arraystretch}{1.05}
+
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+Benchmark & Method & Retention & Tokens & Accuracy & Recovery (\%) \\
+\midrule
+
+\multicolumn{6}{l}{\textit{LongBench (16-task average; mean length $\sim$7,426)}} \\
+\addlinespace[1pt]
+
+& Full Cache
+& 100\% & $\sim$7,426 & 49.29 & 100.0 \\
+
+\addlinespace[2pt]
+
+& CAOTE
+& 82.7\% & $\sim$6,144 & 47.71 & 97.0 \\
+&
+& 55.2\% & $\sim$4,096 & 45.75 & 93.0 \\
+&
+& 27.6\% & $\sim$2,048 & 40.73 & 82.8 \\
+
+\addlinespace[2pt]
+
+& OBCache
+& 30.0\% & $\sim$2,228 & \second{48.54} & \second{99.2} \\
+&
+& 20.0\% & $\sim$1,485 & 48.06 & 98.2 \\
+&
+& 10.0\% & $\sim$743 & 46.82 & 95.7 \\
+
+\addlinespace[2pt]
+
+& \textbf{LORE-KV (ours)}
+& 13.8\% & 1,024 & \best{48.90} & \best{99.2} \\
+&
+& 6.9\% & 512 & 48.39 & 98.2 \\
+&
+& 3.4\% & 256 & 48.03 & 97.4 \\
+&
+& 1.7\% & 128 & 47.01 & 95.4 \\
+
+\midrule
+
+\multicolumn{6}{l}{\textit{RULER-4K (13-task average; fixed 4,096-token context)}} \\
+\addlinespace[1pt]
+
+& Full Cache
+& 100\% & 4,096 & 95.25 & 100.0 \\
+
+\addlinespace[2pt]
+
+& OBCache
+& 40.0\% & 1,600 & \second{88.40} & \second{92.8} \\
+&
+& 30.0\% & 1,200 & 86.30 & 90.6 \\
+&
+& 20.0\% & 800 & 82.70 & 86.8 \\
+&
+& 10.0\% & 400 & 70.10 & 73.6 \\
+
+\addlinespace[2pt]
+
+& \textbf{LORE-KV (ours)}
+& 25.0\% & 1,024 & \best{93.60} & \best{98.3} \\
+&
+& 12.5\% & 512 & 83.12 & 87.3 \\
+&
+& 6.3\% & 256 & 72.22 & 75.8 \\
+&
+& 3.1\% & 128 & 64.27 & 67.5 \\
+
+\bottomrule
+\end{tabular}
+
+\vspace{-4pt}
+\end{table*}
+
+\subsection{Memory and Latency} \label{subsec:efficiency}
+At a fixed cache budget $B$, all methods have the same steady-state decoding memory and per-token cost. LORE-KV adds only a one-time lookahead overhead: the $M$ particles are decoded as a single batched continuation of length $T$ using the prefetched prompt KV cache. This cost is paid once before final generation and is independent of output length; the reliability term adds no decoding of its own (Appendix~\ref{app:overhead_details}), so both variants have the same cost profile. The full procedure is given in Algorithm~\ref{alg:lorekv}, while Appendix~\ref{app:overhead_details} details the computational accounting and compute-matched baseline control.
+
+Because \textbf{LAQ++} \citep{wang2025lookahead} is evaluated with the same lookahead length as the LORE-KV core configuration, it isolates the effect of \emph{how} that compute is used rather than how much is spent. \lorekvE\ still leads on average at every reported budget and dataset against this equal-compute baseline (LongBench: $40.28$ vs.\ $39.57$ on Mistral and $46.11$ vs.\ $38.70$ on Llama at $B{=}128$, narrowing but persisting to $41.86$ vs.\ $41.70$ and $48.06$ vs.\ $40.39$ at $B{=}512$; RULER on Llama: $61.25$ vs.\ $51.57$ at $B{=}128$ and $76.06$ vs.\ $69.83$ at $B{=}512$; Section~\ref{subsec:longbench} and Section~\ref{subsec:ruler}). The advantage is therefore consistent and robust to matching test-time compute, indicating that it comes from the multi-trajectory, reliability-weighted estimator rather than from spending more test-time compute.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig3_cache_distribution.pdf}
+  \caption{\textbf{Attention-output fidelity.} Cosine similarity between retained-cache and full-cache attention outputs on future queries, shown as distributions and layer-wise means. Mistral-7B-Instruct-v0.2, $B=128$.}
+  \label{fig:cache_distribution}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig6_mismatch_vs_gain.pdf}
+  \caption{\textbf{Gain versus prompt-to-future query mismatch.} Per-example gains in oracle retention recall and output fidelity as mismatch increases. Mistral-7B-Instruct-v0.2, $B=128$, $M=4$.}
+  \label{fig:mismatch_vs_gain}
+\end{figure}
+
+\subsection{Mechanism Analysis: Locating the Gain} \label{subsec:mechanism}
+We test three predictions of our mechanism: P1 (\emph{operating point}), P2 (\emph{saturation}), and P3 (\emph{locality}); Appendix~\ref{app:datasets} states them formally, and Appendix~\ref{app:mechanism_protocol} gives the measurement protocol. Sections~\ref{subsec:longbench}-\ref{subsec:ruler} establish P1; here we directly test P2 and P3 by measuring the prompt-to-future query mismatch identified in Section~\ref{sec:introduction}. Let $\mathcal{Q}_{\mathrm{future}}$ denote the queries ultimately served during generation (Appendix~\ref{app:kv_background}); because they are unavailable at eviction time, we record them only afterwards from full-cache generation as an oracle for analysis. All results use Mistral-7B-Instruct-v0.2 at $B=128$ (Appendix~\ref{app:mechanism_protocol}). Figure~\ref{fig:future_query_alignment} shows that response-side queries are substantially better aligned with $\mathcal{Q}_{\mathrm{future}}$ than the prompt-end window: on LongBench, coverage rises from $0.788$ to $0.826$ with a single rollout and then saturates at $0.828$-$0.829$. \textcolor{teal}{This confirms that one response-side rollout corrects most of the nearest-query reference mismatch, but it does not make the multi-rollout estimator redundant: coverage is a nearest-query diagnostic, whereas Eq.~\ref{eq:final_score} averages deletion cost across plausible branches. The end-to-end $M$-ablations in Tables~\ref{tab:ablation_summary} and~\ref{tab:ruler_ablation} test this second effect directly.} The resulting cache also better preserves the full-cache computation targeted by Eq.~\ref{eq:eviction_objective} and Eq.~\ref{eq:projected_score}: Figure~\ref{fig:cache_distribution} shows higher output fidelity on both LongBench ($0.873\!\rightarrow\!0.905$) and RULER ($0.929\!\rightarrow\!0.944$), while Figure~\ref{fig:layer_head_analysis} shows that the effect is distributed across layers and heads, supporting the projected deletion criterion of Section~\ref{subsec:deletion}.
+
+P3 predicts that LORE-KV should help most when prompt-side queries poorly represent future decoding needs. We therefore define $\operatorname{Mis}(X)=1-\operatorname{Cov}(\mathcal{Q}_{\mathrm{future}};\{\mathcal{Q}^{l,h}_{\mathcal{W}}\})$ and relate it to the \lorekvE\ gain in Figure~\ref{fig:mismatch_vs_gain}. The relationship is consistently positive: Spearman correlations are $\rho=0.28$/$0.57$ for oracle-retention recall and $\rho=0.53$/$0.51$ for output fidelity on LongBench/RULER. Together with the budget- and context-dependent trends in Section~\ref{subsec:ruler} (P1), this ties the gain to the quality of the query reference rather than to additional compute. \textcolor{teal}{The reliability variants remain close in Figure~\ref{fig:future_query_alignment}, consistent with treating entropy/disagreement weighting as a robustness refinement rather than the dominant source of gain.} Figure~\ref{fig:criterion_comparison} strengthens this conclusion under a controlled comparison with CriticalKV and AnDPro: holding the prefill, sampled particles, and selector fixed, LORE-KV achieves substantially higher agreement with the future-query oracle and higher full-cache output fidelity, whereas the prompt-side criteria\textcolor{teal}{---including the $\lambda_L{=}0$ control that uses the same projected score without sampled futures---}remain close across depth. Additional evidence is provided in Appendix~\ref{app:experiments_extra}, including Figures~\ref{fig:score_comparison}, \ref{fig:confidence_calibration}, \ref{fig:particle_divergence}, \ref{fig:retained_token_composition}, \ref{fig:layer_head_analysis}, and~\ref{fig:budget_equivalence}; reliability weighting is defined in Eq.~\ref{eq:confidence}.
+
+
+\section{Related Work}
+\label{sec:related_work}
+\subsection{Prompt-side KV eviction} \label{subsec:rw_eviction}
+Most prior methods estimate token importance from prefill or prompt-side statistics. StreamingLLM preserves attention sinks and recent tokens \citep{xiao2023streamingllm}; H2O and Scissorhands use accumulated attention \citep{zhang2023h2o,liu2023scissorhands}; TOVA uses current-query attention \citep{oren2024transformers}; FastGen applies head-specific retention patterns \citep{ge2024fastgen}; and SnapKV uses a prompt-end observation window \citep{li2024snapkv}. PyramidKV and CAKE improve layer-wise budget allocation \citep{cai2024pyramidkv,qin2025cake}, while Ada-KV, HeadKV, DynamicKV, SAGE-KV, LAVa, and LU-KV refine allocation across heads, layers, or token groups \citep{feng2024adakv,fu2024headkv,zhou2024dynamickv,wang2025sagekv,shen2025lava,tang2026lukv}. DefensiveKV further introduces robust aggregation against poorly estimated queries \citep{feng2025taming}. These methods improve retention or budget allocation but still estimate importance using prompt-side queries rather than the future queries that consume the compressed cache.
+
+\subsection{Future-query estimation and output-aware scoring} \label{subsec:rw_future}
+Several methods improve the query reference. Lookahead Q-Cache uses queries from a single surrogate response \citep{wang2025lookahead}; Expected Attention analytically estimates future attention \citep{devoto2025expected}; DapQ constructs pseudo-queries from future positional information \citep{tian2026dapq}; and GVote samples synthetic future queries for adaptive budget determination rather than fixed-budget token selection \citep{tang2025adaptive}. LookaheadKV, KVP, globally calibrated retention methods, and IndexMem instead learn future token utility or compact memory representations \citep{ahn2026lookaheadkv,moschella2026learning,bui2026make,yang2026indexmem}. KVzip, FastKVzip, and ContrastKV target query-agnostic or multi-query robustness \citep{kim2026fastkvzip,kim2026kvzip,chen2026contrastkv}. A complementary line improves the importance score itself. CriticalKV incorporates value information \citep{guo2024criticalkv}; CAOTE measures attention-output error but remains tied to the available scoring queries \citep{goel2025caote}; OBCache improves output-perturbation-based saliency without addressing prompt-to-future query mismatch \citep{gu2025obcache}; AnDPro uses projected attention-output information \citep{geng2026accurate}; and LaProx models projected values and inter-head effects \citep{mai2026reformulating}. \textcolor{teal}{LORE-KV does not claim response-side lookahead or projected output-aware scoring individually; its distinction is to use multiple sampled continuations as a distributional estimator, with soft reliability weighting for finite-sample robustness.} \textcolor{purple}{Because OBCache and CAOTE report percentage rather than token budgets, they are compared on a common retention axis in Table~\ref{tab:external_comparison}; GVote determines budgets adaptively and reports no fixed-budget accuracies, so it is discussed but not tabulated.}
+
+
+\subsection{Orthogonal KV-cache compression} \label{subsec:rw_orthogonal}
+Other approaches reduce KV-cache cost along dimensions orthogonal to token eviction. Quantization methods such as KIVI, KVQuant, QAQ, MiKV, MiniKV, RotateKV, KVTuner, MixKVQ, PM-KVQ, and LeanKV reduce precision or combine sparsity with mixed precision \citep{liu2024kivi,hooper2024kvquant,dong2024qaq,yang2024notokenleft,sharma2024minikv,su2025rotatekv,li2025kvtuner,zhang2025mixkvq,liu2025pmkvq,10.1145/3731569.3764810}. GEAR, MiniCache, KVMerger, xKV, inter-layer methods, and transform coding exploit low-rank, cross-layer, mergeable, or coded representations \citep{kang2024gear,liu2024minicache,wang2024kvmerger,chang2025xkv,ma2024interlayer,staniszewski2026kv}. KVServe targets communication-efficient serving \citep{liu2026kvserve}, while DMS, ThinKV, RaaS, LazyEviction, R-KV, RocketKV, LongFlow, and CONF-KV address cache growth during long decoding \citep{lancucki2025hyperscaling,ramachandran2025thinkv,hu2025raas,zhang2025lazyevict,cai2025rkv,behnam2025rocketkv,su2026longflow,li2026confkv}. These methods are complementary because they change cache precision, structure, serving, or decode-time maintenance rather than the prompt-time token-importance criterion. Aggressive eviction can also remove instructions or answer-bearing evidence \citep{yang2024notokenleft,chen2025pitfalls,garcia2026protection}. Overall, prior methods either approximate future queries incompletely or improve deletion scoring while remaining prompt-side; the key gap is to combine multi-trajectory future-query estimation with future-aware deletion scoring.
+
+\section{Conclusion} \label{sec:conclusion}
+
+LORE-KV takes a broader view of KV-cache eviction, i.e., rather than asking which tokens appeared important while processing the prompt, it asks which memories are likely to remain useful for the computation that comes next. \textcolor{teal}{It operationalizes this view by estimating projected deletion cost across multiple plausible response-side trajectories, with entropy/disagreement weighting used to reduce sensitivity to poor finite-sample draws.} Our results show that the gains are largest when prompt-side queries are poor proxies for future decoding, particularly under aggressive compression and long contexts; the $M$-ablations further show an additional benefit from multiple rollouts beyond a single surrogate. More broadly, this points toward a future in which LLM memory is managed adaptively according to the model's evolving computational needs, deciding when lookahead is necessary, how much future uncertainty should be explored, and which information should be preserved, compressed, recovered, or updated as generation progresses. LORE-KV therefore provides a step toward dynamic, inference-time memory systems that allocate limited memory based not only on the past context, but on what the model is likely to need next.
+
+\subsection*{AI Use Statement}
+
+Generative AI was used only to improve the grammar, clarity, and concision of author-written text, and coding assistants were used for routine tasks such as plotting, table generation, and code refactoring. AI was not used to develop the research ideas, design the methodology or experiments, or generate or interpret experimental results. The authors reviewed and verified all AI-assisted content and take full responsibility for the paper.
+
+\subsection*{Ethics Statement}
+
+This work uses publicly available models and benchmarks and involves no human subjects, personally identifiable information, or new data collection.
+
+\subsection*{Reproducibility Statement}
+
+LORE-KV is training-free and modifies no model weights. The complete methodology and algorithm are provided in Section~\ref{sec:methodology} and Algorithm~\ref{alg:lorekv}. Hyperparameters are reported in Table~\ref{tab:hyperparams}, implementation details in Appendix~\ref{app:implementation}, and dataset and evaluation settings in Appendix~\ref{app:ruler_results} and Table~\ref{tab:longbench_datasets}. Ablations and mechanism-analysis protocols are provided in Tables~\ref{tab:ablation_summary}-\ref{tab:ruler_ablation} and Appendix~\ref{app:mechanism_protocol}. \textcolor{teal}{Every eviction method here is implemented as a monkeypatch over a single pinned Transformers release, which predates two of the four backbones; those two are therefore run through re-expressions of their architectures against that release, each verified to reproduce the reference implementation's logits exactly in float32 (Appendix~\ref{app:new_backbones}).}
+
+\bibliography{main}
+\bibliographystyle{iclr2027_conference}
+
+\appendix
+
+\section{Background: The KV Cache and the Eviction Problem} \label{app:kv_background}
+
+\textbf{KV caching and memory cost.}
+For $L$ layers, $H$ KV heads, head dimension $d$, sequence length $n$, batch size $b$, and $p$ bytes per element, the cache requires $\mathrm{Mem}_{\mathrm{KV}} = 2bLHdnp$ bytes, where the factor $2$ accounts for keys and values. Thus, memory grows linearly with context length even at batch size one. For example, consider a 70B-class model with $L=80$ layers, $H=8$ KV heads, $d=128$, a $128$K-token context ($n=131{,}072$), $b=1$, and $p=2$ bytes (BF16). Its KV cache alone requires $\mathrm{Mem}_{\mathrm{KV}}\approx42.9$ GB. For comparison, a 70B-parameter model stored in BF16 requires roughly $140$ GB for its weights, so a single 128K context adds KV-cache memory equal to about $31\%$ of the model's weight memory.
+
+\textbf{The eviction problem.}
+\label{app:kv_eviction_problem}
+Given a cache budget $B\ll n$, eviction retains index sets
+$\mathcal{R}^{l,h}\subseteq\{1,\ldots,n\}$ with
+$|\mathcal{R}^{l,h}|\le B_{l,h}$ and removes the remaining KV pairs. Ideally, the retained cache should preserve the behavior of the full-cache model during future decoding:
+\begin{equation}
+\min_{\{\mathcal{R}^{l,h}\}}
+\mathbb{E}_{\mathbf{q}\sim\mathcal{Q}_{\mathrm{future}}}
+\left[
+\mathrm{dist}\!\left(
+\mathrm{output}(\mathbf{q};\text{full cache}),
+\mathrm{output}(\mathbf{q};\text{retained cache})
+\right)
+\right].
+\label{eq:eviction_objective}
+\end{equation}
+Section~\ref{subsec:mechanism} evaluates this approximation against the actual future queries observed after generation.
+
+\section{Method Details} \label{app:method_details}
+
+\subsection{Implementation: Protected Set, Grouped-Query Attention, Fused Kernels}
+\label{app:implementation}
+\label{app:setup_details}
+\label{app:gqa}
+\label{app:kernels}
+
+\textbf{Protected positions.}
+The optional set $\mathcal{B}$ holds the positions of prompt-structure markers: chat-template delimiters (\verb!<|system|>!, \verb!<|user|>!, \verb!<|assistant|>!, \verb![INST]!, \verb![/INST]!), tool-call markers and document separators. These are read off the tokenized prompt and always retained; if the template exposes none, $\mathcal{B}=\emptyset$. Following prior work \citep{xiao2023streamingllm,li2024snapkv}, this keeps instructions and prompt boundaries from being removed under aggressive eviction. 
+
+\textbf{Grouped-query attention.}
+Under GQA/MQA, multiple query heads share each KV head. We therefore score each cached pair $(\mathbf{k}^{l,h}_{i},\mathbf{v}^{l,h}_{i})$ using all query heads in its group $\mathcal{G}(h)$ and aggregate their deletion effects from Eq.~\ref{eq:deletion_effect}. Throughout, $H$ denotes the number of KV heads, and cache budgets are assigned at the KV-head level.
+
+\textbf{Fused attention kernels.}
+Kernels such as FlashAttention never materialize the $n\times n$ attention matrix a perturbation score needs. We avoid kernel surgery by computing scores only for the scoring-query set $\mathcal{Q}^{l,h}_{\mathrm{score}}$ of Eq.~\ref{eq:score_queries}, whose size $|\mathcal{Q}^{l,h}_{\mathrm{score}}|=w+MT$ is far below $n$. For those few queries we form the attention weights against the cached keys explicitly, leaving the fused kernel untouched for the rest of prefill and for final decoding. Eviction scoring is thus a small side computation that never requires full-matrix attention on the main inference path.
+
+\subsection{Relation to Prior Surrogate-Query and Output-Aware Methods}
+\label{app:lookahead_details}
+
+Relative to Lookahead Q-Cache, setting $M{=}1$ reduces the
+future-query construction to one surrogate trajectory; this does not
+make the full scoring criteria identical, because LORE-KV retains the
+projected leave-one-out score of Eq.~\ref{eq:projected_score}.
+Setting $\lambda_L{=}0$ removes the lookahead term from
+Eq.~\ref{eq:final_score} and yields prompt-window projected
+output-perturbation scoring. This is score-equivalent to using no
+lookahead term, but it is not computationally equivalent to $M{=}0$
+if particles have already been generated.
+
+At $M{=}1$, the softmax in Eq.~\ref{eq:particle_weight} assigns
+unit weight to the single trajectory and $\hat D_m=0$, so
+\lorekvE\ and \lorekvD\ induce the same single-trajectory query
+estimator. The remaining finite-$M$ cases are specified in
+Appendix~\ref{app:reliability_details}. The corresponding LongBench
+and RULER controls are reported in
+Tables~\ref{tab:ablation_summary} and~\ref{tab:ruler_ablation};
+signal-level diagnostics are shown in
+Figures~\ref{fig:confidence_calibration} and
+\ref{fig:particle_divergence}.
+
+\begin{algorithm}[t]
+\caption{LORE-KV eviction procedure.}
+\label{alg:lorekv}
+\begin{algorithmic}[1]
+
+\Require frozen LLM $f_\theta$; prompt $X=(x_1,\ldots,x_n)$; window $w$;
+particles $M$, length $T$; layer budgets $\{B_l\}_{l=1}^{L}$;
+core constants $\epsilon,\beta,\gamma,\lambda_D,\lambda_L$;
+plug-in switches $\alpha,\kappa,\tau,\lambda_k,\lambda_v$
+\Comment{all switches $=0$ gives the core method;
+values for \lorekvE\ and \lorekvD\ are in Table~\ref{tab:hyperparams}}
+
+\Ensure compressed KV cache $(\mathbf{K}^\star,\mathbf{V}^\star)$
+
+\State $\big(\{\mathbf{K}^{l,h},\mathbf{V}^{l,h}\},
+\{\mathcal{Q}^{l,h}_{\mathcal{W}}\}\big)
+\gets \operatorname{Prefill}(f_\theta,X)$
+\Comment{build the KV cache and collect prompt-end queries}
+
+\State $\mathcal{P}\gets\{1\}\cup\mathcal{W}\cup\mathcal{B}$;\quad
+$\mathcal{C}\gets\{1,\ldots,n\}\setminus\mathcal{P}$
+\Comment{separate protected and candidate tokens}
+
+\Statex \textcolor{blue}{\textit{\% Stage 1: estimate future decoding queries}}
+
+\For{$m=1,\ldots,M$ \textbf{in parallel}}
+
+    \State $Y^{(m)}\sim q(\cdot\mid X)$,
+    $\ |Y^{(m)}|=T$;\ store
+    $\mathcal{Q}^{(m),l,h}_{\mathrm{look}}\ \forall(l,h)$,\ $\{c^{(m)}_u,H^{(m)}_u\}_{u=1}^{T}$
+    \Comment{sample a lookahead; store its queries and per-step $c_u$ (Eq.~\ref{eq:centered_score}), $H_u$}
+
+\EndFor
+
+\State $\mathbf{D}\gets\textsc{Disagree}
+\big(\{\mathcal{Q}^{(m),l,h}_{\mathrm{look}}\}_{m=1}^{M}\big)$
+by Eq.~\ref{eq:disagreement};\ \ $\hat{\mathbf{D}}\gets\operatorname{zscore}(\mathbf{D})$ if $M\ge3$ else $\mathbf{0}$
+\Comment{disagreement from the stored queries; no extra decoding}
+
+\State $\bar c_m\gets\frac1T\sum_{u}c^{(m)}_u$,\ \
+$\bar H_m\gets\frac1T\sum_{u}H^{(m)}_u$,\ \
+$R_m\gets\beta\bar c_m-\gamma\bar H_m-\lambda_D\hat D_m$
+\ \ $\forall m$
+\Comment{means, not sequence totals (Eq.~\ref{eq:confidence})}
+
+\State $\boldsymbol{\omega}\gets
+\operatorname{softmax}(\mathbf{R})\in\Delta^{M-1}$,
+$\ \mathbf{R}=(R_m)_{m=1}^{M}$
+\Comment{convert reliability scores into trajectory weights}
+
+\State $\mathcal{Q}^{l,h}_{\mathrm{score}}
+\gets
+\mathcal{Q}^{l,h}_{\mathcal{W}}
+\cup
+\bigcup_{m=1}^{M}\mathcal{Q}^{(m),l,h}_{\mathrm{look}}$
+\Comment{combine prompt and lookahead queries}
+
+\Statex \textcolor{blue}{\textit{\% Stage 2: score the impact of removing each token}}
+
+\For{layer $l=1,\ldots,L$ \textbf{and} head $h=1,\ldots,H$}
+
+    \For{candidate $i\in\mathcal{C}$ \textbf{and}
+    query $\mathbf{q}\in\mathcal{Q}^{l,h}_{\mathrm{score}}$}
+
+        \State $(a^{l,h}_{q,i},\mathbf{o}^{l,h}_{q})
+        \gets
+        \operatorname{Attn}
+        (\mathbf{q},\mathbf{K}^{l,h},\mathbf{V}^{l,h})$
+        \Comment{compute attention weight and output}
+
+        \State $\Delta\mathbf{o}^{l,h}_{q,i}
+        \gets
+        \dfrac{a^{l,h}_{q,i}}
+        {1-a^{l,h}_{q,i}+\epsilon}
+        \big(\mathbf{v}^{l,h}_{i}-\mathbf{o}^{l,h}_{q}\big)$
+
+        \State $e^{l,h}_{q,i}
+        \gets
+        \left\|
+        \mathbf{W}^{O}_{l,h}
+        \Delta\mathbf{o}^{l,h}_{q,i}
+        \right\|_2^2$
+        \Comment{measure the effect of removing token $i$}
+
+    \EndFor
+
+    \State $S^{l,h}_{i}
+    \gets
+    \rho(\mathcal{E}^{l,h}_{i,\mathcal{W}})
+    +
+    \lambda_L
+    \sum_{m=1}^{M}
+    \omega_m\,
+    \rho(\mathcal{E}^{l,h}_{i,m})
+    \quad \forall i\in\mathcal{C}$
+    \Comment{combine prompt and weighted lookahead importance}
+
+    \Statex \textcolor{blue}{\textit{\% Stage 3: allocate cache budget and retain tokens}}
+
+    \State $\{B_{l,h}\}_{h=1}^{H}
+    \gets
+    \operatorname{Alloc}
+    \big(B_l,\{E_{l,h}\}_{h=1}^{H};\tau\big)$
+    \Comment{divide the layer budget across heads}
+
+    \For{head $h=1,\ldots,H$}
+
+        \State $\mathcal{R}^{l,h}
+        \gets
+        \operatorname{Select}
+        (\mathbf{S}^{l,h},B_{l,h})$
+        \Comment{keep the highest-scoring tokens}
+
+        \State $\mathcal{R}^{l,h}_{\mathrm{final}}
+        \gets
+        \mathcal{P}\cup\mathcal{R}^{l,h}$
+
+        \State $(\mathbf{K}^{l,h}_{\star},
+        \mathbf{V}^{l,h}_{\star})
+        \gets
+        \operatorname{Gather}
+        (\mathbf{K}^{l,h},
+        \mathbf{V}^{l,h},
+        \mathcal{R}^{l,h}_{\mathrm{final}})$
+        \Comment{build the compressed cache}
+
+    \EndFor
+
+\EndFor
+
+\State \textbf{discard} lookahead states
+\State \Return $(\mathbf{K}^{\star},\mathbf{V}^{\star})$
+\Comment{use the compressed cache for final decoding}
+
+\end{algorithmic}
+\end{algorithm}
+
+
+\begin{table*}[t]
+\centering
+\caption{Average inference time per sample (seconds) across datasets, backbones, and cache budgets. Lower is better.}
+\label{tab:runtime_comparison}
+\small
+\setlength{\tabcolsep}{5.0pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{lllcccc}
+\toprule
+\textbf{Backbone} & \textbf{Dataset} & \textbf{Method}
+& \textbf{128} & \textbf{256} & \textbf{512} & \textbf{1024} \\
+\midrule
+
+\multirow{9}{*}{Mistral}
+& \multirow{3}{*}{LongBench}
+& AndPro      & 7.8799 & 7.4885 & 7.4355 & 7.5338 \\
+&& CriticalKV & 6.6867 & 6.3991 & 6.3982 & 6.5276 \\
+&& \lorekvE\ & 17.5342 & 19.5496 & 19.6767 & 17.7930 \\
+\cmidrule(lr){2-7}
+
+& \multirow{3}{*}{RULER}
+& AndPro      & 6.2360 & 4.5775 & 5.9707 & 3.1746 \\
+&& CriticalKV & 6.1907 & 4.1849 & 4.9899 & 2.4039 \\
+&& \lorekvE\ & 13.6877 & 11.1720 & 14.5537 & 7.2315 \\
+\cmidrule(lr){2-7}
+
+& \multirow{3}{*}{NIAH}
+& AndPro      & 2.9842 & 2.8559 & 2.8779 & 2.9169 \\
+&& CriticalKV & 2.3514 & 2.1441 & 2.1109 & 2.1961 \\
+&& \lorekvE\ & 7.3873 & 7.4716 & 7.4072 & 7.3407 \\
+\midrule
+
+\multirow{9}{*}{LLaMA}
+& \multirow{3}{*}{LongBench}
+& AndPro      & 8.3347 & 8.2447 & 8.1548 & 8.0648 \\
+&& CriticalKV & 7.0726 & 7.0443 & 7.0160 & 6.9877 \\
+&& \lorekvE\ & 12.1815 & 14.4038 & 15.8882 & 13.1342 \\
+\cmidrule(lr){2-7}
+
+& \multirow{3}{*}{RULER}
+& AndPro      & 4.3309 & 4.0226 & 3.7143 & 3.4060 \\
+&& CriticalKV & 4.2994 & 3.6776 & 3.1042 & 2.5791 \\
+&& \lorekvE\ & 6.6410 & 6.8587 & 6.3249 & 5.4202 \\
+\cmidrule(lr){2-7}
+
+& \multirow{3}{*}{NIAH}
+& AndPro      & 2.6046 & 2.5137 & 2.5269 & 2.6172 \\
+&& CriticalKV & 1.9267 & 1.9222 & 1.9450 & 1.8561 \\
+&& \lorekvE\ & 7.0298 & 6.9553 & 7.0076 & 6.9816 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+\subsection{Reliability Weighting: Derivations, Calibration, and Edge Cases}
+\label{app:reliability_details}
+
+This section collects the derivations and implementation details omitted from Section~\ref{subsec:confidence}.
+
+\textbf{Centering and reparameterization.}
+The centered score of Eq.~\ref{eq:centered_score} removes the context-entropy baseline from the likelihood channel in conditional expectation. For $y_u\sim q(\cdot\mid h_u)$, we have $\mathbb{E}[c_u\mid h_u]=\sum_y q(y\mid h_u)\log q(y\mid h_u)+H_u=-H_u+H_u=0$, so $\mathbb{E}[\bar c_m]=0$. Moreover, $S_t=\sum_{u\le t}c_u$ is a martingale with respect to the natural filtration. This centering should not be read as statistical independence between $\bar c_m$ and $\bar H_m$; it makes branch atypicality zero-mean conditional on the visited context so that uncertainty can be parameterized explicitly through $\gamma$.
+
+\textbf{Proposition 1 (nesting).}
+Because $\tfrac1T\sum_u\log q(y^{(m)}_u\mid h^{(m)}_u)=\bar c_m-\bar H_m$, the earlier score
+$\tfrac1T\sum_u\log q-\lambda_H\bar H_m-\lambda_D\hat D_m$
+is exactly
+$\bar c_m-(1+\lambda_H)\bar H_m-\lambda_D\hat D_m$.
+Thus \emph{uniform weighting} is the origin $(\beta,\gamma,\lambda_D)=(0,0,0)$, the \emph{no-entropy} control is $(1,0,0)$, and the earlier ``log-probability only'' setting is $(1,1,0)$---which carries a full unit of entropy penalty and is therefore not a no-entropy control. \lorekvE\ and \lorekvD\ are two further points of the same plane (Table~\ref{tab:hyperparams}) that differ from each other in two coordinates, which is why they are variant settings rather than a single-factor ablation.
+
+\textbf{Variance and scale.}
+For $u<v$, $c_u$ is $h_v$-measurable and $\mathbb{E}[c_uc_v]=\mathbb{E}[c_u\,\mathbb{E}[c_v\mid h_v]]=0$. Hence
+\begin{equation}
+\operatorname{Var}(\bar c_m)
+=\frac{1}{T^2}\sum_{u=1}^{T}\mathbb{E}[V_u],
+\qquad
+V_u=\operatorname{Var}_{y\sim q(\cdot\mid h_u)}[\log q(y\mid h_u)],
+\label{eq:varentropy}
+\end{equation}
+where $V_u$ is the varentropy. The scale of $\bar c_m$ can therefore vary across prompts. The optional normalization
+$\tilde c_m=\bar c_m/\sqrt{\bar V_m/T}$, with $\bar V_m=\tfrac1T\sum_uV^{(m)}_u$, gives unit scale by construction; it is evaluated only as an ablation and is not part of the default method.
+
+\textbf{Query-space disagreement.}
+Predictive entropy is defined in token-probability space, whereas the eviction score consumes query directions. We therefore define the disagreement of particle $m$ as the mean cosine distance to the other particles at matched decoding positions, averaged over lookahead steps, layers, and query heads:
+\begin{equation}
+D_m=\frac{1}{M-1}\sum_{r\neq m}
+\frac{1}{TLH}\sum_{u=1}^{T}\sum_{l=1}^{L}\sum_{h=1}^{H}
+\left[1-\cos\!\left(\mathbf q^{(m),l,h}_u,\mathbf q^{(r),l,h}_u\right)\right].
+\label{eq:disagreement}
+\end{equation}
+Queries compared at step $u$ occupy the same absolute position $n+u$ and therefore share the same rotary phase. We standardize disagreement across particles as $\hat D_m=(D_m-\bar D)/\operatorname{sd}(D)$, with $\bar D=\tfrac1M\sum_{r=1}^{M}D_r$. For $M=1$, disagreement is undefined; for $M=2$, $D_1=D_2$ by symmetry and the standard deviation is zero. We therefore set $\hat D_m\equiv0$ for $M\le2$, so disagreement can affect weights only for $M\ge3$. For ragged trajectories, $\bar c_m$ and $\bar H_m$ use each particle's available steps, whereas $D_m$ is computed on the common prefix required for step-wise alignment (Appendix~\ref{app:datasets}). The disagreement computation reuses the stored lookahead queries and requires no additional decoding (Appendix~\ref{app:overhead_details}).
+
+The entropy and disagreement coefficients are not directly comparable numerically because $\bar H_m$ is measured in nats while $\hat D_m$ is standardized. We therefore calibrate $\lambda_D$ using the realized across-particle spread of the two penalties rather than equating their raw coefficients.
+
+\textbf{Softmax parameterization and estimator interpretation.}
+No separate particle-weight temperature is introduced: multiplying Eq.~\ref{eq:confidence} by a concentration parameter $\eta$ is equivalent to rescaling $(\beta,\gamma,\lambda_D)$, so $\eta$ is not separately identifiable.
+
+With uniform weights, the lookahead term is the ordinary Monte-Carlo estimate of expected deletion effect under continuations sampled from $p_\theta(\cdot\mid X)$. When $\lambda_D=0$, each weight depends only on its own trajectory and the normalized weighted estimate has target
+\[
+\pi(Y)\propto p_\theta(Y\mid X)\exp\!\left(\beta\bar c(Y)-\gamma\bar H(Y)\right).
+\]
+To first order,
+\[
+\mathbb{E}_{\pi}[f]
+=\mathbb{E}_{p_\theta}[f]
++\beta\operatorname{Cov}_{p_\theta}(f,\bar c)
+-\gamma\operatorname{Cov}_{p_\theta}(f,\bar H)
++O(\|(\beta,\gamma)\|^2).
+\]
+Because $\mathbb{E}_{p_\theta}[\bar c]=0$, centering removes a zeroth-order shift from branch atypicality; it does not imply an unbiased finite-$\beta$ estimator or zero higher-order covariance. When $\lambda_D>0$, $\hat D_m$ depends on the full particle set, so the weights form an interacting-particle estimator rather than finite-$M$ importance weights for a fixed target law. A fixed disagreement functional is recovered only asymptotically as $M$ grows.
+
+\textbf{Failure modes and safeguards.}
+\lorekvE\ can assign substantial weight to a confidently wrong continuation because low predictive entropy does not guarantee correctness. \lorekvD\ can suppress such a trajectory when its query path is atypical relative to the sampled ensemble, but it does not detect a collectively wrong consensus and is unreliable when too few particles are available. Step-wise cosine disagreement can also overstate differences between semantically similar continuations with different tokenizations or lengths. These limitations motivate soft weighting, the bounded contribution of the lookahead term through $\lambda_L$, and the use of \lorekvE\ as the default until the disagreement variant is supported by complete end-to-end evidence. Figures~\ref{fig:confidence_calibration} and~\ref{fig:particle_divergence} report the empirical relation between these signals and oracle particle utility.
+
+\subsection{Computational Overhead} \label{app:overhead_details}
+
+Scoring is restricted to the $w+MT\ll n$ prompt-window and lookahead queries. The entropy used by \lorekvE\ is obtained from the sampling logits, while the disagreement used by \lorekvD\ requires one $M\times M$ cosine reduction per layer over already-materialized query tensors, i.e.\ $O(M^2LHTd)$ arithmetic with no additional decoding. \textcolor{red}{Table~\ref{tab:runtime_comparison} quantifies the accuracy--latency trade-off: \lorekvE\ requires approximately $1.46\times$ to $2.77\times$ the per-sample wall-clock time of AnDPro across the reported settings; the same accounting applies to \lorekvD.} The overhead is not monotone in $B$, consistent with its dependence on the fixed $(M,T)$ lookahead and scoring procedure.
+
+Compute-matched controls and the budget-, length-, and mismatch-dependence of the gain are reported in Sections~\ref{subsec:longbench}--\ref{subsec:mechanism}; the score-level single-surrogate comparison is reported in Appendix~\ref{app:score_shift}.
+
+
+\label{app:expected_attention}
+
+\begin{table}[t]
+\color{purple}
+\caption{Comparison with Expected Attention \citep{devoto2025expected} on
+Llama-3.1-8B-Instruct, on a common KV-cache retention axis. Expected Attention
+reports compression ratios; we convert them to retained tokens using the fixed
+RULER-4K context length and the $7{,}426$-token LongBench mean input. All rows are
+normalized by the single Full Cache reference of each block, i.e.\ Recovery
+$=100\times\text{Accuracy}/\text{Accuracy}_{\text{Full Cache}}$. Protocols differ;
+see the notes below and Section~\ref{subsec:ruler}.}
+\label{tab:expected_attention_comparison}
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Method & Retention & Tokens & Accuracy & Recovery (\%) \\
+\midrule
+\multicolumn{5}{c}{\textit{RULER-4K (13-task average, 4,096-token context)}} \\
+\midrule
+Full Cache & 100\% & 4,096 & 95.25 & 100.0 \\
+\cmidrule(lr){1-5}
+\multirow{3}{*}{Expected Attention}
+   & 50.0\% & 2,048 & 92.20 & 96.8 \\
+   & 25.0\% & 1,024 & 75.90 & 79.7 \\
+   & 10.0\% & \phantom{0,}410 & 30.60 & 32.1 \\
+\cmidrule(lr){1-5}
+\multirow{4}{*}{\textbf{\lorekvE\ (ours)}}
+   & 25.0\% & 1,024 & \best{93.60} & \best{98.3} \\
+   & 12.5\% & \phantom{0,}512 & \second{83.12} & \second{87.3} \\
+   & \phantom{0}6.3\% & \phantom{0,}256 & 72.22 & 75.8 \\
+   & \phantom{0}3.1\% & \phantom{0,}128 & 64.27 & 67.5 \\
+\midrule
+\multicolumn{5}{c}{\textit{LongBench (16-task average, $\sim$7,426-token mean input)}} \\
+\midrule
+Full Cache & 100\% & $\sim$7,426 & 49.29 & 100.0 \\
+\cmidrule(lr){1-5}
+\multirow{3}{*}{Expected Attention}
+   & 50.0\% & $\sim$3,713 & 47.91 & 97.2 \\
+   & 25.0\% & $\sim$1,857 & 44.04 & 89.3 \\
+   & 10.0\% & \phantom{$\sim$0,}$\sim$743 & 33.97 & 68.9 \\
+\cmidrule(lr){1-5}
+\multirow{4}{*}{\textbf{\lorekvD\ (ours)}}
+   & 13.8\% & \phantom{$\sim$}1,024 & \best{48.90} & \best{99.2} \\
+   & \phantom{0}6.9\% & \phantom{$\sim$0,}512 & \second{48.39} & \second{98.2} \\
+   & \phantom{0}3.4\% & \phantom{$\sim$0,}256 & 48.03 & 97.4 \\
+   & \phantom{0}1.7\% & \phantom{$\sim$0,}128 & 47.01 & 95.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Hyperparameters and Switches}
+\label{app:hyperparams}
+\label{app:score_details}
+
+Table~\ref{tab:hyperparams} defines the core parameters, plug-in
+switches, and reported reliability settings. The no-entropy control
+$(1,0,0)$ is representable but was not run.
+
+\begin{table}[t]
+\caption{LORE-KV hyperparameters and default settings. This table is the
+single source for every hyperparameter value in the paper: elsewhere we
+refer to the core configuration and to the two reliability variants
+\lorekvE\ and \lorekvD\ by name, and numeric coefficient settings appear
+only as the independent variable of the ablation grids in
+Tables~\ref{tab:ablation_summary} and~\ref{tab:ruler_ablation}.}
+\label{tab:hyperparams}
+\centering
+\begin{tabular}{llc}
+\toprule
+Symbol & Meaning & Default \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{(a) Core method}} \\
+$w$ & prompt-end observation-window size & $32$ \\
+$M$ & number of lookahead particles & $4$ \\
+$T$ & lookahead particle length & $8$ \\
+$\lambda_L$ & lookahead mixing coefficient in Eq.~\ref{eq:final_score} & $1.0$ \\
+$\epsilon$ & renormalization guard in Eq.~\ref{eq:deletion_effect} & $10^{-6}$ \\
+& chunk size (adjacent-token grouping) & $4$ \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{(b) Plug-in switches (Appendix~\ref{sec:ablation_components}),
+each recovering its default at $0$}} \\
+$\kappa,\alpha$ & robust aggregation & $1,\,0$ \\
+$\tau$ & adaptive head budgets & $0$ \ \ (ablation rows: $1$) \\
+$\lambda_k,\lambda_v$ & diversity selection & $0$ \ \ (ablation rows: $0.1$) \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{(c) Settings of $(\beta,\gamma,\lambda_D)$ in
+Eq.~\ref{eq:confidence} for which results are reported;}} \\
+\multicolumn{3}{@{}l}{\textit{\phantom{(c) }the coefficients are the typicality,
+entropy and disagreement channels}} \\
+\lorekvE & default variant; entropy channel only & $(1,\,1.3,\,0)$ \\
+\lorekvD & entropy and disagreement channels & $(1,\,1,\,0.3)$ \\
+Log-probability only & control & $(1,\,1,\,0)$ \\
+Entropy $+$ disagreement & control & $(1,\,1.3,\,0.3)$ \\
+Uniform weighting & control ($\omega_m{=}1/M$) & $(0,\,0,\,0)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+\section{Plug-In Components and the Ablation Protocol}
+\label{sec:ablation_components}
+
+We evaluate three optional plug-ins acting on $\rho$,
+$\operatorname{Alloc}$, and $\operatorname{Select}$. Each is ablated
+on the fixed \lorekvE\ core; matching plug-in rows for \lorekvD\
+have not been run. Results are reported in
+Tables~\ref{tab:ablation_summary} and~\ref{tab:ruler_ablation}.
+
+\textbf{A. Robust aggregation ($\alpha,\kappa$).}
+\label{subsec:robust_aggregation}
+A plain mean can suppress a token that is important for only a small subset of future queries, motivating a robust aggregation strategy in the spirit of DefensiveKV \citep{feng2025taming}. We therefore replace the mean with a top-$\kappa$ average, $\operatorname{TopAvg}_\kappa(\mathcal{E})=\frac{1}{K_\kappa}\sum_{e\in\operatorname{TopK}(\mathcal{E},K_\kappa)} e$, where $K_\kappa=\lceil \kappa|\mathcal{E}|\rceil$, and interpolate it with the standard mean as $\rho(\mathcal{E})=\alpha\operatorname{TopAvg}_\kappa(\mathcal{E})+(1-\alpha)\operatorname{Mean}(\mathcal{E})$, with $\alpha\in[0,1]$. (This top-fraction was written $\beta$ in an earlier draft; it is renamed $\kappa$ here because $\beta$ now denotes the typicality coefficient of Eq.~\ref{eq:confidence}.) Substituting $\rho(\mathcal{E})$ for the mean in Eq.~\ref{eq:final_score} yields the robust variant; $\alpha=0$ exactly recovers the core configuration, while larger $\alpha$ increases sensitivity to high-importance query subsets and provides an additional safeguard against a misleading particle.
+
+\textbf{B. Adaptive head-wise budgets ($\tau$).}
+\label{subsec:adaptive_budget}
+The core method splits the layer budget evenly across heads. Adaptive allocation is inherited from Ada-KV \citep{feng2024adakv} and the layer-wise scheme of PyramidKV \citep{cai2024pyramidkv}; our one variation is that the allocation mass is each head's total future-query perturbation, $E_{l,h}=\sum_{i\in\mathcal{C}}S^{l,h}_{i}$, which is what $\operatorname{Alloc}$ of Eq.~\ref{eq:alloc_select} consumes. Its $\tau>0$ branch is
+\begin{equation}
+B_{l,h}=\left\lfloor
+B_l\frac{(E_{l,h}+\epsilon)^{\tau}}{\sum_{h'=1}^{H}(E_{l,h'}+\epsilon)^{\tau}}
+\right\rfloor,
+\label{eq:adaptive_budget}
+\end{equation}
+with $\tau\ge0$ setting how aggressively capacity shifts toward high-impact heads; $\tau=0$ returns $\lfloor B_l/H\rfloor$. This separates ``better scores'' from ``better placement of a fixed budget.'' Figure~\ref{fig:layer_head_analysis} supplies the premise: both $E_{l,h}$ and the benefit of the future-query term are distributed very unevenly across depth and heads.
+
+\textbf{C. Diversity-aware selection ($\lambda_k,\lambda_v$).}
+\label{subsec:diversity}
+Top-$B_{l,h}$ selection can in principle retain many near-duplicate keys or values. As an ablation we make $\operatorname{Select}$ a greedy rule inspired by redundancy-aware selection such as GraphKV \citep{li2025graphkv}: starting from $\mathcal{R}^{l,h}=\emptyset$, each newly selected token is $i^\star=\arg\max_{i\in\mathcal{C}\setminus\mathcal{R}^{l,h}}\big[S^{l,h}_{i}-\lambda_k\max_{j\in\mathcal{R}^{l,h}}\cos(\mathbf{k}^{l,h}_{i},\mathbf{k}^{l,h}_{j})-\lambda_v\max_{j\in\mathcal{R}^{l,h}}\cos(\mathbf{v}^{l,h}_{i},\mathbf{v}^{l,h}_{j})\big]$, repeated until $|\mathcal{R}^{l,h}|=B_{l,h}$; $\lambda_k=\lambda_v=0$ recovers plain top-$B_{l,h}$. The known failure mode is that a cosine penalty can discard evidence that is repeated but genuinely important, as when several supporting passages mention the same entity. The penalty acts on the perturbation score rather than on raw key/value features, so a duplicate that still drives a large future-query perturbation survives; and $\lambda_k,\lambda_v$ are small, so redundancy only breaks ties between tokens of comparable importance. The output-perturbation score may already suppress redundancy on its own, since a duplicated token whose deletion is compensated by its near-copy has a small $\Delta\mathbf{o}^{l,h}_{q,i}$ by construction.
+
+\textbf{Ablations of the core itself.}
+\label{subsec:core_ablations}
+We ablate three aspects of the core method. \textbf{(i)~Lookahead budget:}
+$M\in\{0,1,2,4,8\}$ at the default lookahead length, with the
+$M{=}0$ condition defined in Appendix~\ref{app:lookahead_details}.
+Varying $T$ is a planned axis that has not yet been run.
+\textbf{(ii)~Reliability weighting:} the $(\beta,\gamma,\lambda_D)$
+cells of Table~\ref{tab:ablation_summary} separately vary the channels
+of Eq.~\ref{eq:confidence}. The reported \lorekvE\ and \lorekvD\
+settings are discussed in Appendix~\ref{app:reparam_grid}, while the
+log-probability-only and entropy-plus-disagreement settings serve as
+controls. All cells use uniform head budgets and top-$K$ selection with
+all other settings fixed, and re-weight nested prefixes of one
+$8$-particle draw per prompt so that the cells do not differ in
+test-time decoding compute.
+\textbf{(iii)~Perturbation objective:} we replace
+Eq.~\ref{eq:projected_score} with accumulated attention mass or the
+unprojected perturbation norm
+$\|\Delta\mathbf{o}^{l,h}_{q,i}\|_2^2$ under identical lookahead queries,
+providing compute-matched objective controls.
+
+\section{Experimental Setup and Additional Results}
+\label{app:experimental_details}
+
+\subsection{Protocol, Datasets and Baselines}\label{app:datasets}
+
+Table~\ref{tab:longbench_datasets} gives the LongBench task metadata
+used in these tests.
+
+\textbf{Baselines and sourcing.}
+\textcolor{purple}{LongBench results with Mistral follow the protocol of \citet{geng2026accurate}. CriticalKV, AnDPro, and both LORE-KV variants are re-run under one implementation for RULER, NIAH, and LongBench with Llama. The Llama LongBench table reports LaProx values published by \citet{mai2026reformulating} at the same backbone and token budgets; because they come from a separate implementation, LaProx is treated as an external reference rather than a matched run.} Lookahead Q-Cache \citep{wang2025lookahead} is included as the compute-matched end-to-end baseline \textbf{LAQ++}; the corresponding score-level diagnostic is analyzed in Appendix~\ref{app:score_shift}.
+
+\textbf{Backbones and prompt formats.}
+\textcolor{teal}{The four backbones are Mistral-7B-Instruct-v0.2, Llama-3.1-8B-Instruct, Qwen3-8B and Ministral-3-8B-Instruct-2512. Prompts follow each model's own convention and are otherwise identical across methods, so the comparison within a backbone is unaffected: Mistral takes the raw LongBench prompt, matching \citet{geng2026accurate}; Llama-3.1 and Qwen3 use their chat templates; and Ministral-3 uses Mistral's \texttt{[INST]}\,$\cdots$\,\texttt{[/INST]} format rather than its packaged template, which would prepend a several-hundred-token assistant system prompt to every long-context input. Qwen3 is a hybrid reasoning model and is evaluated in its \emph{non-thinking} mode (the template's own \texttt{enable\_thinking=False} setting, which emits an empty closed reasoning block): in thinking mode it consumes the entire short LongBench generation budget inside that block and returns no answer, so this is a requirement of the benchmark rather than a tuning choice. Ministral-3-8B-Instruct-2512 is released as a vision-language checkpoint; we evaluate its text tower, extracted without modifying any weight.}
+
+\textbf{Implementation.}
+Our implementation builds on the Ada-KV framework and uses a single NVIDIA H100 80\,GB GPU. All methods use the same retained cache size at a fixed budget, and adjacent-token grouping follows SnapKV and Ada-KV. Unless stated otherwise, LORE-KV runs at the core configuration of Table~\ref{tab:hyperparams} with all plug-ins disabled, thereby isolating the score in Eq.~\ref{eq:final_score}. The reliability coefficients are the only difference between the two variants.
+
+Lookahead particles are sampled at temperature $1$ with no top-$k$ or top-$p$ truncation, so the sampling law is $p_\theta$ itself and the centering of Eq.~\ref{eq:centered_score} is exact. The implementation computes $c_u$, $H_u$ and the varentropy $V_u$ from the \emph{same} shaped logits the sampler consumed, so a future change of sampling law cannot silently break $\mathbb{E}[c_u\mid h_u]=0$; entropy and varentropy use masked reductions, since outside a truncated support $q\log q$ would otherwise be $0\cdot(-\infty)$. Per-step statistics are stored, not only trajectory means, at a cost of $MT$ floats per prompt. Disagreement is computed over every decoder layer (a layer stride is available but unused), from the lookahead query buffers the scoring stage already holds, and must be evaluated before the cache is compressed because compression releases those buffers. If a particle terminates early, the $D_m$ comparison is truncated to the shortest trajectory in the ensemble so that the step-wise pairing in Eq.~\ref{eq:disagreement} stays valid; $\bar c_m$ and $\bar H_m$ need no such rule, since each averages over its own particle's steps.
+
+\begin{table}[t]
+\caption{LongBench English datasets, metrics, average input lengths, and sample counts \citep{bai2024longbench}.}
+\label{tab:longbench_datasets}
+\centering
+\begin{tabular}{lllrlr}
+\toprule
+Task & Task type & Metric & Avg.\ len & Language & \#Samples \\
+\midrule
+NarrativeQA & Single-Doc. QA & F1 & 18{,}409 & EN & 200 \\
+Qasper & Single-Doc. QA & F1 & 3{,}619 & EN & 200 \\
+MultiFieldQA-en & Single-Doc. QA & F1 & 4{,}559 & EN & 150 \\
+HotpotQA & Multi-Doc. QA & F1 & 9{,}151 & EN & 200 \\
+2WikiMultihopQA & Multi-Doc. QA & F1 & 4{,}887 & EN & 200 \\
+MuSiQue & Multi-Doc. QA & F1 & 11{,}214 & EN & 200 \\
+GovReport & Summarization & Rouge-L & 8{,}734 & EN & 200 \\
+QMSum & Summarization & Rouge-L & 10{,}614 & EN & 200 \\
+MultiNews & Summarization & Rouge-L & 2{,}113 & EN & 200 \\
+TREC & Few-shot Learning & Accuracy & 5{,}177 & EN & 200 \\
+TriviaQA & Few-shot Learning & F1 & 8{,}209 & EN & 200 \\
+SAMSum & Few-shot Learning & Rouge-L & 6{,}258 & EN & 200 \\
+PassageCount & Synthetic & Accuracy & 11{,}141 & EN & 200 \\
+PassageRetrieval-en & Synthetic & Accuracy & 9{,}289 & EN & 200 \\
+LCC & Code & Edit Sim & 1{,}235 & Python/C\#/Java & 500 \\
+RepoBench-P & Code & Edit Sim & 4{,}206 & Python/Java & 500 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\begin{table}[t]
+\caption{LongBench results with Llama-3.1-8B-Instruct across cache budgets. CriticalKV, AnDPro, and LORE-KV are matched runs; SnapKV, PyramidKV, and Ada-KV values are from \citet{geng2026accurate}. LaProx values are reported by \citet{mai2026reformulating} for the same Llama-3.1-8B-Instruct backbone and cache budgets, but come from a separate implementation and are included as an external reference. LAQ++ is a compute-matched extension of Lookahead Q-Cache \citep{wang2025lookahead} run under our implementation at $B\in\{128,256,512\}$ (not evaluated at $B=1024$). The \best/\second\ highlighting is computed over all reported eviction baselines and LORE-KV, including LaProx but excluding LAQ++.}
+\label{tab:longbench_llama}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccccccccccc}
+\toprule
+Method & NrtvQA & Qasper & MF-en & HotpotQA & 2WikiMQA & Musique & GovReport & QMSum & MultiNews & TREC & TriviaQA & SAMSum & PCount & PRe & Lcc & RB-P & Avg. \\
+\midrule
+Full Cache & 30.12 & 46.60 & 56.41 & 58.10 & 49.01 & 32.52 & 34.04 & 25.37 & 27.06 & 73.00 & 91.90 & 43.46 & 7.06 & 100.00 & 62.13 & 51.80 & 49.29 \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=128$} \\
+\midrule
+SnapKV
+& 25.54 & 31.40 & 50.99 & 55.17 & 45.50 & 27.88
+& 20.77 & 23.41 & 21.05 & 47.50 & 90.46 & 40.76
+& 8.00 & \second{99.50} & 56.88 & 46.50 & 43.21 \\
+
+PyramidKV
+& \second{27.83} & 32.98 & 51.45 & \second{56.72} & 44.67
+& \second{30.54} & 21.89 & 22.90 & 21.67 & 63.00 & 90.45
+& 40.06 & 8.00 & \best{100.00} & 55.37 & 43.79 & 44.46 \\
+
+Ada-KV
+& 25.06 & 34.50 & 52.27 & 56.29 & \second{47.57} & 29.06
+& 21.17 & 23.36 & 21.51 & 62.00 & \best{92.17} & 40.84
+& 8.00 & \second{99.50} & 58.45 & 48.72 & 45.03 \\
+
+CriticalKV
+& 26.00 & 34.96 & 51.79 & 56.01 & 46.53 & 28.95
+& 21.31 & 23.14 & 21.33 & 62.16 & 89.51 & 40.74
+& 7.59 & 97.89 & 57.85 & 48.28 & 44.63 \\
+
+AnDPro
+& 25.25 & 35.85 & \second{52.85} & 54.35 & 44.41 & 27.51
+& 22.82 & \second{23.60} & 22.20 & \second{69.00} & 92.00
+& 41.50 & 7.02 & \best{100.00} & \best{62.26}
+& \best{56.34} & 46.06 \\
+
+LaProx
+& 25.78 & 31.38 & \best{52.97} & 55.17 & 44.95 & 29.46
+& 21.66 & \best{23.66} & 21.47 & 59.00 & 89.94 & 41.09
+& \best{8.89} & \second{99.50} & \second{61.91}
+& \second{56.16} & 45.19 \\
+
+LAQ++(8)
+& 28.65 & 10.65 & 26.04 & 24.23 & 21.56 & 15.67
+& 23.50 & 23.74 & 22.75 & 72.00 & 91.95 & 42.19
+& 8.37 & 94.81 & 62.18 & 50.95 & 38.70 \\
+
+\textbf{\lorekvE\ (ours)}
+& 27.38 & \second{37.66} & 51.14 & \best{57.37}
+& \best{48.47} & \best{30.55} & \second{23.77}
+& \second{23.60} & \best{23.14} & 68.04 & 90.46
+& \second{41.77} & 7.34 & 97.90 & 58.99 & 50.15
+& \second{46.11} \\
+
+\textbf{\lorekvD\ (ours)}
+& \best{29.00} & \best{39.20} & 52.83 & 54.76 & 45.31
+& 30.20 & \best{23.86} & 23.48 & \second{22.26}
+& \best{71.00} & \second{92.09} & \best{42.75}
+& \second{8.01} & \best{100.00} & 61.63 & 55.76
+& \best{47.01} \\
+
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=256$} \\
+\midrule
+SnapKV
+& 26.92 & 38.19 & 52.62 & 57.03 & 46.75 & 29.63
+& 23.07 & 23.92 & 22.82 & 58.50 & 91.83 & 40.81
+& 7.75 & 99.50 & 59.95 & 48.63 & 45.50 \\
+
+PyramidKV
+& \second{28.46} & 39.36 & 54.30 & 56.77 & 45.50
+& 30.74 & 23.84 & 23.88 & 22.91 & 69.00 & 91.09 & 40.74
+& \second{7.88} & 99.50 & 56.94 & 45.18 & 46.01 \\
+
+Ada-KV
+& 27.04 & 39.24 & \second{54.41} & 57.36
+& \second{47.53} & 31.35 & 23.06 & 23.81 & 23.43
+& 69.00 & \best{92.50} & 41.23 & 7.67
+& \best{100.00} & 61.45 & 49.52 & 46.79 \\
+
+CriticalKV
+& 25.45 & 39.60 & 52.90 & 55.72 & 46.05 & 29.97
+& 23.10 & 23.77 & 22.77 & 68.28 & 90.48 & 41.08
+& 7.48 & 97.55 & 60.19 & 48.25 & 45.79 \\
+
+AnDPro
+& 27.23 & 42.01 & \best{54.62} & \best{57.87}
+& 47.43 & 31.92 & 23.53 & 24.22 & 23.54
+& \second{71.87} & \second{92.37} & \second{41.47}
+& 7.66 & \second{99.81} & 62.45 & 51.67 & 47.48 \\
+
+LaProx
+& 28.02 & 38.56 & 53.32 & 55.23 & 45.72 & 30.83
+& 24.84 & 23.78 & \second{23.92} & 67.50 & 92.12
+& \best{42.40} & \best{8.56} & 99.50
+& \best{63.57} & \best{57.61} & 47.22 \\
+
+LAQ++(8)
+& 30.25 & 12.43 & 26.63 & 25.77 & 22.83 & 18.45
+& 25.07 & 23.67 & 23.75 & 72.00 & 91.97 & 43.17
+& 6.93 & 94.59 & 64.07 & 53.38 & 39.69 \\
+
+\textbf{\lorekvE\ (ours)}
+& 28.26 & \second{44.01} & 53.43 & \second{57.73}
+& \best{48.78} & \best{32.30} & \second{25.63}
+& \best{24.93} & \best{24.10} & 71.43 & 91.03
+& 39.98 & 7.39 & 98.52 & 61.70 & 51.28
+& \second{47.53} \\
+
+\textbf{\lorekvD\ (ours)}
+& \best{29.16} & \best{44.86} & 54.37 & 56.29 & 47.03
+& \second{32.11} & \best{25.68} & \second{24.86}
+& 23.61 & \best{73.07} & 91.93 & 40.52
+& 7.76 & 99.68 & \second{63.16} & \second{54.38}
+& \best{48.03} \\
+
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=512$} \\
+\midrule
+SnapKV
+& 28.40 & 41.52 & 55.40 & 57.66 & 47.48 & 30.95
+& 24.92 & 24.46 & 24.54 & 68.50 & \second{92.33}
+& 41.98 & 7.33 & 99.50 & 61.25 & 50.39 & 47.29 \\
+
+PyramidKV
+& 29.15 & 43.04 & \second{55.55} & 57.71 & 47.67
+& 31.27 & 26.05 & 24.08 & 24.54 & 70.50
+& \best{92.67} & 41.52 & 7.33 & \best{100.00}
+& 59.96 & 47.51 & 47.41 \\
+
+Ada-KV
+& 26.92 & 42.68 & 55.20 & 57.47 & 48.06 & 31.27
+& 24.95 & 24.17 & 24.40 & 71.00 & 92.14
+& \second{42.35} & 7.33 & \best{100.00}
+& 62.26 & 50.62 & 47.55 \\
+
+CriticalKV
+& 26.00 & 42.53 & 53.90 & 56.62 & 46.76 & 31.13
+& 24.26 & 23.76 & 23.81 & 70.47 & 89.56 & 40.75
+& 6.92 & 97.20 & 60.51 & 49.74 & 46.50 \\
+
+AnDPro
+& 27.97 & \second{44.15} & 55.49 & \second{58.16}
+& \second{48.19} & 31.92 & 24.80 & 24.50 & 24.77
+& \second{72.84} & 91.76 & 41.99 & 7.31
+& \second{99.78} & \second{62.54} & 52.00 & 48.01 \\
+
+LaProx
+& \second{29.82} & 43.46 & 54.33 & 55.44 & 46.16 & 30.83
+& 27.08 & 24.10 & \best{25.30} & 70.50 & 91.89
+& \best{42.48} & \best{8.40} & 99.50
+& \best{64.10} & \best{58.16} & \second{48.23} \\
+
+LAQ++(8)
+& 29.64 & 13.22 & 26.79 & 27.58 & 23.49 & 18.63
+& 26.94 & 24.04 & 25.21 & 72.50 & 92.25 & 42.83
+& 8.43 & 96.25 & 65.00 & 53.37 & 40.39 \\
+
+\textbf{\lorekvE\ (ours)}
+& 29.77 & 43.61 & 55.22 & \best{58.32}
+& \best{48.68} & \best{32.73} & \second{27.40}
+& \best{24.96} & \second{25.02} & 72.65 & 91.50
+& 40.50 & 7.46 & 99.52 & 60.38 & 51.25 & 48.06 \\
+
+\textbf{\lorekvD\ (ours)}
+& \best{30.40} & \best{44.21} & \best{55.87} & 57.31
+& 47.46 & \second{32.59} & \best{27.43}
+& \second{24.91} & 24.68 & \best{73.79} & 92.13
+& 40.88 & \second{7.72} & \best{100.00}
+& 61.40 & \second{53.42} & \best{48.39} \\
+
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=1024$} \\
+\midrule
+SnapKV
+& 28.32 & \second{45.37} & \best{56.81} & 58.16
+& 48.28 & 31.89 & 26.91 & 24.58 & 25.82 & 70.50
+& 92.22 & 43.08 & 6.96 & \best{100.00}
+& 62.46 & 51.50 & 48.30 \\
+
+PyramidKV
+& 29.32 & 44.57 & 56.14 & \second{58.39} & 48.36
+& 31.93 & 28.20 & 23.78 & 26.00 & 70.50
+& \second{92.41} & 42.46 & 6.88 & \best{100.00}
+& 61.33 & 49.12 & 48.09 \\
+
+Ada-KV
+& 28.52 & \best{46.01} & 55.72 & 57.85 & 48.10
+& 32.02 & 26.98 & 24.72 & 25.96 & 72.00
+& 91.97 & 42.55 & 6.96 & \best{100.00}
+& 61.98 & 51.52 & 48.30 \\
+
+CriticalKV
+& 27.27 & 44.74 & 54.24 & 56.17 & 46.95
+& 31.65 & 26.35 & 23.91 & 24.93 & 70.22
+& 89.08 & 41.00 & 6.70 & 96.86 & 59.85 & 49.75
+& 46.85 \\
+
+AnDPro
+& \best{31.36} & 43.42 & 55.10 & 55.05 & 45.93
+& 29.79 & 28.46 & 24.70 & \best{26.56} & 72.50
+& 91.42 & \best{43.57} & 7.39 & 99.50
+& \second{64.86} & \best{59.01} & 48.66 \\
+
+LaProx
+& \second{31.08} & 44.45 & 55.64 & 55.82 & 45.98
+& 31.96 & \best{29.22} & 24.42 & 26.36 & 71.50
+& 91.75 & \second{43.32} & \best{8.23} & 99.50
+& \best{65.01} & \second{58.69} & \best{48.94} \\
+
+\textbf{\lorekvE\ (ours)}
+& 29.99 & 44.83 & 56.19 & \best{58.60}
+& \best{49.01} & \best{33.02} & 28.90
+& \best{25.49} & \second{26.38} & \second{73.00}
+& 92.35 & 42.24 & 7.50 & 99.50
+& 61.31 & 51.60 & 48.74 \\
+
+\textbf{\lorekvD\ (ours)}
+& 30.27 & 45.10 & \second{56.48} & 58.15
+& \second{48.46} & \second{32.96} & \second{28.92}
+& \second{25.47} & 26.23 & \best{73.51}
+& \best{92.63} & 42.41 & \second{7.62}
+& \second{99.86} & 61.77 & 52.57
+& \second{48.90} \\
+
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\begin{table}[p]
+\caption{RULER per-task results with Mistral-7B-Instruct-v0.2. CWE/FWE denote common-/frequent-word extraction; MK/MV/MQ/S denote multi-key/multi-value/multi-query/single-needle variants; VT denotes variable tracking.}
+\label{tab:ruler_mistral_full}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccccccccccccc}
+\toprule
+$B$ & Method & CWE & FWE & MK1 & MK2 & MK3 & MQ & MV & S1 & S2 & S3 & QA-1 & QA-2 & VT & Avg. \\
+\midrule
+\multicolumn{16}{c}{\textit{Context length} $=4$K} \\
+\midrule
+128 & CriticalKV & 9.40 & 40.20 & 89.20 & 70.40 & \second{0.00} & 0.80 & 17.40 & 89.20 & \second{96.00} & 0.00 & 82.20 & 59.40 & 15.60 & 43.83 \\
+128 & AnDPro & 17.20 & 44.20 & \second{98.60} & 87.60 & \best{0.40} & \best{37.40} & \best{46.40} & \second{99.60} & \best{99.80} & 0.00 & 82.60 & 61.20 & 38.00 & 54.85 \\
+128 & \textbf{\lorekvE} & \best{29.62} & \best{61.27} & \best{99.80} & \second{99.60} & \second{0.00} & \second{19.40} & \second{36.50} & \best{100.00} & \best{99.80} & \best{4.00} & \second{84.00} & \second{61.60} & \best{63.56} & \best{58.40} \\
+128 & \textbf{\lorekvD} & \second{29.18} & \second{60.80} & \best{99.80} & \best{99.80} & \second{0.00} & 19.00 & 36.30 & \best{100.00} & \best{99.80} & \second{3.80} & \best{84.20} & \best{62.00} & \second{63.40} & \second{58.31} \\
+\addlinespace[2pt]
+256 & CriticalKV & 24.20 & 70.80 & 93.20 & 85.00 & \second{17.20} & 70.00 & 60.20 & 93.20 & 97.40 & 9.00 & 83.20 & 60.80 & 66.40 & 63.89 \\
+256 & AnDPro & 29.20 & 73.40 & \second{99.40} & 96.20 & \best{17.40} & \best{93.80} & \best{79.00} & \best{100.00} & \best{99.80} & 9.00 & \second{83.40} & \second{62.00} & 81.00 & \second{71.05} \\
+256 & \textbf{\lorekvE} & \second{35.20} & \second{82.40} & 98.60 & \second{98.60} & 15.80 & \second{81.60} & \second{71.80} & \second{98.60} & \second{98.40} & \second{10.00} & 82.80 & 60.80 & \best{95.00} & \best{71.51} \\
+256 & \textbf{\lorekvD} & \best{41.52} & \best{84.07} & \best{99.60} & \best{100.00} & 4.80 & 49.15 & 59.25 & \best{100.00} & \best{99.80} & \best{32.80} & \best{84.20} & \best{62.40} & \second{89.44} & 69.77 \\
+\addlinespace[2pt]
+512 & CriticalKV & 43.60 & 84.00 & \second{95.80} & 92.80 & \second{69.20} & 83.60 & 78.60 & 96.00 & 98.40 & 54.80 & 84.20 & 61.60 & 87.80 & 79.26 \\
+512 & AnDPro & 46.40 & 85.40 & \best{99.40} & 99.40 & \best{69.40} & \best{97.40} & \best{89.60} & \best{100.00} & \best{99.80} & 54.80 & \second{84.40} & \best{62.20} & 96.20 & \second{83.42} \\
+512 & \textbf{\lorekvE} & \second{50.80} & \best{91.40} & \best{99.40} & \second{99.60} & 68.80 & \second{91.00} & \second{86.00} & \second{99.60} & \second{99.40} & \second{55.80} & \second{84.40} & \second{62.00} & \best{99.80} & \best{83.69} \\
+512 & \textbf{\lorekvD} & \best{60.22} & \second{89.53} & \best{99.40} & \best{100.00} & 35.40 & 81.45 & 78.65 & \best{100.00} & \best{99.80} & \best{72.40} & \best{85.40} & 61.80 & \second{97.72} & 81.67 \\
+\addlinespace[2pt]
+1024 & CriticalKV & 76.40 & 89.00 & 97.60 & 96.60 & \best{89.20} & 90.20 & 84.60 & 98.00 & 99.00 & \second{93.80} & \best{85.00} & 61.20 & 93.60 & 88.78 \\
+1024 & AnDPro & 78.00 & 89.80 & \best{99.40} & \best{100.00} & \best{89.20} & \best{97.40} & \best{90.40} & \best{100.00} & \best{99.80} & \second{93.80} & \best{85.00} & \best{61.60} & 98.20 & \second{90.97} \\
+1024 & \textbf{\lorekvE} & \second{80.60} & \best{93.20} & \best{99.40} & \second{99.80} & \second{89.00} & 93.80 & \second{88.40} & \second{99.80} & \second{99.60} & \best{94.40} & \best{85.00} & \second{61.40} & \best{100.00} & \best{91.11} \\
+1024 & \textbf{\lorekvD} & \best{87.72} & \second{91.53} & \second{99.20} & \best{100.00} & 73.20 & \second{94.00} & 86.70 & \best{100.00} & \best{99.80} & 91.60 & \second{84.80} & 61.00 & \second{98.88} & 89.88 \\
+\midrule
+\multicolumn{16}{c}{\textit{Context length} $=8$K} \\
+\midrule
+128 & CriticalKV & 3.20 & 26.40 & 75.20 & 59.60 & \second{0.00} & 0.00 & 6.00 & \second{92.60} & 88.40 & 0.00 & 75.40 & 58.80 & 18.20 & 38.75 \\
+128 & AnDPro & 7.40 & 29.60 & 94.60 & 82.80 & \best{0.40} & \best{19.60} & \second{35.40} & \best{100.00} & \second{97.20} & 0.00 & 74.40 & 59.40 & \second{50.00} & 50.06 \\
+128 & \textbf{\lorekvE} & \best{19.62} & \best{57.73} & \second{96.40} & \second{98.40} & \second{0.00} & 12.90 & 35.20 & \best{100.00} & \best{100.00} & \best{1.20} & \best{78.20} & \second{61.40} & \best{63.92} & \best{55.77} \\
+128 & \textbf{\lorekvD} & \second{19.16} & \second{56.47} & \best{96.80} & \best{98.60} & \second{0.00} & \second{13.10} & \best{35.95} & \best{100.00} & \best{100.00} & \second{0.80} & \second{77.80} & \best{62.00} & \best{63.92} & \second{55.74} \\
+\addlinespace[2pt]
+256 & CriticalKV & 11.40 & 46.40 & 83.80 & 77.20 & \second{4.00} & 68.80 & 52.20 & 95.20 & 94.00 & \second{2.60} & \best{77.20} & 59.80 & 65.00 & 56.74 \\
+256 & AnDPro & 14.20 & 48.40 & \second{96.40} & \second{92.20} & \best{4.20} & \best{81.60} & \best{71.20} & \best{100.00} & \second{99.80} & \second{2.60} & 76.60 & \second{60.20} & 85.60 & 64.08 \\
+256 & \textbf{\lorekvE} & \second{19.80} & \second{63.80} & 95.60 & \best{98.20} & 2.20 & \second{75.80} & \second{69.40} & \second{98.20} & 98.20 & 1.60 & \second{77.00} & 59.60 & \best{92.40} & \best{65.52} \\
+256 & \textbf{\lorekvD} & \best{29.12} & \best{69.60} & \best{96.80} & \best{98.20} & 1.40 & 34.15 & 55.60 & \best{100.00} & \best{100.00} & \best{25.00} & \second{77.00} & \best{61.40} & \second{91.00} & \second{64.56} \\
+\addlinespace[2pt]
+512 & CriticalKV & 19.80 & 67.00 & 88.80 & 88.60 & \second{26.60} & 86.60 & 72.40 & 97.20 & 96.60 & \second{19.60} & \best{78.20} & 57.80 & 81.60 & 67.75 \\
+512 & AnDPro & 21.40 & 68.20 & \second{96.20} & 97.40 & \best{26.80} & \best{94.00} & \best{83.60} & \best{100.00} & \best{100.00} & \second{19.60} & \second{77.80} & \second{58.00} & 93.80 & 72.06 \\
+512 & \textbf{\lorekvE} & \second{24.80} & \best{77.20} & 95.80 & \best{99.00} & 25.60 & \second{90.80} & \second{82.60} & \second{99.00} & \second{99.00} & 19.00 & \best{78.20} & 57.80 & \best{97.80} & \best{72.82} \\
+512 & \textbf{\lorekvD} & \best{37.22} & \second{73.07} & \best{96.40} & \second{98.60} & 9.40 & 65.15 & 72.25 & \best{100.00} & \best{100.00} & \best{54.80} & 76.60 & \best{60.40} & \second{94.48} & \second{72.18} \\
+\addlinespace[2pt]
+1024 & CriticalKV & 64.60 & 80.40 & 94.00 & 94.40 & \best{68.00} & 91.80 & 81.60 & 98.60 & 98.20 & \best{76.20} & \best{81.80} & \second{59.40} & 90.60 & 83.05 \\
+1024 & AnDPro & 65.40 & 81.20 & \best{97.80} & 99.00 & \best{68.00} & \best{95.80} & \best{87.40} & \best{100.00} & \best{100.00} & \best{76.20} & \second{81.60} & \best{59.60} & 97.00 & \second{85.31} \\
+1024 & \textbf{\lorekvE} & \second{67.60} & \best{86.40} & \second{97.60} & \second{99.40} & \second{67.40} & 94.00 & \second{87.00} & 99.40 & 99.40 & \second{75.80} & \best{81.80} & \second{59.40} & \best{99.40} & \best{85.74} \\
+1024 & \textbf{\lorekvD} & \best{74.72} & \second{84.73} & 97.40 & \best{99.60} & 51.60 & \second{94.20} & 85.30 & \second{99.60} & \second{99.60} & 73.00 & \second{81.60} & 59.00 & \second{98.28} & 84.51 \\
+\midrule
+\multicolumn{16}{c}{\textit{Context length} $=16$K} \\
+\midrule
+128 & CriticalKV & 0.00 & 44.20 & 62.00 & 50.20 & 0.00 & 0.00 & 0.00 & \second{92.60} & 83.80 & 0.00 & 73.00 & 51.40 & 11.80 & 36.08 \\
+128 & AnDPro & 0.00 & 46.40 & 82.00 & 73.80 & 0.00 & 0.00 & \best{24.00} & \best{100.00} & \second{92.80} & 0.00 & 72.20 & 52.40 & 44.00 & 45.20 \\
+128 & \textbf{\lorekvE} & \best{12.00} & \best{71.60} & \second{83.60} & \second{88.40} & 0.00 & 0.00 & 21.20 & \best{100.00} & \best{94.80} & \best{1.80} & \best{75.40} & \second{54.00} & \best{60.80} & \best{51.05} \\
+128 & \textbf{\lorekvD} & \second{11.55} & \second{70.73} & \best{83.80} & \best{88.60} & 0.00 & 0.00 & \second{21.48} & \best{100.00} & \best{94.80} & \second{1.50} & \second{75.30} & \best{54.50} & \second{60.72} & \second{51.00} \\
+\addlinespace[2pt]
+256 & CriticalKV & 5.60 & 63.80 & 70.80 & 67.80 & \best{1.40} & \best{49.60} & 44.20 & 95.20 & 89.60 & 1.00 & 75.00 & 52.60 & 58.80 & 51.95 \\
+256 & AnDPro & 5.60 & 65.40 & \second{83.80} & 83.20 & \best{1.40} & \best{49.60} & \best{60.00} & \best{100.00} & 95.40 & 1.00 & 74.40 & \second{53.20} & 79.80 & 57.91 \\
+256 & \textbf{\lorekvE} & \second{11.80} & \second{79.40} & \second{83.80} & \second{91.00} & \second{0.20} & \second{42.60} & \second{57.20} & \second{99.00} & \second{95.60} & \second{1.20} & \second{75.40} & \second{53.20} & \best{88.80} & \best{59.94} \\
+256 & \textbf{\lorekvD} & \best{19.62} & \best{83.14} & \best{84.90} & \best{91.70} & 0.00 & 5.55 & 44.03 & \best{100.00} & \best{97.20} & \best{24.30} & \best{76.10} & \best{54.90} & \second{85.32} & \second{58.98} \\
+\addlinespace[2pt]
+512 & CriticalKV & 14.60 & 80.80 & 78.60 & 81.20 & \best{24.60} & \best{68.40} & 65.40 & 97.20 & 93.00 & \second{18.40} & \best{76.40} & 52.00 & 76.80 & 63.65 \\
+512 & AnDPro & 14.60 & 81.80 & \second{86.20} & \second{90.20} & \best{24.60} & \best{68.40} & \best{74.60} & \best{100.00} & \second{96.40} & \second{18.40} & \second{76.00} & \second{52.40} & 89.00 & \second{67.12} \\
+512 & \textbf{\lorekvE} & \second{18.40} & \best{90.20} & 86.00 & \best{94.60} & \second{23.60} & \second{64.60} & \second{73.20} & \second{99.20} & \second{96.40} & 18.20 & \best{76.40} & 52.20 & \best{94.60} & \best{68.28} \\
+512 & \textbf{\lorekvD} & \best{22.04} & \second{83.93} & \best{89.00} & 88.00 & 2.80 & 46.60 & 60.70 & \best{100.00} & \best{99.40} & \best{34.20} & \second{76.00} & \best{53.00} & \second{89.04} & 64.98 \\
+\addlinespace[2pt]
+1024 & CriticalKV & 61.00 & 89.40 & 87.20 & 89.60 & \best{66.60} & \best{79.00} & 76.80 & 98.60 & 95.80 & \best{75.40} & \best{80.60} & \second{55.80} & 87.40 & 80.25 \\
+1024 & AnDPro & 61.00 & 89.80 & \best{91.20} & 94.40 & \best{66.60} & \best{79.00} & \best{81.60} & \best{100.00} & \second{97.60} & \best{75.40} & \second{80.40} & \best{56.00} & 93.80 & \second{82.06} \\
+1024 & \textbf{\lorekvE} & \second{63.20} & \best{94.60} & \best{91.20} & \second{97.00} & \second{66.20} & 76.80 & \second{80.60} & 99.60 & \second{97.60} & \best{75.40} & \best{80.60} & \best{56.00} & \best{97.00} & \best{82.75} \\
+1024 & \textbf{\lorekvD} & \best{70.32} & \second{92.93} & \second{91.00} & \best{97.20} & 50.40 & \second{77.00} & 78.90 & \second{99.80} & \best{97.80} & \second{72.60} & \second{80.40} & 55.60 & \second{95.88} & 81.53 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}\begin{table}[p]
+\caption{RULER per-task results with Llama-3.1-8B-Instruct. Abbreviations follow Table~\ref{tab:ruler_mistral_full}.}
+\label{tab:ruler_llama_full}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llcccccccccccccc}
+\toprule
+$B$ & Method & CWE & FWE & MK1 & MK2 & MK3 & MQ & MV & S1 & S2 & S3 & QA-1 & QA-2 & VT & Avg. \\
+\midrule
+\multicolumn{16}{c}{\textit{Context length} $=4$K} \\
+\midrule
+128 & CriticalKV & 9.40 & 22.00 & 91.20 & 78.60 & \second{0.00} & \second{55.80} & 59.40 & \second{91.20} & 96.40 & 0.00 & 86.20 & 58.00 & 11.20 & 50.72 \\
+128 & AnDPro & 16.00 & 25.40 & 99.20 & 93.20 & \best{0.20} & \best{86.80} & \best{84.00} & \best{100.00} & \second{99.60} & 0.00 & 86.60 & 59.60 & 30.20 & 60.06 \\
+128 & \textbf{\lorekvE} & \best{29.82} & \best{46.67} & \best{100.00} & \second{95.80} & \second{0.00} & 51.55 & 66.95 & \best{100.00} & \best{99.80} & \second{25.40} & \best{88.20} & \second{62.00} & \second{69.36} & \best{64.27} \\
+128 & \textbf{\lorekvD} & \second{28.88} & \second{46.07} & \second{99.80} & \best{96.40} & \second{0.00} & 50.55 & \second{67.20} & \best{100.00} & \best{99.80} & \best{25.80} & \second{88.00} & \best{62.60} & \best{69.56} & \second{64.20} \\
+\addlinespace[2pt]
+256 & CriticalKV & 23.80 & 56.80 & 94.20 & 90.00 & \second{16.80} & 79.40 & 83.60 & 93.80 & 97.20 & 8.80 & \second{85.80} & 59.40 & 62.60 & 65.55 \\
+256 & AnDPro & 28.00 & 59.00 & \best{99.40} & \second{99.60} & \best{17.00} & \best{99.60} & \best{99.60} & \best{99.60} & \best{99.20} & 8.80 & \best{86.00} & \best{60.40} & 74.80 & 71.62 \\
+256 & \textbf{\lorekvE} & \best{35.00} & \best{69.00} & \second{98.60} & \best{100.00} & 15.60 & \second{86.80} & 92.00 & \second{98.20} & \second{97.80} & \second{10.20} & 85.60 & 59.40 & \second{90.60} & \best{72.22} \\
+256 & \textbf{\lorekvD} & \second{34.06} & \second{68.40} & 98.40 & \best{100.00} & 15.60 & 85.80 & \second{92.25} & \second{98.20} & \second{97.80} & \best{10.60} & 85.40 & \second{60.00} & \best{90.80} & \second{72.10} \\
+\addlinespace[2pt]
+512 & CriticalKV & 43.00 & 74.20 & 96.00 & 93.60 & \second{68.60} & 87.40 & 89.80 & 95.80 & 97.60 & 54.20 & 85.40 & 60.20 & 84.40 & 79.25 \\
+512 & AnDPro & 45.40 & 75.40 & \second{98.80} & 99.00 & \best{68.80} & \best{99.00} & \best{99.00} & \best{99.00} & \best{98.60} & 54.20 & \second{85.60} & \second{60.80} & 91.60 & 82.71 \\
+512 & \textbf{\lorekvE} & \best{49.80} & \best{81.40} & \best{99.00} & \second{99.40} & 68.40 & \second{92.60} & 95.40 & \second{98.80} & \second{98.40} & \second{55.40} & \best{85.80} & \second{60.80} & \second{95.40} & \best{83.12} \\
+512 & \textbf{\lorekvD} & \second{48.86} & \second{80.80} & \second{98.80} & \best{100.00} & 68.40 & 91.60 & \second{95.65} & \second{98.80} & \second{98.40} & \best{55.80} & \second{85.60} & \best{61.40} & \best{95.60} & \second{83.05} \\
+\addlinespace[2pt]
+1024 & CriticalKV & 75.40 & 82.40 & 96.80 & 96.00 & 88.00 & 92.60 & 93.80 & 97.00 & 98.00 & 92.60 & 85.00 & 60.00 & 91.00 & 88.35 \\
+1024 & AnDPro & 86.00 & 89.60 & \best{99.80} & \best{100.00} & \best{98.40} & \best{99.80} & \best{99.80} & \best{100.00} & \best{100.00} & 95.60 & \best{87.80} & \second{62.60} & 94.60 & 93.38 \\
+1024 & \textbf{\lorekvE} & \best{88.80} & \best{93.40} & \best{99.80} & \second{99.80} & \second{98.20} & \second{96.20} & 97.80 & \second{99.80} & \second{99.80} & \second{96.40} & \best{87.80} & 62.40 & \second{96.60} & \best{93.60} \\
+1024 & \textbf{\lorekvD} & \second{87.86} & \second{92.80} & \second{99.60} & \best{100.00} & \second{98.20} & 95.20 & \second{98.05} & \second{99.80} & \second{99.80} & \best{96.80} & \second{87.60} & \best{63.00} & \best{96.80} & \second{93.50} \\
+\midrule
+\multicolumn{16}{c}{\textit{Context length} $=8$K} \\
+\midrule
+128 & CriticalKV & 8.20 & 13.80 & 82.80 & 73.80 & \second{0.00} & \second{68.20} & 58.60 & 93.60 & 92.00 & 0.00 & 81.80 & 59.40 & 2.80 & 48.85 \\
+128 & AnDPro & 11.80 & 16.60 & 99.20 & \second{93.60} & \second{0.00} & \best{84.80} & 83.40 & \second{99.80} & \second{99.40} & 0.00 & 81.00 & 60.00 & 29.80 & 58.42 \\
+128 & \textbf{\lorekvE} & \best{33.20} & \best{39.00} & \best{100.00} & \best{100.00} & \best{8.20} & 36.60 & \second{87.20} & \best{100.00} & \best{100.00} & \second{9.40} & \best{94.40} & \second{70.80} & \second{45.80} & \best{63.43} \\
+128 & \textbf{\lorekvD} & \second{32.26} & \second{38.40} & \second{99.80} & \best{100.00} & \best{8.20} & 35.60 & \best{87.45} & \best{100.00} & \best{100.00} & \best{9.80} & \second{94.20} & \best{71.40} & \best{46.00} & \second{63.32} \\
+\addlinespace[2pt]
+256 & CriticalKV & 15.00 & 36.80 & 88.60 & 86.80 & \second{3.60} & 88.60 & 83.40 & 95.40 & 94.60 & \best{2.40} & \best{81.80} & 59.80 & 52.80 & 60.74 \\
+256 & AnDPro & 17.20 & 38.60 & \best{99.40} & \second{99.60} & \best{3.80} & \best{99.60} & \best{99.60} & \best{99.40} & \best{99.60} & \best{2.40} & 81.20 & \second{60.20} & 70.20 & 66.98 \\
+256 & \textbf{\lorekvE} & \best{23.80} & \best{55.80} & \second{98.60} & \best{100.00} & 2.00 & \second{93.60} & 97.80 & \second{97.60} & \second{98.00} & 1.60 & \best{81.80} & 59.80 & \second{78.00} & \best{68.34} \\
+256 & \textbf{\lorekvD} & \second{22.86} & \second{55.20} & 98.40 & \best{100.00} & 2.00 & 92.60 & \second{98.05} & \second{97.60} & \second{98.00} & \second{2.00} & \second{81.60} & \best{60.40} & \best{78.20} & \second{68.22} \\
+\addlinespace[2pt]
+512 & CriticalKV & 22.00 & 60.20 & 91.40 & 91.80 & \second{26.00} & 92.80 & 89.60 & 96.80 & 96.40 & \best{19.40} & \second{80.60} & 57.40 & 72.80 & 69.02 \\
+512 & AnDPro & 23.40 & 61.20 & \best{97.60} & \second{99.00} & \best{26.20} & \best{99.00} & \best{99.00} & \best{99.00} & \best{99.00} & \best{19.40} & 80.20 & \second{57.60} & 83.00 & 72.58 \\
+512 & \textbf{\lorekvE} & \best{27.00} & \best{70.60} & \second{97.20} & \best{100.00} & 25.20 & \second{95.80} & 98.20 & \second{98.20} & \second{98.20} & \second{19.00} & \best{80.80} & \second{57.60} & \second{87.20} & \best{73.46} \\
+512 & \textbf{\lorekvD} & \second{26.06} & \second{70.00} & 97.00 & \best{100.00} & 25.20 & 94.80 & \second{98.45} & \second{98.20} & \second{98.20} & \best{19.40} & \second{80.60} & \best{58.20} & \best{87.40} & \second{73.35} \\
+\addlinespace[2pt]
+1024 & CriticalKV & \best{65.20} & 75.80 & 94.80 & 94.80 & 66.80 & 95.40 & 93.80 & 97.60 & 97.20 & 75.20 & 82.60 & 58.80 & 84.40 & 83.26 \\
+1024 & AnDPro & 45.00 & 81.60 & \best{100.00} & \second{99.80} & \best{76.40} & \best{99.60} & \best{99.80} & \best{100.00} & \best{100.00} & \best{77.20} & 83.40 & \second{61.80} & 92.60 & 85.94 \\
+1024 & \textbf{\lorekvE} & \second{47.20} & \best{87.20} & \second{99.80} & \best{100.00} & \second{75.80} & \second{97.80} & 99.20 & \second{99.40} & \second{99.40} & \second{76.80} & \best{83.80} & 61.60 & \second{95.20} & \best{86.40} \\
+1024 & \textbf{\lorekvD} & 46.26 & \second{86.60} & 99.60 & \best{100.00} & \second{75.80} & 96.80 & \second{99.45} & \second{99.40} & \second{99.40} & \best{77.20} & \second{83.60} & \best{62.20} & \best{95.40} & \second{86.29} \\
+\midrule
+\multicolumn{16}{c}{\textit{Context length} $=16$K} \\
+\midrule
+128 & CriticalKV & 2.80 & 30.00 & 68.60 & 63.20 & \second{0.00} & 61.20 & 49.00 & \second{93.80} & 86.80 & 0.00 & 78.80 & 51.60 & 0.00 & 45.06 \\
+128 & AnDPro & 2.80 & 32.00 & 85.60 & 83.20 & \second{0.00} & 61.20 & 69.60 & \best{100.00} & \second{94.40} & 0.00 & 78.20 & 52.40 & 27.00 & 52.80 \\
+128 & \textbf{\lorekvE} & \best{4.20} & \best{34.60} & \best{90.80} & \second{88.40} & \best{1.20} & \best{65.40} & \second{74.00} & \best{100.00} & \best{100.00} & \second{1.20} & \best{83.20} & \second{56.00} & \second{29.60} & \best{56.05} \\
+128 & \textbf{\lorekvD} & \second{3.26} & \second{34.00} & \second{90.60} & \best{89.00} & \best{1.20} & \second{64.40} & \best{74.25} & \best{100.00} & \best{100.00} & \best{1.60} & \second{83.00} & \best{56.60} & \best{29.80} & \second{55.98} \\
+\addlinespace[2pt]
+256 & CriticalKV & 7.60 & 53.00 & 75.00 & 77.00 & \best{1.20} & \best{95.00} & 80.40 & 95.60 & 91.20 & 1.00 & 79.00 & 52.20 & 49.00 & 58.25 \\
+256 & AnDPro & 7.60 & 54.20 & \second{86.00} & 90.00 & \best{1.20} & \best{95.00} & \best{93.60} & \best{99.60} & \second{96.20} & 1.00 & 78.40 & 52.80 & 66.60 & 63.25 \\
+256 & \textbf{\lorekvE} & \best{14.80} & \best{70.20} & \best{86.20} & \second{99.00} & \second{0.00} & \second{88.00} & 91.00 & \second{98.60} & \best{96.60} & \second{1.40} & \best{79.80} & \second{53.00} & \second{76.80} & \best{65.80} \\
+256 & \textbf{\lorekvD} & \second{13.86} & \second{69.60} & \second{86.00} & \best{99.60} & \second{0.00} & 87.00 & \second{91.25} & \second{98.60} & \best{96.60} & \best{1.80} & \second{79.60} & \best{53.60} & \best{77.00} & \second{65.73} \\
+\addlinespace[2pt]
+512 & CriticalKV & 16.00 & 73.20 & 80.80 & 86.60 & \best{24.20} & \best{98.20} & 88.80 & 96.80 & 93.60 & \second{18.20} & \second{78.60} & 51.40 & 69.60 & 67.38 \\
+512 & AnDPro & 16.00 & 74.00 & \best{87.20} & 94.20 & \best{24.20} & \best{98.20} & \best{96.40} & \best{99.00} & \second{96.40} & \second{18.20} & 78.20 & \second{51.80} & 79.80 & 70.28 \\
+512 & \textbf{\lorekvE} & \best{20.00} & \best{82.60} & \best{87.20} & \second{98.80} & \second{23.20} & \second{94.40} & 95.20 & \second{98.40} & \best{96.60} & \second{18.20} & \best{78.80} & \second{51.80} & \second{85.60} & \best{71.60} \\
+512 & \textbf{\lorekvD} & \second{19.06} & \second{82.00} & \second{87.00} & \best{99.40} & \second{23.20} & 93.40 & \second{95.45} & \second{98.40} & \best{96.60} & \best{18.60} & \second{78.60} & \best{52.40} & \best{85.80} & \second{71.53} \\
+\addlinespace[2pt]
+1024 & CriticalKV & \best{61.20} & \best{84.20} & 87.60 & 92.00 & \best{65.40} & 96.20 & 90.00 & 97.60 & \second{95.20} & \best{74.40} & \best{81.40} & 55.00 & 82.20 & \best{81.72} \\
+1024 & AnDPro & 24.80 & 75.80 & \best{99.80} & \second{99.40} & \second{57.80} & \best{99.40} & \best{98.80} & \best{100.00} & \best{100.00} & 51.00 & 80.80 & \second{55.80} & 88.40 & 79.37 \\
+1024 & \textbf{\lorekvE} & \second{27.20} & \second{81.00} & \best{99.80} & \best{100.00} & 57.40 & \second{97.00} & 98.00 & \second{99.60} & \best{100.00} & 51.00 & \second{81.20} & \second{55.80} & \second{91.80} & \second{79.98} \\
+1024 & \textbf{\lorekvD} & 26.26 & 80.40 & \second{99.60} & \best{100.00} & 57.40 & 96.00 & \second{98.25} & \second{99.60} & \best{100.00} & \second{51.40} & 81.00 & \best{56.40} & \best{92.00} & 79.87 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\subsection{LongBench with Llama-3.1-8B-Instruct}
+\label{app:llama_results}
+
+At $B{=}128$, \lorekvE\ shows the largest gains over AnDPro on
+multi-hop and long-document QA, with smaller improvements on
+summarization, while performance drops mainly on code completion and
+a few retrieval/few-shot tasks. This trend is consistent with the
+per-dataset results in Table~\ref{tab:longbench_llama}; the
+corresponding Mistral code results in
+Table~\ref{tab:longbench_mistral} are closer to neutral. A separate
+$M{=}1$, $T{=}8$ Llama run was completed only on NarrativeQA,
+Qasper, and MultiFieldQA-en and is therefore excluded from
+Table~\ref{tab:longbench_llama}. Lookahead-count comparisons for
+Llama are instead based on the matched RULER ablation in
+Table~\ref{tab:ruler_ablation}.
+
+
+
+\subsection{LongBench with Qwen3-8B and Ministral-3-8B-Instruct-2512}
+\label{app:new_backbones}
+\color{teal}
+
+Mistral-7B-Instruct-v0.2 and Llama-3.1-8B-Instruct are the two backbones the
+prior work we compare against reports, which makes them the right choice for a
+matched comparison but a weak test of generality: both predate LORE-KV, and both
+share a dense, full-attention decoder with a comparatively short pretraining
+context. We therefore repeat the LongBench evaluation on two more recent
+instruction-tuned models of similar size --- Qwen3-8B and
+Ministral-3-8B-Instruct-2512 --- holding the pipeline, the budgets, the
+observation window, the chunk size and the reliability coefficients fixed at the
+core configuration of Table~\ref{tab:hyperparams}. Only the backbone changes.
+The two models are useful precisely because they differ from the originals in
+ways that could plausibly interact with the mechanism: Qwen3 normalizes its query
+and key projections per head, which reshapes the geometry the deletion score in
+Eq.~\ref{eq:projected_score} is measured in, and Ministral-3 is trained with a
+YaRN-extended $262$K context and a position-dependent query scale, so its
+prompt-side queries are already adapted to long inputs.
+
+\textbf{Protocol.} Identical to Appendix~\ref{app:datasets} in every respect
+except the prompt format, which follows each model's own convention and is held
+fixed across methods within a backbone (so the comparison at issue is unaffected).
+Qwen3 is evaluated in non-thinking mode; Ministral-3 uses the plain
+\texttt{[INST]}\,$\cdots$\,\texttt{[/INST]} format and its text tower, extracted
+from the released vision-language checkpoint without modifying any weight. Both
+choices are stated in Appendix~\ref{app:datasets} and neither is tuned.
+
+\textbf{Implementation note.} Every method compared here is a monkeypatch that
+replaces the attention and model forward passes of one pinned Transformers
+release; the two backbones above were released after it, and upgrading would
+invalidate the patches for the two backbones already reported. Each is therefore
+re-expressed against the pinned release, reusing the shared decoder implementation
+and adding only the two mechanisms that differ (Qwen3's per-head query/key
+normalization; Ministral-3's YaRN frequency schedule and post-rotary query
+scaling). The re-expressions are not assumed correct: each is run against the
+reference implementation on the same checkpoint and the same tokens, and in
+float32 with exact attention the two agree to the last bit --- maximum absolute
+logit difference $0.00000$ and top-1 agreement at every position --- so any
+difference in the tables below is a property of the backbone, not of the port.
+The tokenizers are checked the same way, on a mixed ASCII, Unicode, whitespace
+and code probe.
+
+\color{black}
+
+\begin{table}[t]
+\caption{LongBench results with Qwen3-8B across cache budgets. All rows are matched runs under the single implementation of Appendix~\ref{app:datasets}, at the core configuration of Table~\ref{tab:hyperparams}. \tbd\ denotes a configuration not yet run.}
+\label{tab:longbench_qwen3}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccccccccccc}
+\toprule
+Method & NrtvQA & Qasper & MF-en & HotpotQA & 2WikiMQA & Musique & GovReport & QMSum & MultiNews & TREC & TriviaQA & SAMSum & PCount & PRe & Lcc & RB-P & Avg. \\
+\midrule
+Full Cache & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=128$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=256$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=512$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=1024$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{table}[t]
+\caption{LongBench results with Ministral-3-8B-Instruct-2512 across cache budgets. All rows are matched runs under the single implementation of Appendix~\ref{app:datasets}, at the core configuration of Table~\ref{tab:hyperparams}. \tbd\ denotes a configuration not yet run.}
+\label{tab:longbench_ministral3}
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lccccccccccccccccc}
+\toprule
+Method & NrtvQA & Qasper & MF-en & HotpotQA & 2WikiMQA & Musique & GovReport & QMSum & MultiNews & TREC & TriviaQA & SAMSum & PCount & PRe & Lcc & RB-P & Avg. \\
+\midrule
+Full Cache & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=128$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=256$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=512$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+
+\midrule
+\multicolumn{18}{c}{\textit{Budget} $=1024$} \\
+\midrule
+CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+
+\subsection{RULER: Protocol and Per-Task Results}
+\label{app:ruler_results}
+
+All RULER results are obtained under one matched implementation at
+$B\in\{128,256,512,1024\}$, with the chunk size and observation
+window of Table~\ref{tab:hyperparams}. Each task is scored on its native
+$0$--$100$ metric,
+averaged across the 13 tasks at each context length and then across
+$4$K, $8$K, and $16$K; Tables~\ref{tab:ruler_mistral_full}
+and~\ref{tab:ruler_llama_full} report the complete per-task results.
+At tight budgets, \lorekvE\ gains are strongest on aggregation-style
+tasks such as VT, FWE, and CWE, while single-needle tasks become less
+discriminative as the budget increases. The main exception is the
+multi-query needle task, where \lorekvE\ can underperform AnDPro at
+shorter contexts, and NIAH-MK3 remains difficult for all methods at
+$B{=}128$.
+
+
+\subsection{RULER Ablations}
+\label{app:ruler_ablation}
+
+Table~\ref{tab:ruler_ablation} tests the main ablation axes on RULER,
+whose prompt structure differs from LongBench. The cleanest comparison
+is at $4$K and $B{=}128$, where $M{=}1$ and the \lorekvE\ core use
+matched uniform head budgets and top-$K$ selection: increasing $M$
+from $1$ to $4$ improves the average from $56.90$ to $58.40$. By
+comparison, moving from the log-probability-only cell to the
+\lorekvE\ core at the same $M$ changes the score from $58.39$ to
+$58.40$---a perturbation along a single ray of the $(\beta,\gamma)$
+plane that never reaches the no-entropy control, so it bounds the
+effect of that ray and not of the weighting apparatus, and the
+adaptive-budget and diversity switches each change the score by at
+most $0.11$ in the available matched rows. At $B{=}256$, the
+available adaptive-budget comparison similarly improves from $68.50$
+with $M{=}1$ to $70.04$ with $M{=}4$. Most variants were evaluated
+only at $4$K. In particular, the available $M{=}1$ result at $16$K
+uses adaptive rather than uniform head budgets, so the $52.18$ versus
+$51.05$ comparison is not a single-factor lookahead-count ablation.
+
+
+\begin{table}[t]
+\caption{LongBench ablations (16-dataset average) with
+Mistral-7B-Instruct-v0.2. \tbd\ denotes configurations not yet run.}
+\label{tab:ablation_summary}
+\centering
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.12}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}llcccc@{}}
+\toprule
+\textbf{Axis} & \textbf{Variant}
+& $B{=}128$ & $B{=}256$ & $B{=}512$ & $B{=}1024$ \\
+\midrule
+
+\multirow{2}{*}{Core}
+& \lorekvE\ core
+& 40.28 & 41.38 & \best{41.86} & \best{42.20} \\
+& \lorekvD\ core
+& \second{40.39} & \best{41.44} & \best{41.86} & \second{42.17} \\
+\midrule
+
+\multirow{4}{*}{Lookahead budget}
+& $M{=}0$ (prompt window only; no lookahead term)
+& 35.87 & 37.50 & 38.70 & 39.50 \\
+& $M{=}1$ (single surrogate response)
+& 39.81 & 40.85 & 41.56 & 42.03 \\
+& $M{=}2$
+& 40.17 & 40.18 & 41.10 & 41.22 \\
+& $M{=}8$
+& \best{40.69} & 40.97 & 41.52 & 41.65 \\
+\midrule
+
+\multirow{2}{*}{Reliability weighting}
+& Log-probability only
+& 40.29 & 41.39 & 41.30 & 41.40 \\
+& Entropy $+$ disagreement
+& 40.33 & \second{41.40} & \second{41.84} & \second{42.17} \\
+\midrule
+
+\multirow{3}{*}{Perturbation objective}
+& Accumulated attention mass
+& \tbd & \tbd & \tbd & \tbd \\
+& Unprojected norm, $\|\Delta\mathbf{o}\|_2^2$
+& \tbd & \tbd & \tbd & \tbd \\
+& AnDPro scoring with the same continuations
+& \tbd & \tbd & \tbd & \tbd \\
+\midrule
+
+\multirow{2}{*}{Plug-ins}
+& $+$ Adaptive head budgets
+& 40.28 & 41.35 & 41.72 & 41.72 \\
+& $+$ Adaptive budgets and diversity
+& 40.30 & 40.33 & 41.50 & 41.80 \\
+\bottomrule
+\end{tabular}%
+}
+
+\vspace{2pt}
+\parbox{\columnwidth}{\footnotesize
+\textit{Configuration details.}
+Unless otherwise stated, rows use the core configuration of
+Table~\ref{tab:hyperparams} with uniform head budgets and top-$K$
+selection; the adaptive-budget and diversity plug-ins use the
+non-zero switch settings listed there.
+Reliability-weighting rows are named settings of
+$(\beta,\gamma,\lambda_D)$; their coordinates are in
+Table~\ref{tab:hyperparams}(c). Weighting is vacuous at $M{=}1$,
+since the softmax over a single trajectory always assigns unit
+weight. For $M{=}2$, $\hat D_m$ is identically zero by symmetry, so
+disagreement cannot affect the trajectory weights, although the
+typicality and entropy coefficients can. $M{=}0$ (equivalently
+$\lambda_L{=}0$) denotes the prompt-window-only configuration.}
+\end{table}
+
+
+\begin{table}[t]
+\caption{RULER ablations with Mistral-7B-Instruct-v0.2
+(13-task averages). n/a: reliability weighting is vacuous at
+$M{=}1$, since the softmax over a single trajectory always assigns
+unit weight.}
+\label{tab:ruler_ablation}
+\centering
+\setlength{\tabcolsep}{4.5pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}llllcccccc@{}}
+\toprule
+& & & &
+\multicolumn{3}{c}{$B{=}128$}
+& \multicolumn{3}{c}{$B{=}256$} \\
+\cmidrule(lr){5-7}
+\cmidrule(lr){8-10}
+
+$M$ & Reliability weighting
+& Head budgets & Selection
+& 4K & 8K & 16K
+& 4K & 8K & 16K \\
+\midrule
+
+\multicolumn{4}{@{}l}{AnDPro (strongest baseline)}
+& 54.85 & 50.06 & 45.20
+& 71.05 & 64.08 & 57.91 \\
+
+\midrule
+
+1 & n/a & uniform & top-$K$
+& 56.90 & 54.29 & 52.15
+& 68.45 & 62.77 & 57.70 \\
+
+1 & n/a & adaptive & top-$K$
+& 56.92 & 54.31 & \second{52.18}
+& 68.50 & 62.81 & 57.75 \\
+
+1 & n/a & adaptive & diversity
+& 56.95 & 54.34 & \best{52.20}
+& 68.55 & 62.85 & 57.78 \\
+
+\midrule
+
+4 & Log-probability only & uniform & top-$K$
+& \second{58.39} & 55.72 & 50.98
+& 70.08 & 64.45 & 58.85 \\
+
+4 & Log-probability only & adaptive & top-$K$
+& 58.28 & 55.68 & 50.95
+& 70.04 & 64.42 & 58.82 \\
+
+4 & Log-probability only & adaptive & diversity
+& 58.31 & 55.70 & 50.97
+& 70.07 & 64.45 & 58.85 \\
+
+4 & \lorekvE & adaptive & top-$K$
+& 58.37 & \second{55.74} & 51.02
+& \second{71.45} & \second{65.46} & \second{59.88} \\
+
+\textbf{4} & \textbf{\lorekvE} & \textbf{uniform} & \textbf{top-$K$}
+& \best{58.40} & \best{55.77} & 51.05
+& \best{71.51} & \best{65.52} & \best{59.94} \\
+
+\midrule
+
+4 & \lorekvD & adaptive & top-$K$
+& 58.28 & 55.70 & 50.96
+& 69.72 & 64.50 & 58.92 \\
+
+4 & \lorekvD & adaptive & diversity
+& 58.31 & 55.72 & 50.98
+& 69.75 & 64.53 & 58.95 \\
+
+\textbf{4} & \textbf{\lorekvD} & \textbf{uniform} & \textbf{top-$K$}
+& 58.31 & \second{55.74} & 51.00
+& 69.77 & 64.56 & 58.98 \\
+
+\bottomrule
+\end{tabular}%
+}
+
+\vspace{2pt}
+\parbox{\textwidth}{\footnotesize
+\textit{Configuration details.}
+Reliability-weighting entries are named settings of
+$(\beta,\gamma,\lambda_D)$; their coordinates are in
+Table~\ref{tab:hyperparams}(c). Adaptive head budgets and diversity
+selection use the non-zero switch values of
+Table~\ref{tab:hyperparams}(b); all other quantities are the core
+configuration. \textbf{Bold} rows are the \lorekvE\ and \lorekvD\
+cores, i.e.\ the two rows carried end to end in
+Tables~\ref{tab:ruler_main}, \ref{tab:ruler_mistral_full}
+and~\ref{tab:ruler_llama_full}.}
+\end{table}
+
+
+\subsection{NIAH Grid}
+\label{app:niah_extra}
+\label{app:large_models}
+
+Figure~\ref{fig:niah-heatmap} provides the complete
+depth$\times$context-length grid; aggregate results and interpretation
+are given in Section~\ref{subsec:niah}. The corresponding \lorekvD\
+grid is pending.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]
+    {figures_combined/niah_heatmap_exact_match_llama_b1024.pdf}
+    \subcaption{Exact match}
+    \label{fig:niah-em}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[t]{0.49\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]
+    {figures_combined/niah_heatmap_recall_llama_b1024.pdf}
+    \subcaption{Word recall}
+    \label{fig:niah-recall}
+  \end{subfigure}
+  \caption{\textbf{NIAH retrieval.}
+  Exact-match performance across needle depths and 4K--32K context
+  lengths with Llama-3.1-8B-Instruct, $B=1024$.}
+  \label{fig:niah-heatmap}
+\end{figure}
+
+\section{Mechanism Analysis}
+\label{app:experiments_extra}
+
+\subsection{Measurement Protocol}
+\label{app:mechanism_protocol}
+
+All mechanism analyses use a common capture procedure applied to the actual eviction implementation.
+
+\textbf{Captured states.}
+For each prompt, we (i) run the standard prefill and retain the post-RoPE prompt-window queries and full
+$\mathbf{K}^{l,h},\mathbf{V}^{l,h}$; (ii) sample the $M$ lookahead trajectories and store their query states, the per-step centered score $c^{(m)}_u$, entropy $H^{(m)}_u$ and varentropy $V^{(m)}_u$, the raw and standardized trajectory disagreement $D_m,\hat D_m$, and the weight $\omega_m$, with the three channels of Eq.~\ref{eq:confidence} stored separately; per-step storage costs $MT$ floats per prompt; and (iii) greedy-decode against the \emph{full} cache and record the post-RoPE queries at each decoding step. Disagreement is recorded even when $\lambda_D{=}0$, so that both reliability signals are available as diagnostics on every capture regardless of which variant produced it; the analysis code imports the same $D_m$ routine the deployed method uses, so the figures and the runtime score identically by construction. Step~(iii) defines $\mathcal{Q}_{\mathrm{future}}$ and is used only for analysis. Queries are recomputed from each layer's own projection and rotary embedding, leaving the forward pass unchanged.
+
+\textbf{Analysis score.}
+All token-importance analyses use the LORE-KV scoring rule. For query $\mathbf{q}$ and candidate token $i$, let
+$c_{q,i}=a^{l,h}_{q,i}/(1-a^{l,h}_{q,i}+\epsilon)$. We use
+\begin{equation}
+s^{l,h}_{q,i}
+=
+\left|c_{q,i}\right|
+\left\|
+\mathbf{W}^{O}_{l,h}\mathbf{v}^{l,h}_{i}
+-
+\mathbf{W}^{O}_{l,h}\mathbf{o}^{l,h}_{q}
+\right\|_2 .
+\label{eq:analysis_score}
+\end{equation}
+Scores are averaged over the corresponding query set and combined using Eq.~\ref{eq:final_score}. Prompt-window queries retain their causal mask; lookahead and future queries occur after the full prompt and require none.
+
+\textbf{Compared criteria.}
+All criteria use the same captured model state and selector. \textbf{Attention} is the mean SnapKV-style prompt-window attention mass; \textbf{AnDPro window} uses the projected perturbation with $\lambda_L{=}0$; \textbf{LORE-KV} uses Eq.~\ref{eq:final_score} with the \lorekvE\ weights unless a panel states otherwise; and \textbf{Single-lookahead} combines the window with one unweighted trajectory as a score-level proxy for Lookahead Q-Cache. Protected positions $\mathcal{P}$ receive score $+\infty$, and the remaining tokens are selected by uniform per-head top-$\min(B,n)$. Thus, comparisons isolate the scoring criterion rather than downstream selection.
+
+\textbf{Analysis-only deviations.}
+Four deviations from deployment apply to these figures. \textbf{D1:} Eq.~\ref{eq:analysis_score} uses the magnitude rather than squared magnitude of Eq.~\ref{eq:projected_score}; this preserves single-query rankings but changes the scale of the layer energy in Figure~\ref{fig:layer_head_analysis}. \textbf{D2:} chunking, adaptive head budgets, and diversity are disabled, and $B$ includes the ${\sim}33$ protected positions. \textbf{D3:} Figure~\ref{fig:layer_head_analysis} sums energy over all positions and displays GQA-expanded attention heads rather than KV heads. \textbf{D4:} Figure~\ref{fig:retained_token_composition} identifies answer tokens by exact token-id match to the gold answer; this may underestimate absolute evidence retention but affects all criteria equally.
+
+\textbf{Derived quantities.}
+Coverage measures how closely an estimated query set matches the true future queries:
+\begin{equation}
+\operatorname{Cov}\big(\mathcal{Q}_{\mathrm{future}};
+\{\hat{\mathcal{Q}}_s\},\boldsymbol{\pi}\big)
+=
+\frac{1}{H}\sum_h
+\frac{1}{T_{\mathrm f}}\sum_t
+\sum_s \pi_s
+\max_{\hat{\mathbf q}\in\hat{\mathcal Q}_s}
+\cos\!\big(
+\mathbf q^{\mathrm{future}}_{t,h},
+\hat{\mathbf q}
+\big).
+\label{eq:coverage}
+\end{equation}
+Queries are unit-normalized before computing cosine similarity. The oracle score $S^\star$ is Eq.~\ref{eq:final_score} evaluated directly on $\mathcal{Q}_{\mathrm{future}}$, and
+\begin{equation}
+\operatorname{Recall}@B(S,S^\star)
+=
+\frac{
+\left|\mathrm{top}_B(S)\cap\mathrm{top}_B(S^\star)\right|
+}{B}
+\label{eq:recall_at_b}
+\end{equation}
+measures agreement with oracle retention. Behavioral fidelity evaluates the retained cache directly:
+\begin{equation}
+F(B)
+=
+\mathbb{E}_{\mathbf q\sim\mathcal Q_{\mathrm{future}}}
+\cos\!\big(
+\mathbf o^{\mathcal R(B)}_q,
+\mathbf o_q
+\big).
+\label{eq:fidelity}
+\end{equation}
+The prompt-to-future mismatch $\operatorname{Mis}(X)$ is defined in
+Section~\ref{subsec:mechanism}.
+
+\textbf{Configuration.}
+Unless noted in Table~\ref{tab:figure_recipes}, all mechanism analyses use Mistral-7B-Instruct-v0.2, the core configuration of Table~\ref{tab:hyperparams} with the entropy weighting of \lorekvE, $B{=}128$, LongBench single-document QA, and RULER at $4$K. The two reliability variants are compared explicitly only in Figures~\ref{fig:future_query_alignment} and~\ref{fig:particle_divergence}, which re-weight the captured particles under both rules; every other figure is insensitive to the choice, because it either fixes the weights or compares criteria that do not use them. Scatter plots may thin displayed markers, but all statistics use the complete samples.
+
+\begin{table}[t]
+\caption{Mechanism-analysis measurements, lookahead settings, and sample sizes.}
+\label{tab:figure_recipes}
+\centering
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}lllccl@{}}
+\toprule
+Figure & Grouping variable & Measured quantity & Steps & $M$ & Sample size (LB / RULER) \\
+\midrule
+\ref{fig:future_query_alignment} & particles $M\in\{1,2,4,8\}$ & coverage, Eq.~\ref{eq:coverage} & 32 & 8 & 118 / 200 prompts \\
+\ref{fig:score_comparison} & candidate rank; criterion pair & score profile; overlap; Spearman $\rho$ & 0 & 4 & 4{,}501 / 3{,}843 candidates \\
+\ref{fig:cache_distribution} & cosine value; layer index & fidelity, Eq.~\ref{eq:fidelity} & 16 & 4 & 2.47M / 3.28M triples \\
+\ref{fig:confidence_calibration} & binned confidence $R_m$; kept fraction & $\operatorname{Recall}@B$; $1-\operatorname{Cov}$ & 32 & 8 & 520 / 1{,}600 particles \\
+\ref{fig:mismatch_vs_gain} & mismatch $\operatorname{Mis}(X)$ & recall and fidelity gain & 24 & 4 & 265 / 200 examples \\
+\ref{fig:retained_token_composition} & token class & retention; enrichment & 0 & 4 & 751K / 769K tokens \\
+\ref{fig:layer_head_analysis} & layer; (layer, head) & energy $E_l$; recall gain $G_{l,h}$ & 24 & 4 & $32\times32$ grid \\
+\ref{fig:budget_equivalence} & budget $B\in\{64,\ldots,1024\}$ & fidelity $F(B)$; implied saving & 24 & 4 & one score pass, five selections \\
+\ref{fig:particle_divergence} & disagreement $D_m$; entropy $\bar H_m$; signal; weighting rule & $\operatorname{Recall}@B$; Spearman $\rho$; coverage, Eq.~\ref{eq:coverage} & 32 & 8 & 4{,}400 / 52{,}000 particles \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+
+\subsection{Future-Query Coverage}
+\label{app:query_coverage}
+
+Figure~\ref{fig:future_query_alignment} compares the prompt-end window,
+one unweighted rollout, uniformly weighted multi-trajectory queries,
+and the two reliability-weighted estimators of
+Eq.~\ref{eq:particle_weight} using Eq.~\ref{eq:coverage}.
+\textcolor{teal}{Because this coverage metric is nearest-query based, saturation after one rollout should not be interpreted as absence of a multi-rollout effect on expected deletion cost; that effect is measured by the end-to-end $M$-ablations.}
+The $M$-sweep uses nested prefixes of the same eight-particle sample,
+so all multi-trajectory variants coincide at $M{=}1$. Because
+$\hat D_m$ is ensemble-relative, it is recomputed within each nested
+prefix rather than sliced from the full-ensemble value, which keeps
+the \lorekvD\ curve a valid estimator at every $M$.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]
+  {figures_combined/fig1_future_query_alignment_update.pdf}
+  \caption{\textbf{Future-query coverage.}
+  Prompt-window, single-trajectory, and multi-trajectory estimates as
+  the number of lookahead particles increases. Bands show $\pm1$ s.e.m.}
+  \label{fig:future_query_alignment}
+\end{figure}
+\subsection{Retention-Order Shift}
+\label{app:score_shift}
+
+Figure~\ref{fig:score_comparison} measures whether lookahead changes which tokens cross the retention boundary rather than merely rescaling prompt-side scores. At $B{=}128$, attention and \lorekvE\ have top-$B$ overlap $0.82$ on LongBench and $0.86$ on RULER, despite high rank correlations ($\rho=0.94$ and $0.87$). Thus, most of the global ordering is shared while the tokens near the budget boundary differ. Single-lookahead and \lorekvE\ are substantially closer ($0.97$ overlap and $\rho=1.00$ on LongBench; $0.92$ and $0.95$ on RULER), providing the score-level compute-matched comparison with a single response-side surrogate. The corresponding \lorekvE-versus-\lorekvD\ overlap on the same particles gates whether an end-to-end run can resolve the two variants at all.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig2_score_comparison.pdf}
+  \caption{\textbf{Retention-order shift.} Candidate-score profiles, top-$B$ overlap, and Spearman correlation across eviction criteria. Mistral-7B-Instruct-v0.2, $B=128$, $M=4$.}
+  \label{fig:score_comparison}
+\end{figure}
+
+\textcolor{teal}{Figure~\ref{fig:criterion_comparison} runs the same comparison against CriticalKV and AnDPro as deployed, scoring all three on one captured state and selecting with one shared rule, so the criterion is the only thing that varies. At $B{=}128$ on LongBench, agreement with the oracle retention is $0.63$ for \lorekvE\ against $0.38$ for CriticalKV, $0.40$ for AnDPro and $0.50$ for the window-only control ($0.79$ against $0.59$, $0.60$ and $0.70$ on RULER). The retained cache also reproduces the full-cache attention output more faithfully: the output error $1-\cos$ falls from $0.177$ to $0.138$ on LongBench, closing about $58\%$ of the distance to the oracle cache ($0.110$), and the reduction holds at every budget: $22$--$27\%$ on LongBench and $9$--$22\%$ on RULER for $B\in\{128,256,512,1024\}$, so the effect is not an artefact of aggressive compression. The control differs from \lorekvE\ only in the lookahead term, so the gap to it prices the Monte-Carlo samples of plausible response-side query states directly; the attention- and value-based prompt-side criteria track each other across every layer, which places the separation at the query reference rather than at the deletion score.}
+
+\begin{figure}[t]
+  \color{teal}
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/ranking_quality.pdf}
+  \caption{\textbf{Criterion comparison at matched selection.} Rows are the two benchmarks, LongBench single-document QA (top) and RULER 4K/8K (bottom). \textbf{(a,~d)} Recall@$B$ against the oracle ranking: the fraction of the oracle's top-$B$ candidates the criterion also retains, protected positions excluded because every criterion keeps them. \textbf{(b,~e)} Attention-output error $1-\cos(\mathbf{o}_{\mathcal{R}},\mathbf{o}_{\mathrm{full}})$ on $\mathcal{Q}_{\mathrm{future}}$, log scale, lower is better. \textbf{(c,~f)} Spearman rank agreement with the oracle score, layer by layer (budget-independent). Three of the four criteria are prompt-side: \emph{window-only} is Eq.~\ref{eq:final_score} at $\lambda_L{=}0$, the same projected deletion score with the lookahead term removed, so the distance from it to \lorekvE\ prices the Monte-Carlo samples of plausible response-side query states on their own. All criteria are scored on the same prefill and sampled particles and select under the same uniform per-head rule, so only the scoring rule differs. Mistral-7B-Instruct-v0.2, $M=4$; bands are $\pm1$ s.e.m.\ over $12$ LongBench and $8$ RULER prompts.}
+  \label{fig:criterion_comparison}
+\end{figure}
+
+
+\subsection{Particle-Confidence Calibration}
+\label{app:calibration_extra}
+\label{app:confidence_details}
+
+Figure~\ref{fig:confidence_calibration} evaluates whether the combined confidence $R_m$, at the \lorekvE\ coefficients, predicts oracle retention utility. Utility increases weakly with confidence, while hard removal of low-confidence particles provides little benefit: the residual coverage error is essentially flat in the kept fraction, and retaining only the most confident particles does not beat keeping all of them. This supports soft weighting rather than hard particle selection and is consistent with the small difference between the log-probability-only cell and the \lorekvE\ core in the ablations---though, as Section~\ref{subsec:confidence} notes, that pair brackets a narrow range of one coefficient rather than the reachable set. Which individual signal carries this weak correlation---average log-probability, $-\bar H_m$, $-\hat D_m$, or either combined score---is measured in the third row of Figure~\ref{fig:particle_divergence}, which ranks all of them against the same utility on one set of particles; the same figure supplies the entropy-versus-utility relationship itself, so it is not repeated here.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig5_confidence_calibration.pdf}
+  \caption{\textbf{Particle-confidence calibration.} Oracle retention recall versus reliability score (top) and residual query-coverage error after confidence filtering (bottom).}
+  \label{fig:confidence_calibration}
+\end{figure}
+
+
+\subsection{Trajectory Disagreement as the Reliability Signal}
+\label{app:divergence}
+
+Figure~\ref{fig:particle_divergence} prices each channel of Eq.~\ref{eq:confidence} against per-particle oracle utility. Every signal is recorded on the \emph{same} captured particles, and the weighting rules in the last row re-weight that same ensemble, so the comparison carries no difference in test-time compute: whatever separates the rules is attributable to the coefficients alone. The capture uses $M{=}8$, since $\hat D_m$ is identically zero for $M\le2$, and the diagnostic forces every coefficient to be non-degenerate even when the run's own configuration set one to zero, so that the rules stay comparable. Note that $\bar c_m$ is recoverable from any existing capture with no re-decoding, since $\bar c_m$ equals the stored average log-probability plus the stored mean entropy; only the varentropy $V_u$ of Eq.~\ref{eq:varentropy} requires a re-capture pass.
+
+Two questions are answered in turn. \textbf{Is disagreement the better per-particle signal?} The first two rows plot each particle's oracle utility against $D_m$ and against $\bar H_m$. Utility here is $\operatorname{Recall}@B$ against the oracle score $S^\star$ (Eq.~\ref{eq:recall_at_b}), i.e.\ measured on the retention a single particle induces rather than on its queries alone; the capture also records each particle's standalone coverage of $\mathcal{Q}_{\mathrm{future}}$ (Eq.~\ref{eq:coverage}) and the two orderings agree, so the figure reports the downstream quantity. A negative slope in the first row is the premise of the penalty: a trajectory the rest of the ensemble does not reproduce keeps tokens the true future queries would not have kept. The third row ranks every candidate signal by its Spearman correlation with the same utility, sign-oriented so that larger always means ``better particle''. Two comparisons matter there. The first is $\bar c_m$ against the raw $\log p_\theta$: if removing the entropy confound raises the correlation, the reparametrization improves the per-particle signal itself, measured on this paper's own diagnostic. The second is whether $-\hat D_m$ ranks above $-\bar H_m$, which would mean disagreement carries information entropy does not. The third-row panel of Figure~\ref{fig:particle_divergence} reports these correlations for both benchmarks. The pattern is benchmark-dependent: on LongBench all of $\log p_\theta$, $-\bar H_m$, $-\hat D_m$ and the two combined scores correlate positively with utility, with $-\hat D_m$ the weakest of them and the combined disagreement score the strongest; on RULER the marginal correlations are close to zero and mostly of the opposite sign, with $-\hat D_m$ the only one that remains positive. No signal is strong on either benchmark. Because a marginal correlation cannot separate a signal from what it shares with the others, the \emph{semipartial} correlation of $D_m$ with the residual of utility on $(\bar c_m,\bar H_m)$ is what gates $\lambda_D>0$ in the end-to-end grid.
+
+\textbf{Does the weighting built on it win?} The last row reports ensemble coverage of $\mathcal{Q}_{\mathrm{future}}$ under four weighting rules: uniform weighting, log-probability only, and the \lorekvE\ and \lorekvD\ rules (Table~\ref{tab:hyperparams}(c))---i.e.\ including the uniform control that the earlier parametrization could not express. Consistent with the calibration result of Figure~\ref{fig:confidence_calibration}---the reliability signal is real but weak---the absolute differences between the bars are small, which is exactly why the weighting stays soft and $\lambda_D$ is bounded. The statistic to read is therefore not the bar height but the \emph{paired} per-sample comparison printed in the panel, since absolute coverage varies far more across prompts than across weighting rules: the disagreement rule improves mean coverage by $+0.0010$ and wins on $72\%$ of $550$ samples on LongBench, and by $+0.0006$ on $44\%$ of $6{,}500$ samples on RULER. The RULER win rate falls below one half despite the positive mean, so the disagreement rule is not uniformly preferable there. The corresponding end-to-end results are summarized in Appendix~\ref{app:reparam_grid} and are consistent with this small score-level separation.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig10_particle_divergence.pdf}
+  \caption{\textbf{Particle reliability signals.} Oracle retention utility versus trajectory disagreement and predictive entropy, signal correlations, and ensemble coverage under alternative weighting rules. All rules use identical particles. Mistral-7B-Instruct-v0.2, $B=128$, $T=8$, $M=8$.}
+  \label{fig:particle_divergence}
+\end{figure}
+
+
+\subsection{Retained-Token Composition}
+\label{app:composition}
+
+Figure~\ref{fig:retained_token_composition} assigns each prompt token, in priority order, to attention sink, recency window, answer/evidence, number, punctuation/boilerplate, capitalized entity, or other. It reports both the fraction of heads retaining a token and the enrichment
+$P(c\mid\mathcal R)/P(c\mid X)$.
+
+The protected sink and recency classes are identical across methods. On LongBench, answer/evidence enrichment is $1.03$ for attention, $1.00$ for the AnDPro window, and $2.51$ for \lorekvE; the corresponding retention rates are approximately $0.028$, $0.028$, and $0.069$. On RULER, answer/evidence enrichment is $16.5$, $16.3$, and $20.3$, respectively. Other token classes change only modestly, indicating that the main compositional difference is increased retention of answer-bearing evidence. Composition is a property of the retained set, so the \lorekvD\ counterpart is obtained by re-weighting the same captured particles under the disagreement rule and re-running selection only, with no additional decoding; it is not yet reported. This complements the retrieval analysis of Section~\ref{subsec:niah}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig7_retained_token_composition.pdf}
+  \caption{\textbf{Retention by token class.} Mean retained fraction (left) and class enrichment $P(c\mid\mathcal R)/P(c\mid X)$ (right).}
+  \label{fig:retained_token_composition}
+\end{figure}
+
+
+\subsection{Layer- and Head-Level Structure}
+\label{app:layer_head}
+
+Figure~\ref{fig:layer_head_analysis} localizes the perturbation signal across the network, under the \lorekvE\ weights of Appendix~\ref{app:mechanism_protocol}. Layer perturbation energy increases with depth, while the gain
+$G_{l,h}$ from replacing window-only queries with multi-lookahead queries is positive for most heads but strongly non-uniform. The largest gains concentrate in a subset of middle-depth heads. This heterogeneity is consistent with the head specialization motivating head-wise retention methods \citep{feng2024adakv,fu2024headkv} and provides the premise for the adaptive allocation rule in Eq.~\ref{eq:adaptive_budget}; its small end-to-end ablation gain indicates that most of the improvement is already captured by the core token score.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig8_layer_head_analysis.pdf}
+  \caption{\textbf{Future-query signal across layers and heads.} Layer perturbation energy (left) and retention-recall gain from multi-lookahead queries (right). Mistral-7B-Instruct-v0.2, $B=128$, $M=4$.}
+  \label{fig:layer_head_analysis}
+\end{figure}
+
+
+\subsection{Budget Equivalence in Behavioral Fidelity}
+\label{app:budget_curve}
+
+Figure~\ref{fig:budget_equivalence} complements Table~\ref{tab:budget_equivalence} by measuring cache quality continuously with the behavioral fidelity $F(B)$ of Eq.~\ref{eq:fidelity}. On LongBench, \lorekvE\ increases from $0.852$ at $B{=}64$ to $0.981$ at $B{=}1024$, compared with $0.818\!\rightarrow\!0.975$ for attention and $0.818\!\rightarrow\!0.973$ for the AnDPro window. RULER shows the same ordering over a narrower range: $0.916\!\rightarrow\!0.989$ for \lorekvE\ versus $0.900\!\rightarrow\!0.986$ and $0.902\!\rightarrow\!0.987$ for the two prompt-side criteria.
+
+Matching \lorekvE\ fidelity requires approximately $33$--$43\%$ more retained-budget reduction on LongBench and $27$--$34\%$ on RULER across the measured range. These values concern behavioral fidelity rather than task accuracy and therefore complement, rather than replace, Table~\ref{tab:budget_equivalence}. Where a baseline never reaches the target fidelity within the sweep, the corresponding saving is only lower-bounded.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures_combined/fig9_budget_equivalence.pdf}
+  \caption{\textbf{Budget equivalence under behavioral fidelity.} Fidelity across cache budgets (left) and baseline cache savings required to match \lorekvE\ (right).}
+  \label{fig:budget_equivalence}
+\end{figure}
+
+\section{The Two Reliability Variants in the
+$(\beta,\gamma,\lambda_D)$ Plane}
+\label{app:reparam_grid}
+
+The two reliability variants are coefficient settings defined in
+Table~\ref{tab:hyperparams} and compared end to end in
+Tables~\ref{tab:longbench_mistral}, \ref{tab:longbench_llama},
+\ref{tab:ruler_main}, \ref{tab:ablation_summary}, and
+\ref{tab:ruler_ablation}.
+
+\textbf{Protocol.}
+At $B{=}128$, both variants re-weight nested prefixes of a single
+eight-particle draw per prompt, so they do not differ in test-time
+compute. Because run-to-run variation may be comparable to the
+observed gap, we require at least three seeds before interpreting an
+ordering and report a null result if the variants do not separate
+beyond that noise floor.
+
+
+\section{Limitations}
+\label{app:limitations}
+
+LORE-KV incurs one-time lookahead latency
+(Appendix~\ref{app:overhead_details}).
+
+\textcolor{red}{
+LORE-KV decides which KV pairs should be kept, but once a KV pair is
+removed, its information is lost. In contrast, methods such as
+IndexMem keep a compressed summary of evicted information
+\citep{yang2026indexmem}, while LaProx considers interactions across
+heads and layers when selecting what to retain
+\citep{mai2026reformulating}. LORE-KV also compresses the cache only
+once after the prompt, so extending it to update the cache during long
+or agentic generations is left for future work.
+}
+
+More broadly, future work should study how LORE-KV can preserve
+important instructions, structural information, and task-relevant
+evidence under aggressive compression, especially in
+multi-instruction, safety-sensitive, and long-context settings.
+
+
+\end{document}

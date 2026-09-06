@@ -36,3 +36,20 @@ def replace_llama_causal():
     transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = causal_prepare_inputs_for_generation_llama
     transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = causal_llama_flash_attn2_forward
     transformers.models.llama.modeling_llama.LlamaModel.forward = causal_LlamaModel_forward
+
+
+# --- models_ext backbones (Qwen3, Ministral3); see causal_lookahead_snapkv for the rationale ---
+from models_ext.hijack_targets import apply_ext_hijack
+from causal_andpro_snapkv.monkeypatch.causal_ext_hijack import causal_ext_flash_attn2_forward
+
+
+def replace_qwen3_causal():
+    check_version()
+    apply_ext_hijack("qwen3", causal_ext_flash_attn2_forward,
+                     causal_LlamaModel_forward, causal_prepare_inputs_for_generation_llama)
+
+
+def replace_ministral3_causal():
+    check_version()
+    apply_ext_hijack("ministral3", causal_ext_flash_attn2_forward,
+                     causal_LlamaModel_forward, causal_prepare_inputs_for_generation_llama)

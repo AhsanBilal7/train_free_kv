@@ -21,7 +21,8 @@ differ in any of it never collide.
     <cell>   the Eq. 3 reliability coefficients (beta, gamma, lambda_D)
     <brule>  head-budget rule from tau:      unif (0) | adap (1) | adap<tau>
     <sel>    selection rule from lambda_k/v: topk (0) | div (0.1) | div<lk>-<lv>
-    <model>  '' for Mistral-7B-Instruct-v0.2, '-llama' for Llama-3.1-8B-Instruct
+    <model>  '' for Mistral-7B-Instruct-v0.2, '-llama' for Llama-3.1-8B-Instruct,
+             '-qwen3' for Qwen3-8B, '-ministral3' for Ministral-3-8B-Instruct-2512
 
 IMPORTANT: <cell>, <brule> and <sel> are derived from the run's ACTUAL numeric
 hyper-parameters, never from the config file name. A sweep such as
@@ -50,7 +51,11 @@ CELL_COEFFS = {v: k for k, v in CELLS.items()}
 
 # Model tag -> short suffix. A tag that extends a known base keeps its remainder,
 # so the three-seed runs (MODEL_TAG=Mistral-7B-Instruct-v0.2-s0) become '-s0'.
-MODEL_BASES = [("Mistral-7B-Instruct-v0.2", ""), ("Llama-3.1-8B-Instruct", "-llama")]
+MODEL_BASES = [("Mistral-7B-Instruct-v0.2", ""), ("Llama-3.1-8B-Instruct", "-llama"),
+               # models_ext backbones; the short forms match config/*-qwen3.conf and
+               # config/*-ministral3.conf, keeping the invariant that a run folder's
+               # hyphenated head IS its config-file basename.
+               ("Qwen3-8B", "-qwen3"), ("Ministral-3-8B-Instruct-2512", "-ministral3")]
 
 _TOL = 1e-9
 
