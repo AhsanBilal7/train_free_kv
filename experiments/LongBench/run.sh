@@ -31,6 +31,17 @@ echo "run.sh using GPU_ID=$GPU_ID"
 # ============================================
 
 # --- Shared ---
+# Prompt truncation length passed to pred.py. The default 64000 is effectively
+# "do not truncate": it is above every LongBench prompt, and is what every result
+# reported so far was produced with. Set MAX_LENGTH in a config to cap a backbone
+# whose context window is shorter than the longest prompts -- Qwen2.5-14B's window
+# is 32768, and narrativeqa reaches ~64k tokens, so half of that task would
+# otherwise be scored outside the range the model was trained and RoPE-configured
+# for. Truncation is applied identically to every method, so the within-backbone
+# comparison the paper makes is unaffected.
+max_length="${MAX_LENGTH:-64000}"
+echo "run.sh using max_length=$max_length"
+
 budget_scopes=(${BUDGET:-128})
 chunk_size_scopes=(4)
 mode_scopes=(${MODE:-andpro})
@@ -119,7 +130,7 @@ for budget in "${budget_scopes[@]}"; do
                                   --score-objective "$score_objective")"
 
                                 CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
-                                  --max_length 64000 \
+                                  --max_length $max_length \
                                   --dataset $DATASET_PATH \
                                   --mode $mode \
                                   --budget $budget \
@@ -176,7 +187,7 @@ for budget in "${budget_scopes[@]}"; do
           echo "budget=$budget chunk=$chunk_size mode=$mode lambda_red=$lambda_red"
 
           CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
-            --max_length 64000 \
+            --max_length $max_length \
             --dataset $DATASET_PATH \
             --mode $mode \
             --budget $budget \

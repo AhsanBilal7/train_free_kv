@@ -124,5 +124,25 @@ then decodes a 4k-token needle prompt under `causal_lookahead`, `andpro` and
   template injects a multi-hundred-token "Le Chat" system prompt (with the current
   date and tool-use instructions) ahead of every prompt, which would change the
   long-context input the eviction methods are being compared on.
-* Qwen2.5-14B is roughly twice the parameters of the other three backbones
-  (~28 GB in bf16 before the KV cache), so it is correspondingly slower per sample.
+* **Qwen2.5-14B is capped at `MAX_LENGTH = 31500`**, where the other backbones run
+  at the repo default of 64000 (i.e. no truncation). Two reasons, both forcing:
+  its context window is 32768 with no RoPE scaling, and LongBench's narrativeqa
+  reaches ~64k tokens, so the default would score half that task outside the range
+  the model was trained for; and the memory does not fit. Measured peak GPU
+  allocation for `causal_lookahead` (the dominant mode -- the baselines peak around
+  32 GiB because they never clone the prefill cache):
+
+  | context | peak |
+  |---|---|
+  | 7,585 | 36.2 GiB |
+  | 18,685 | 47.6 GiB |
+  | 26,085 | 55.2 GiB |
+
+  That is 28.4 GiB of weights plus 1.03 GiB per 1000 tokens, so 31,500 tokens needs
+  ~61 GiB and fits an 80 GB H100 with ~18 GiB spare, while 64,000 would need ~94 GiB
+  and cannot run at all. `MAX_LENGTH` is a config knob (`experiments/LongBench/run.sh`)
+  that defaults to the old 64000, so no previously reported run is affected. The cap
+  applies to every method equally, so the comparison *within* this backbone is
+  unaffected; across backbones it is a documented difference in input length.
+* Qwen2.5-14B is roughly twice the parameters of the other three backbones, so it
+  is also correspondingly slower per sample.

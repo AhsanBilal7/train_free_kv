@@ -63,7 +63,10 @@ FILLER = (
 
 
 def build_prompt(tokenizer, target_tokens):
-    body = FILLER * 4 + NEEDLE + " " + FILLER * 200
+    # Repeat until the filler alone exceeds the target, so --n-tokens is honoured
+    # for every tokenizer rather than silently capping at whatever one pass yields.
+    reps = max(200, target_tokens // 40)
+    body = FILLER * 4 + NEEDLE + " " + FILLER * reps
     ids = tokenizer(body, return_tensors="pt").input_ids[0][:target_tokens]
     body = tokenizer.decode(ids, skip_special_tokens=True)
     return (
@@ -105,6 +108,7 @@ def run_mode(model_path, mode, budget, n_tokens, max_gen):
     prompt = build_prompt(tokenizer, n_tokens)
     inputs = tokenizer(prompt, return_tensors="pt").to("cuda:0")
     n_ctx = inputs.input_ids.shape[-1]
+    torch.cuda.reset_peak_memory_stats()
 
     if mode == "causal_lookahead":
         ids = generate_with_lookahead(
@@ -116,9 +120,10 @@ def run_mode(model_path, mode, budget, n_tokens, max_gen):
         out = model.generate(**inputs, max_new_tokens=max_gen, num_beams=1, do_sample=False)
         text = tokenizer.decode(out[0][n_ctx:], skip_special_tokens=True)
 
+    peak = torch.cuda.max_memory_allocated() / 2**30
     del model
     torch.cuda.empty_cache()
-    return n_ctx, text.strip()
+    return n_ctx, text.strip(), peak
 
 
 def prefill_equivalence(model_path, n_tokens):
@@ -189,13 +194,13 @@ def main():
     for mode in args.modes:
         print(f"\n===== {os.path.basename(args.model)} · {mode} · B={args.budget} =====", flush=True)
         try:
-            n_ctx, text = run_mode(args.model, mode, args.budget, args.n_tokens, args.max_gen)
+            n_ctx, text, peak = run_mode(args.model, mode, args.budget, args.n_tokens, args.max_gen)
         except Exception as exc:
             import traceback
             traceback.print_exc()
             failures.append((mode, f"{type(exc).__name__}: {exc}"))
             continue
-        print(f"  context {n_ctx} tokens -> {len(text)} chars")
+        print(f"  context {n_ctx} tokens -> {len(text)} chars, peak GPU {peak:.1f} GiB")
         print(f"  answer: {text!r}")
         if not text:
             failures.append((mode, "empty generation"))
