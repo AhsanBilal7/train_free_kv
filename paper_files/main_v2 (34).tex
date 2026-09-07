@@ -1893,24 +1893,24 @@ Full Cache & 29.23 & 45.81 & 52.89 & 62.41 & 57.46 & 38.20 & 29.66 & 23.78 & 21.
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=128$} \\
 \midrule
-CriticalKV & 26.28 & 30.80 & 41.67 & 58.54 & 53.39 & 35.81 & 19.23 & 21.29 & 16.34 & 63.50 & 86.20 & 44.64 & 8.67 & 92.33 & 55.82 & 40.96 & 43.47 \\
-AnDPro & 24.83 & 37.09 & 46.49 & 60.61 & 54.50 & 35.18 & 19.33 & 21.31 & 16.93 & 71.50 & 88.27 & 45.11 & 8.21 & 97.25 & 57.72 & 43.47 & 45.49 \\
-\lorekvE & 29.10 & 38.64 & 50.07 & 63.07 & 58.70 & 36.91 & 23.55 & 23.21 & 20.29 & 76.50 & 89.06 & 46.01 & 10.32 & 97.58 & 60.53 & \tbd & \tbd \\
-\lorekvD & 29.21 & 38.86 & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+CriticalKV & 26.28 & 30.80 & 41.67 & 58.54 & 53.39 & \second{35.81} & 19.23 & 21.29 & 16.34 & 63.50 & 86.20 & 44.64 & \second{8.67} & 92.33 & 55.82 & 40.96 & 43.47 \\
+AnDPro & 24.83 & 37.09 & \second{46.49} & \second{60.61} & \second{54.50} & 35.18 & \second{19.33} & \second{21.31} & \second{16.93} & \second{71.50} & \second{88.27} & \second{45.11} & 8.21 & \second{97.25} & \second{57.72} & \second{43.47} & 45.49 \\
+\lorekvE & \second{29.10} & \second{38.64} & \best{50.07} & \best{63.07} & \best{58.70} & \best{36.91} & \best{23.55} & \best{23.21} & \best{20.29} & \best{76.50} & \best{89.06} & \best{46.01} & \best{10.32} & \best{97.58} & \best{60.53} & \best{46.98} & 48.16 \\
+\lorekvD & \best{29.21} & \best{38.86} & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=256$} \\
 \midrule
-CriticalKV & 26.54 & 37.16 & 47.35 & 59.80 & 54.37 & 37.73 & \tbd & \tbd & \tbd & 71.00 & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
-AnDPro & 27.13 & 41.92 & 51.26 & 61.70 & 55.49 & 37.71 & 21.90 & 21.74 & \tbd & 75.50 & 89.34 & 45.82 & \tbd & \tbd & \tbd & \tbd & \tbd \\
-\lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+CriticalKV & 26.54 & 37.16 & 47.35 & \second{59.80} & \second{54.37} & \best{37.73} & \tbd & \tbd & \tbd & \second{71.00} & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & \second{27.13} & \best{41.92} & \best{51.26} & \best{61.70} & \best{55.49} & \second{37.71} & 21.90 & 21.74 & 18.55 & \best{75.50} & 89.34 & 45.82 & 9.04 & 98.33 & 61.10 & 46.63 & 47.70 \\
+\lorekvE & \best{28.93} & \second{41.41} & \second{50.55} & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=512$} \\
 \midrule
 CriticalKV & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
-AnDPro & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
+AnDPro & 28.50 & 44.45 & 52.25 & 61.47 & 57.20 & 39.11 & \tbd & \tbd & \tbd & 76.50 & 89.74 & 46.69 & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 
@@ -1940,32 +1940,32 @@ Full Cache & 28.31 & 45.48 & 46.07 & 61.03 & 56.85 & 40.13 & 22.79 & 16.82 & 19.
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=128$} \\
 \midrule
-CriticalKV & 25.35 & 31.84 & 40.00 & 55.37 & 52.91 & 34.22 & 18.67 & 16.83 & 15.83 & 58.00 & 90.64 & 38.89 & 14.50 & 99.25 & 64.39 & 59.94 & 44.79 \\
-AnDPro & 25.78 & 37.46 & 42.15 & 59.06 & 54.72 & 37.54 & 18.87 & 16.62 & 16.32 & 70.50 & 90.81 & 39.11 & 13.50 & 99.50 & 64.98 & 60.86 & 46.74 \\
+CriticalKV & \second{25.35} & \second{31.84} & \second{40.00} & \second{55.37} & \second{52.91} & \second{34.22} & \second{18.67} & \best{16.83} & \second{15.83} & \second{58.00} & \second{90.64} & \second{38.89} & \best{14.50} & \second{99.25} & \second{64.39} & \second{59.94} & 44.79 \\
+AnDPro & \best{25.78} & \best{37.46} & \best{42.15} & \best{59.06} & \best{54.72} & \best{37.54} & \best{18.87} & \second{16.62} & \best{16.32} & \best{70.50} & \best{90.81} & \best{39.11} & \second{13.50} & \best{99.50} & \best{64.98} & \best{60.86} & 46.74 \\
 \lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=256$} \\
 \midrule
-CriticalKV & 25.44 & 36.12 & 40.93 & 58.49 & 54.76 & 37.51 & 20.10 & 16.82 & 17.27 & 69.50 & 90.63 & 40.88 & 13.50 & 100.00 & 66.45 & 61.31 & 46.86 \\
-AnDPro & 25.86 & 39.78 & 43.75 & 60.30 & 55.25 & 39.14 & 20.05 & 17.10 & 17.50 & 72.50 & 91.54 & 41.80 & 14.50 & 100.00 & 67.63 & 62.55 & 48.08 \\
+CriticalKV & \second{25.44} & \second{36.12} & \second{40.93} & \second{58.49} & \second{54.76} & \second{37.51} & \best{20.10} & \second{16.82} & \second{17.27} & \second{69.50} & \second{90.63} & \second{40.88} & \second{13.50} & \best{100.00} & \second{66.45} & \second{61.31} & 46.86 \\
+AnDPro & \best{25.86} & \best{39.78} & \best{43.75} & \best{60.30} & \best{55.25} & \best{39.14} & \second{20.05} & \best{17.10} & \best{17.50} & \best{72.50} & \best{91.54} & \best{41.80} & \best{14.50} & \best{100.00} & \best{67.63} & \best{62.55} & 48.08 \\
 \lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=512$} \\
 \midrule
-CriticalKV & 26.15 & 41.00 & 43.22 & 60.11 & 55.65 & 37.63 & 20.87 & 17.48 & 18.31 & 73.50 & 91.29 & 41.62 & 16.00 & 100.00 & 68.48 & 63.49 & 48.43 \\
-AnDPro & 26.20 & 42.12 & 45.39 & 60.79 & 56.81 & 39.91 & 20.69 & 17.48 & 18.36 & 73.50 & 91.63 & 42.81 & 14.50 & 99.50 & 68.81 & 64.01 & 48.91 \\
+CriticalKV & \second{26.15} & \second{41.00} & \second{43.22} & \second{60.11} & \second{55.65} & \second{37.63} & \best{20.87} & \best{17.48} & \second{18.31} & \best{73.50} & \second{91.29} & \second{41.62} & \best{16.00} & \best{100.00} & \second{68.48} & \second{63.49} & 48.43 \\
+AnDPro & \best{26.20} & \best{42.12} & \best{45.39} & \best{60.79} & \best{56.81} & \best{39.91} & \second{20.69} & \best{17.48} & \best{18.36} & \best{73.50} & \best{91.63} & \best{42.81} & \second{14.50} & \second{99.50} & \best{68.81} & \best{64.01} & 48.91 \\
 \lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 
 \midrule
 \multicolumn{18}{c}{\textit{Budget} $=1024$} \\
 \midrule
-CriticalKV & 27.78 & 43.72 & 45.60 & 61.47 & 56.30 & 39.21 & 21.57 & 17.31 & 19.34 & 73.50 & 91.38 & 42.45 & 14.50 & 100.00 & 69.85 & 63.57 & 49.22 \\
-AnDPro & 28.11 & 45.07 & 46.82 & 60.53 & 58.02 & 40.32 & 21.39 & 16.88 & 19.33 & 74.00 & 91.38 & 42.94 & 14.50 & 100.00 & 69.88 & 64.82 & 49.62 \\
+CriticalKV & \second{27.78} & \second{43.72} & \second{45.60} & \best{61.47} & \second{56.30} & \second{39.21} & \best{21.57} & \best{17.31} & \best{19.34} & \second{73.50} & \best{91.38} & \second{42.45} & \best{14.50} & \best{100.00} & \second{69.85} & \second{63.57} & 49.22 \\
+AnDPro & \best{28.11} & \best{45.07} & \best{46.82} & \second{60.53} & \best{58.02} & \best{40.32} & \second{21.39} & \second{16.88} & \second{19.33} & \best{74.00} & \best{91.38} & \best{42.94} & \best{14.50} & \best{100.00} & \best{69.88} & \best{64.82} & 49.62 \\
 \lorekvE & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \lorekvD & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd & \tbd \\
 \bottomrule

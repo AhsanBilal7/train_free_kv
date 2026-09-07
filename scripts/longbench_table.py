@@ -95,14 +95,51 @@ def score_dir(pred_root, folder):
     return out
 
 
-def row(label, scores):
+def fmt(scores):
+    """Per-column cells and the row average, before any highlighting."""
     cells = [f"{scores[ds]:.2f}" if ds in scores else r"\tbd" for ds, _ in DATASETS]
     complete = len(scores) == len(DATASETS)
     avg = f"{sum(scores.values()) / len(DATASETS):.2f}" if complete else r"\tbd"
+    return cells, avg
+
+
+def row(label, scores, cells=None, avg=None):
+    if cells is None:
+        cells, avg = fmt(scores)
     return f"{label} & " + " & ".join(cells) + f" & {avg} \\\\"
 
 
-def emit(backbone, budgets, pred_root):
+def highlight(block):
+    """Wrap the best and second-best cell of each column in \\best / \\second.
+
+    `block` is [(label, scores)] for the method rows of ONE budget -- Full Cache is
+    excluded, matching the paper: the highlighting ranks the eviction methods
+    against each other, not against the uncompressed reference. A column with
+    fewer than two finished values is left plain, so a partially filled table
+    never advertises a winner chosen from one entrant.
+    """
+    out = [list(fmt(s)) for _, s in block]
+    for col, (ds, _) in enumerate(DATASETS):
+        have = [(i, s[ds]) for i, (_, s) in enumerate(block) if ds in s]
+        if len(have) < 2:
+            continue
+        best_v = max(v for _, v in have)
+        # Every row tied at the top is marked best -- marking only one of two
+        # equal values and leaving the other plain reads as an error, and exact
+        # ties are common here (PCount and PRe are coarse-grained metrics).
+        for i, v in have:
+            if v == best_v:
+                out[i][0][col] = r"\best{%s}" % out[i][0][col]
+        runners = [v for _, v in have if v < best_v]
+        if runners:
+            second_v = max(runners)
+            for i, v in have:
+                if v == second_v:
+                    out[i][0][col] = r"\second{%s}" % out[i][0][col]
+    return [row(label, None, cells, avg) for (label, _), (cells, avg) in zip(block, out)]
+
+
+def emit(backbone, budgets, pred_root, no_highlight=False):
     """The table body, \toprule .. \bottomrule, as a list of lines."""
     model_tag, _ = BACKBONES[backbone]
     lines = [r"\toprule",
@@ -114,15 +151,15 @@ def emit(backbone, budgets, pred_root):
     for b in budgets:
         lines += ["", r"\midrule",
                   r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b, r"\midrule"]
-        for label, folder in (
+        block = [(label, score_dir(pred_root, folder)) for label, folder in (
             ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4_red_0.0",
                             f"critical_{model_tag}_{b}_chunk_4"]),
             ("AnDPro",     [f"andpro_{model_tag}_{b}_chunk_4_red_0.0",
                             f"andpro_{model_tag}_{b}_chunk_4"]),
             (r"\lorekvE",  lookahead_dir("ent", model_tag, b)),
             (r"\lorekvD",  lookahead_dir("dis", model_tag, b)),
-        ):
-            lines.append(row(label, score_dir(pred_root, folder)))
+        )]
+        lines += highlight(block) if not no_highlight else [row(l, s) for l, s in block]
     lines.append(r"\bottomrule")
     return lines
 
@@ -158,13 +195,15 @@ def main():
     ap.add_argument("--budgets", nargs="+", type=int, default=[128, 256, 512, 1024])
     # Completed runs get moved off to scratch by scripts/archive_runs_to_scratch.sh,
     # so a table can span both locations; roots are searched in order.
+    ap.add_argument("--no-highlight", action="store_true",
+                    help="skip the \\best/\\second per-column markup")
     ap.add_argument("--inject", metavar="TEX",
                     help="rewrite the matching table body in this .tex file instead of printing")
     ap.add_argument("--pred-root", nargs="+",
                     default=["pred", "/scratch/user/u.ab353540/train_free_kv_archive/LongBench/pred"])
     args = ap.parse_args()
 
-    body = emit(args.backbone, args.budgets, args.pred_root)
+    body = emit(args.backbone, args.budgets, args.pred_root, args.no_highlight)
     if args.inject:
         inject(args.inject, args.backbone, body)
         return
