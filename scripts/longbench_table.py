@@ -102,28 +102,18 @@ def row(label, scores):
     return f"{label} & " + " & ".join(cells) + f" & {avg} \\\\"
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--backbone", required=True, choices=sorted(BACKBONES))
-    ap.add_argument("--budgets", nargs="+", type=int, default=[128, 256, 512, 1024])
-    # Completed runs get moved off to scratch by scripts/archive_runs_to_scratch.sh,
-    # so a table can span both locations; roots are searched in order.
-    ap.add_argument("--pred-root", nargs="+",
-                    default=["pred", "/scratch/user/u.ab353540/train_free_kv_archive/LongBench/pred"])
-    args = ap.parse_args()
-
-    model_tag, _ = BACKBONES[args.backbone]
-    print(r"\toprule")
-    print("Method & " + " & ".join(h for _, h in DATASETS) + r" & Avg. \\")
-    print(r"\midrule")
-    print(row("Full Cache", score_dir(args.pred_root,
-              [f"full_{model_tag}_128_chunk_4_red_0.0", f"test_{model_tag}_128_chunk_4_red_0.0"])))
-
-    for b in args.budgets:
-        print()
-        print(r"\midrule")
-        print(r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b)
-        print(r"\midrule")
+def emit(backbone, budgets, pred_root):
+    """The table body, \toprule .. \bottomrule, as a list of lines."""
+    model_tag, _ = BACKBONES[backbone]
+    lines = [r"\toprule",
+             "Method & " + " & ".join(h for _, h in DATASETS) + r" & Avg. \\",
+             r"\midrule",
+             row("Full Cache", score_dir(pred_root,
+                 [f"full_{model_tag}_128_chunk_4_red_0.0",
+                  f"test_{model_tag}_128_chunk_4_red_0.0"]))]
+    for b in budgets:
+        lines += ["", r"\midrule",
+                  r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b, r"\midrule"]
         for label, folder in (
             ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4_red_0.0",
                             f"critical_{model_tag}_{b}_chunk_4"]),
@@ -132,8 +122,53 @@ def main():
             (r"\lorekvE",  lookahead_dir("ent", model_tag, b)),
             (r"\lorekvD",  lookahead_dir("dis", model_tag, b)),
         ):
-            print(row(label, score_dir(args.pred_root, folder)))
-    print(r"\bottomrule")
+            lines.append(row(label, score_dir(pred_root, folder)))
+    lines.append(r"\bottomrule")
+    return lines
+
+
+def inject(tex_path, backbone, body):
+    """Replace the \toprule..\bottomrule block of tab:longbench_<backbone> in place.
+
+    Rewriting the file is what keeps the paper honest as runs land: the rows are
+    regenerated from pred/ rather than hand-copied, so a cell can never be stale
+    in one place and current in another.
+    """
+    # A literal search, not a regex: the label contains \l and { }, which as a
+    # pattern raise "bad escape \l" -- a failure that is easy to lose to a
+    # redirected stderr and looks exactly like "nothing needed updating".
+    label = f"\\label{{tab:longbench_{backbone}}}"
+    t = open(tex_path).read()
+    at = t.find(label)
+    if at < 0:
+        raise SystemExit(f"{tex_path}: no {label}")
+    start = t.index(r"\toprule", at + len(label))
+    end = t.index(r"\bottomrule", start) + len(r"\bottomrule")
+    new = t[:start] + "\n".join(body) + t[end:]
+    if new == t:
+        print(f"  {backbone}: unchanged")
+        return
+    open(tex_path, "w").write(new)
+    print(f"  {backbone}: table body updated in {tex_path}")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--backbone", required=True, choices=sorted(BACKBONES))
+    ap.add_argument("--budgets", nargs="+", type=int, default=[128, 256, 512, 1024])
+    # Completed runs get moved off to scratch by scripts/archive_runs_to_scratch.sh,
+    # so a table can span both locations; roots are searched in order.
+    ap.add_argument("--inject", metavar="TEX",
+                    help="rewrite the matching table body in this .tex file instead of printing")
+    ap.add_argument("--pred-root", nargs="+",
+                    default=["pred", "/scratch/user/u.ab353540/train_free_kv_archive/LongBench/pred"])
+    args = ap.parse_args()
+
+    body = emit(args.backbone, args.budgets, args.pred_root)
+    if args.inject:
+        inject(args.inject, args.backbone, body)
+        return
+    print("\n".join(body))
 
 
 if __name__ == "__main__":
