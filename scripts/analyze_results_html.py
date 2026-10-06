@@ -29,6 +29,15 @@ Usage
   python scripts/analyze_results_html.py --out /tmp/r.html
   python scripts/analyze_results_html.py --csv              # also a long-form CSV
   python scripts/analyze_results_html.py --benchmark LongBench RULER
+  python scripts/analyze_results_html.py --benchmark LongBench RULER --model qwen3_5
+  python scripts/analyze_results_html.py --model qwen3_5 gemma4   # both new backbones
+  python scripts/analyze_results_html.py --list-models            # what is on disk
+
+--model matches loosely: case, punctuation and separators are ignored, and the
+pattern need only be a prefix/fragment of the tag. So the Qwen3.5-9B runs are
+selected by any of `qwen3_5`, `Qwen3.5`, `qwen3.5-9b` or `QWEN3_5` -- you do not
+have to remember whether the folder says "Qwen3.5-9B" or the config says "qwen3_5".
+Pass several names to compare backbones in one report.
 """
 import argparse
 import datetime as _dt
@@ -53,7 +62,54 @@ LONGBENCH_ORDER = [
 MODEL_ALIASES = [("Mistral-7B-Instruct-v0.2", "Mistral-7B"),
                  ("Mistral-7B", "Mistral-7B"),
                  ("Llama-3.1-8B-Instruct", "Llama-3.1-8B"),
-                 ("Llama-3.1-8B", "Llama-3.1-8B")]
+                 ("Llama-3.1-8B", "Llama-3.1-8B"),
+                 ("Qwen2.5-14B-Instruct", "Qwen2.5-14B"),
+                 ("Ministral-3-8B-Instruct-2512", "Ministral-3-8B"),
+                 ("Qwen3.5-9B", "Qwen3.5-9B"),
+                 ("gemma-4-12B-it", "Gemma-4-12B")]
+
+
+def _norm_model(s):
+    """Fold a model name to letters+digits only, lower-cased.
+
+    So the CLI accepts whatever form is to hand -- the HF id, the folder tag, the
+    transformers model_type, or a half-remembered fragment -- and they all land on
+    the same key:
+
+        qwen3_5  Qwen3.5  qwen3.5-9b  Qwen3_5ForCausalLM  ->  qwen35...
+
+    Matching on this normalised form is what lets `--model qwen3_5` select the
+    Qwen3.5-9B runs without the caller typing the exact folder tag.
+    """
+    return "".join(ch for ch in str(s).lower() if ch.isalnum())
+
+
+def model_matches(tag, patterns):
+    """True when `tag` matches ANY pattern, comparing normalised substrings.
+
+    Checked against both the raw folder tag and its short alias, so
+    `--model gemma4`, `--model gemma-4-12B-it` and `--model Gemma-4-12B` all work.
+    Substring rather than equality because the useful queries are prefixes
+    ("qwen3_5" for "Qwen3.5-9B"); it stays unambiguous in practice because the
+    normalised tags do not nest -- qwen2 does not match qwen35.
+    """
+    if not patterns:
+        return True
+    hay = {_norm_model(tag), _norm_model(short_model(tag))}
+    for pat in patterns:
+        needles = {_norm_model(pat)}
+        # A transformers `model_type` or class name carries an architecture suffix the
+        # checkpoint folder never has: gemma4_unified -> "gemma4unified" is not inside
+        # "gemma412bit", so the raw form misses. qwen3_5 happens to work because it has
+        # no suffix. Strip the known suffixes so BOTH model_types behave the same --
+        # which is the whole point of accepting loose names.
+        for suf in ("forconditionalgeneration", "forcausallm", "unified", "instruct", "text", "it"):
+            for n in list(needles):
+                if n.endswith(suf) and len(n) > len(suf):
+                    needles.add(n[: -len(suf)])
+        if any(n and any(n in h for h in hay if h) for n in needles):
+            return True
+    return False
 
 # Hyperparameter columns shown in the full grid, in a stable order.
 HYPER_COLS = ["model", "budget", "M", "cell", "brule", "sel", "T", "lL", "lT",
@@ -150,7 +206,7 @@ def dataset_sort_key(name):
     return (2, 0, name)
 
 
-def collect(benchmarks):
+def collect(benchmarks, models=None):
     out, issues = {}, []
     for bm in benchmarks:
         pred = os.path.join(REPO_ROOT, "experiments", bm, "pred")
@@ -189,6 +245,12 @@ def collect(benchmarks):
                                    "problem": "unreadable result.json: %s" % exc})
 
             parsed = parse_run_name(folder)
+            # Model filter. Applied BEFORE the run is recorded, and before the
+            # unparsed-folder warning, so `--model` never fills the Inventory view
+            # with complaints about folders the caller deliberately excluded.
+            if models and not model_matches(
+                    (parsed or {}).get("model") or folder, models):
+                continue
             if parsed is None:
                 issues.append({"benchmark": bm, "folder": folder, "status": "unparsed",
                                "problem": "folder name does not parse (run_naming.py)"})
@@ -339,6 +401,13 @@ def main():
                     help="benchmarks to include (default: every experiments/*/pred)")
     ap.add_argument("--out", default=os.path.join(REPO_ROOT, "analysis",
                                                   "results_report.html"))
+    ap.add_argument("--model", nargs="*", default=None, metavar="NAME",
+                    help="only include runs whose model matches any NAME. Matching "
+                         "ignores case, punctuation and trailing size, so "
+                         "'qwen3_5', 'Qwen3.5' and 'qwen3.5-9b' all select "
+                         "Qwen3.5-9B. Repeatable: --model qwen3_5 gemma4")
+    ap.add_argument("--list-models", action="store_true",
+                    help="print the model tags present on disk and exit")
     ap.add_argument("--csv", action="store_true",
                     help="also write the long-form CSV next to the HTML")
     args = ap.parse_args()
@@ -350,7 +419,42 @@ def main():
         benchmarks = sorted(d for d in os.listdir(exp)
                             if os.path.isdir(os.path.join(exp, d, "pred")))
 
-    data, issues = collect(benchmarks)
+    if args.list_models:
+        seen = {}
+        for bm in benchmarks:
+            pred = os.path.join(REPO_ROOT, "experiments", bm, "pred")
+            if not os.path.isdir(pred):
+                continue
+            for folder in os.listdir(pred):
+                parsed = parse_run_name(folder) or {}
+                tag = parsed.get("model")
+                if tag:
+                    seen.setdefault(tag, set()).add(bm)
+        if not seen:
+            print("no parseable model tags found in: %s" % ", ".join(benchmarks))
+            return
+        print("model tags on disk (pass any fragment to --model):")
+        for tag in sorted(seen):
+            print("  %-32s %-14s  %s" % (tag, "[%s]" % short_model(tag),
+                                         ", ".join(sorted(seen[tag]))))
+        return
+
+    data, issues = collect(benchmarks, args.model)
+
+    # A filter that silently matches nothing produces an empty report that looks
+    # like "no results yet" rather than "you typed a name that does not exist".
+    # Say so, and show what was available.
+    if args.model and not any(b["runs"] for b in data.values()):
+        avail = sorted({r for bm in benchmarks
+                        for f in (os.listdir(os.path.join(REPO_ROOT, "experiments", bm, "pred"))
+                                  if os.path.isdir(os.path.join(REPO_ROOT, "experiments", bm, "pred")) else [])
+                        for r in [(parse_run_name(f) or {}).get("model")] if r})
+        print("--model %s matched no runs in %s." % (" ".join(args.model), ", ".join(benchmarks)))
+        if avail:
+            print("Available model tags: %s" % ", ".join(avail))
+            print("Matching ignores case and punctuation, so e.g. --model qwen3_5 "
+                  "selects Qwen3.5-9B.")
+        return
     if not data:
         sys.exit("no runs found under experiments/*/pred -- nothing to report")
 
