@@ -16,7 +16,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm, replace_qwen2_adaptive, replace_ministral3_adaptive
 from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replace_llama_andpro, replace_qwen2_andpro, replace_ministral3_andpro
 from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal, replace_qwen2_causal, replace_ministral3_causal
-from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead, replace_qwen2_lookahead, replace_ministral3_lookahead
+from causal_lookahead_snapkv.monkeypatch.hybrid_baseline_hijack import replace_hybrid_baseline
+from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead, replace_qwen2_lookahead, replace_ministral3_lookahead, replace_hybrid_lookahead
 from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
 
 # Ministral3 postdates the transformers pin (see models_ext/); registering it with
@@ -24,6 +25,62 @@ from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_l
 # every backbone transformers already knows -- Qwen2 among them -- so it runs
 # unconditionally and must run before load_model_and_tokenizer.
 from models_ext import register_extra_architectures
+
+
+def _compress_targets(model):
+    """Every config object the eviction code may read compression settings from.
+
+    config_compress() historically wrote to `model.model.config` only. That is the
+    same object the attention modules see on a flat ForCausalLM -> model -> layers
+    stack, but NOT on a multimodal one: Gemma4UnifiedTextAttention holds a
+    Gemma4UnifiedTextConfig while `model.model.config` is the top-level multimodal
+    config, so every setting landed somewhere the layers never look
+    ("'Gemma4UnifiedTextConfig' object has no attribute 'base_capacity'").
+
+    Returns the whole chain -- top-level, model-level, and any nested text_config --
+    so a write cannot miss the object that is actually read. Writing to all of them
+    is safe: they are the same values, and on a flat stack the chain collapses to
+    one object.
+    """
+    seen, out = {}, []
+    for cfg in (getattr(model, "config", None),
+                getattr(getattr(model, "model", None), "config", None)):
+        while cfg is not None and id(cfg) not in seen:
+            seen[id(cfg)] = True
+            out.append(cfg)
+            cfg = getattr(cfg, "text_config", None)
+    return out
+
+
+def _set_compress_attr(model, name, value):
+    for cfg in _compress_targets(model):
+        setattr(cfg, name, value)
+
+
+
+# The 4.44-only backbone patches (mistral/llama/qwen2/ministral3) monkeypatch
+# *FlashAttention2, which transformers 4.48 deleted. pred.py calls every replace_*
+# unconditionally, so on the transformers 5.x venv used by the hybrid-attention
+# backbones those calls raise AttributeError even though the run does not want them.
+#
+# Gate on ONE explicit capability probe rather than try/except around each call: a
+# blanket except would also swallow a genuine AttributeError on 4.44, where these
+# patches must run and a failure means something is really broken.
+def _legacy_flash_attn_stack():
+    import transformers.models.mistral.modeling_mistral as _m
+    return hasattr(_m, "MistralFlashAttention2")
+
+
+_LEGACY = _legacy_flash_attn_stack()
+
+
+def _legacy(*fns):
+    """Run the 4.44-only backbone patches, or skip them all on a 5.x stack."""
+    if not _LEGACY:
+        return
+    for fn in fns:
+        fn()
+
 
 register_extra_architectures()
 
@@ -61,7 +118,14 @@ def parse_args(args=None):
     parser.add_argument('--budget',default=1024, type=int, help="budget size for kv cache")
     parser.add_argument('--chunk_size',default=4, type=int, help="chunk size for optimization")
     parser.add_argument('--lambda_red', default=0.0, type=float, help="redundancy penalty weight for causal_forward_only's greedy chunk selection (0 disables it)")
-    parser.add_argument('--dataset_name_list', default=None, type=str, nargs='+', help="RULER sequence-length config(s) to evaluate, e.g. 4096 8192 16384")
+    parser.add_argument('--dataset_name_list', default=None, type=str, nargs='+', help="RULER sequence-length config(s) to evaluate, e.g. 4096 8192 16384 65536 131072")
+    parser.add_argument('--shard', default=os.environ.get("RULER_SHARD") or None, type=str,
+                        help="k/K: decode only rows i >= shard_base with (i - shard_base) %% K == k (see merge_shards)")
+    parser.add_argument('--shard_base', default=int(os.environ.get("RULER_SHARD_BASE", "0")), type=int,
+                        help="rows < shard_base were already decoded by the unsharded run (<len>.jsonl_tmp)")
+    parser.add_argument('--local_dataset', default=os.environ.get("RULER_LOCAL_DIR"), type=str,
+                        help="Directory of locally generated RULER configs (long_context/make_data.sh), "
+                             "read for every length the Hub dataset does not ship (anything but 4096/8192/16384)")
 
     # --- causal_lookahead (Test-Time Lookahead Causal KV Eviction) hyperparameters ---
     parser.add_argument('--num_particles', default=4, type=int, help="[causal_lookahead] M: number of sampled lookahead continuations (Eq. 4)")
@@ -112,6 +176,10 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
         input_ids = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids
 
     if input_ids.shape[1] > max_length:
+        # A RULER needle can sit anywhere, so middle truncation can delete it and the
+        # row then scores as a model failure. This must never fire on a real run --
+        # raise MAX_LENGTH instead (long_context/check_lengths.py sizes it).
+        print(f"WARNING: prompt of {input_ids.shape[1]} tokens truncated to max_length={max_length}")
         half = int(max_length / 2)
         input_ids = torch.cat([input_ids[:, :half], input_ids[:, -half:]], dim=1)
 
@@ -119,9 +187,9 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
     attention_mask = torch.ones_like(input_ids)
     return input_ids, attention_mask
 
-def get_pred(model, tokenizer, data, max_length, device, model_name_or_path, out_path, mode=None):
+def get_pred(model, tokenizer, data, max_length, device, model_name_or_path, out_path, mode=None, tmp_path=None):
     device = "cuda:0"
-    tmp_path = f"{out_path}_tmp"
+    tmp_path = tmp_path or f"{out_path}_tmp"
 
     # --- Resume: reuse rows already completed by a prior interrupted run ---
     # The _tmp file streams one JSON object per finished row (flushed each step).
@@ -131,18 +199,33 @@ def get_pred(model, tokenizer, data, max_length, device, model_name_or_path, out
     times = []
     done = 0
     if os.path.exists(tmp_path):
-        with open(tmp_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    break  # partial trailing line -> resume from here
-                preds.append(obj["pred"])
-                times.append(obj["time"])
-                done += 1
+        # Read in bytes to track where the last VALID row ends, then cut the file
+        # there. Appending after a torn line is not safe: the next row lands on the
+        # same line as the fragment, that line never parses, and every later resume
+        # stops at it -- so each new allocation re-decodes the same rows forever
+        # while the file grows. A kill mid-write is routine here (gpu_debug's 2 h
+        # wall clock lands mid-row), so the torn tail must be removed, not skipped.
+        good_end = 0
+        with open(tmp_path, "rb") as f:
+            for raw in f:
+                if not raw.endswith(b"\n"):
+                    break          # unterminated tail = torn write
+                line = raw.strip()
+                if line:
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        break      # torn/garbled line -> resume from here
+                    if done >= len(data):
+                        break
+                    preds.append(obj["pred"])
+                    times.append(obj["time"])
+                    done += 1
+                good_end += len(raw)
+        if good_end < os.path.getsize(tmp_path):
+            print(f"{tmp_path}: dropping {os.path.getsize(tmp_path) - good_end} bytes of torn tail")
+            with open(tmp_path, "r+b") as f:
+                f.truncate(good_end)
         if done:
             print(f"{tmp_path}: resuming from {done}/{len(data)} completed rows")
 
@@ -182,9 +265,13 @@ def get_pred(model, tokenizer, data, max_length, device, model_name_or_path, out
             pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
             preds.append(pred)
 
-            json.dump({"pred": pred, "answer": json_obj["answer"], "task": json_obj["task"],
-                       "length": json_obj["length"], "context_length": context_length, "time": t}, f, ensure_ascii=False)
-            f.write('\n')
+            # One write per row (not json.dump's piecewise writes + a separate "\n"),
+            # so a kill leaves at most one unterminated tail for the resume to cut.
+            row = {"pred": pred, "answer": list(json_obj["answer"]), "task": json_obj["task"],
+                   "length": json_obj["length"], "context_length": context_length, "time": t}
+            if "idx" in json_obj:          # shard rows carry their global row index
+                row["idx"] = json_obj["idx"]
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
 
             gc.collect()
@@ -192,9 +279,88 @@ def get_pred(model, tokenizer, data, max_length, device, model_name_or_path, out
 
     with open(out_path, "w", encoding="utf-8") as f:
         for json_obj, pred, t in zip(data, preds, times):
-            json.dump({"pred": pred, "answer": json_obj["answer"], "task": json_obj["task"],
-                       "length": json_obj["length"], "time": t}, f, ensure_ascii=False)
-            f.write('\n')
+            row = {"pred": pred, "answer": list(json_obj["answer"]), "task": json_obj["task"],
+                   "length": json_obj["length"], "time": t}
+            if "idx" in json_obj:
+                row["idx"] = json_obj["idx"]
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+# -----------------------------------------------------------------------------
+# Row sharding: run ONE experiment on several GPUs / memory slots at once.
+#
+# `--shard k/K --shard_base B` decodes rows B+k, B+k+K, B+k+2K, ..., i.e. every row i >= B with
+# (i - B) % K == k, into pred/<run>/<len>.shard{k}of{K}.jsonl_part (resuming from its
+# own _tmp, torn-tail safe like the unsharded path). Rows < B are the ones the
+# unsharded run already finished in <len>.jsonl_tmp, so sharding an in-flight run
+# never redoes work. Whichever shard finishes last merges everything into the
+# normal <len>.jsonl (same fields as an unsharded run), which is all eval.py reads.
+# The .jsonl_part suffix keeps eval.py's `*.jsonl` scan from reading shards.
+# -----------------------------------------------------------------------------
+def _read_rows(path, limit=None):
+    rows = []
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            for raw in f:
+                if not raw.endswith(b"\n") or (limit is not None and len(rows) >= limit):
+                    break
+                try:
+                    rows.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    break
+    return rows
+
+
+def merge_shards(run_dir, length, K, base, n_rows):
+    """Write <len>.jsonl once the unsharded prefix and all K shard parts exist."""
+    out_path = os.path.join(run_dir, f"{length}.jsonl")
+    parts = [os.path.join(run_dir, f"{length}.shard{k}of{K}.jsonl_part") for k in range(K)]
+    missing = [p for p in parts if not os.path.exists(p)]
+    if missing:
+        print(f"merge: waiting for {len(missing)}/{K} shard(s) of {run_dir}/{length}")
+        return False
+    prefix = _read_rows(os.path.join(run_dir, f"{length}.jsonl_tmp"), limit=base)
+    if len(prefix) < base:
+        raise RuntimeError(f"merge: unsharded prefix has {len(prefix)} rows, expected {base}")
+    by_idx = {i: r for i, r in enumerate(prefix)}
+    for p in parts:
+        for r in _read_rows(p):
+            by_idx[r["idx"]] = r
+    if sorted(by_idx) != list(range(n_rows)):
+        raise RuntimeError(f"merge: have {len(by_idx)} distinct rows, expected 0..{n_rows - 1}")
+    tmp = out_path + f".merge{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for i in range(n_rows):
+            r = by_idx[i]
+            f.write(json.dumps({"pred": r["pred"], "answer": r["answer"], "task": r["task"],
+                                "length": r["length"], "time": r["time"]}, ensure_ascii=False) + "\n")
+    os.replace(tmp, out_path)       # atomic: two shards finishing together both write the same file
+    print(f"merge: wrote {out_path} ({n_rows} rows from prefix {base} + {K} shards)")
+    return True
+
+# Sequence-length configs the Hub dataset (simonjegou/ruler) actually ships.
+HUB_LENGTHS = {"4096", "8192", "16384"}
+
+
+def load_ruler_config(hub_dataset, local_dir, length):
+    """One RULER length config as a list of rows.
+
+    4096/8192/16384 come from the Hub exactly as before. Longer configs do not
+    exist there; they are generated with NVIDIA RULER by long_context/make_data.sh
+    into `local_dir`, in the same schema and by the same generator revision, seed
+    and tokenizer (long_context/validate.py checks this against the Hub rows).
+    Read as parquet directly: no dataset script or network involved.
+    """
+    if length in HUB_LENGTHS:
+        return load_dataset(hub_dataset, length, split='test')
+    path = os.path.join(local_dir or "", length, "test-00000-of-00001.parquet")
+    if not local_dir or not os.path.exists(path):
+        raise FileNotFoundError(
+            f"RULER config {length} is not on the Hub ({sorted(HUB_LENGTHS, key=int)}) and no local "
+            f"copy was found at {path!r}. Generate it with "
+            f"experiments/RULER/long_context/make_data.sh and set RULER_LOCAL_DIR.")
+    return load_dataset("parquet", data_files={"test": path}, split="test")
+
 
 def seed_everything(seed):
     torch.manual_seed(seed)
@@ -205,6 +371,47 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
+def _attn_impl(model_path=None):
+    """Which attention kernel to ask transformers to build the model with.
+
+    "flash_attention_2" when flash-attn is genuinely importable AND is not the
+    import-only stub, AND the model's head_dim is inside what the kernel supports
+    through transformers' autograd-wrapped entry point.
+
+    head_dim 256 is the trap: flash-attn 2.7.4 accepts it for a bare forward, but
+    transformers routes through an autograd custom op whose backward is limited to
+    192, and the guard fires at forward time --
+        RuntimeError: FlashAttention forward only supports head dimension at most 256
+    Gemma 4 and Qwen3.5 both have head_dim 256, and Gemma 4's *sliding* layers hit
+    it first because they fall through to the stock forward.
+
+    Falling back to "sdpa" is not a degradation of the method: the prefill and
+    lookahead phases dispatch through
+    ALL_ATTENTION_FUNCTIONS.get_interface(config._attn_implementation, ...), so the
+    kernel choice is transparent there, and the post-eviction ragged decode calls
+    flash_attn_varlen_func directly (see _varlen_attend) regardless of this setting.
+    """
+    try:
+        import flash_attn
+        if getattr(flash_attn, "__lorekv_stub__", False):
+            return "sdpa"
+    except Exception:
+        return "sdpa"
+    if model_path:
+        try:
+            from transformers import AutoConfig
+            cfg = AutoConfig.from_pretrained(model_path)
+            tcfg = getattr(cfg, "text_config", None) or cfg
+            hd = tcfg.to_dict().get("head_dim")
+            if isinstance(hd, (list, tuple)):
+                hd = max(hd)
+            if hd and int(hd) > 192:
+                return "sdpa"
+        except Exception:
+            pass
+    return "flash_attention_2"
+
+
 def load_model_and_tokenizer(path):
     tokenizer = AutoTokenizer.from_pretrained(path,
                                               trust_remote_code=True,
@@ -214,7 +421,7 @@ def load_model_and_tokenizer(path):
                                              torch_dtype=torch.bfloat16,
                                              # TODO: hard code
                                              device_map="cuda:0",
-                                             attn_implementation="flash_attention_2",
+                                             attn_implementation=_attn_impl(path),
                                              trust_remote_code=True,
                                              )
     model = model.eval()
@@ -240,87 +447,83 @@ if __name__ == '__main__':
 
     if args.mode == "ada":
         print("Ada mode")
-        replace_mistral_adaptive()
-        replace_llama_adaptive()
-        replace_qwen2_adaptive()
-        replace_ministral3_adaptive()
+        _legacy(replace_mistral_adaptive, replace_llama_adaptive, replace_qwen2_adaptive)
+        replace_hybrid_baseline('adaptive')
+        _legacy(replace_ministral3_adaptive)
+        replace_hybrid_baseline('adaptive')
     elif args.mode == "andpro":
         print("Andpro mode")
-        replace_mistral_andpro()
-        replace_llama_andpro()
-        replace_qwen2_andpro()
-        replace_ministral3_andpro()
+        _legacy(replace_mistral_andpro, replace_llama_andpro, replace_qwen2_andpro)
+        replace_hybrid_baseline('andpro')
+        _legacy(replace_ministral3_andpro)
+        replace_hybrid_baseline('andpro')
     elif args.mode == "causal_forward_only":
         print("Training-Free Causal AnDPro mode: causal_forward_only")
-        replace_mistral_causal()
-        replace_llama_causal()
-        replace_qwen2_causal()
-        replace_ministral3_causal()
+        _legacy(replace_mistral_causal, replace_llama_causal, replace_qwen2_causal, replace_ministral3_causal)
     elif args.mode == "causal_lookahead":
         print("Training-Free Test-Time Lookahead Causal KV Eviction mode: causal_lookahead")
-        replace_mistral_lookahead()
-        replace_llama_lookahead()
-        replace_qwen2_lookahead()
-        replace_ministral3_lookahead()
+        _legacy(replace_mistral_lookahead, replace_llama_lookahead, replace_qwen2_lookahead)
+        replace_hybrid_lookahead()
+        _legacy(replace_ministral3_lookahead)
+        replace_hybrid_lookahead()
     elif args.mode == "fix":
         print("Fix mode")
-        replace_mistral_fixed()
-        replace_llama_fixed()
+        _legacy(replace_mistral_fixed, replace_llama_fixed)
     elif args.mode == "slm":
         print("Slm mode")
-        replace_mistral_slm()
-        replace_llama_slm()
+        _legacy(replace_mistral_slm, replace_llama_slm)
     elif args.mode == "critical":
         print("Criticalkv mode")
-        replace_mistral_adaptive()
-        replace_llama_adaptive()
-        replace_qwen2_adaptive()
-        replace_ministral3_adaptive()
+        _legacy(replace_mistral_adaptive, replace_llama_adaptive, replace_qwen2_adaptive)
+        replace_hybrid_baseline('adaptive')
+        _legacy(replace_ministral3_adaptive)
+        replace_hybrid_baseline('adaptive')
     else:
         print("Base mode")
 
     # config hyperparameters
+
     def config_compress(model, window_size=32, base_capacity=1024, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, beta = 20, skip=0, gqa_support=False,gqa_func="mean",
                         chunk_size=4, mode="andpro", lambda_red=0.0,
                         num_particles=4, lookahead_len=8, lookahead_temperature=1.0, particle_beta=1.0, particle_gamma=0.0, lambda_d=0.0, normalize_typicality=False,
                         robust_alpha=0.5, robust_topk_beta=0.5, lambda_lookahead=1.0, lambda_k=0.0, lambda_v=0.0, budget_tau=1.0,
                         score_objective="projected"):
-        model.model.config.window_size = window_size
-        model.model.config.base_capacity = base_capacity
-        model.model.config.kernel_size = kernel_size
+        _set_compress_attr(model, "window_size", window_size)
+        _set_compress_attr(model, "base_capacity", base_capacity)
+        _set_compress_attr(model, "kernel_size", kernel_size)
 
-        model.model.config.pooling = pooling
-        model.model.config.floor_alpha = floor_alpha
-        model.model.config.skip = skip
-        model.model.config.normalize = None
+        _set_compress_attr(model, "pooling", pooling)
+        _set_compress_attr(model, "floor_alpha", floor_alpha)
+        _set_compress_attr(model, "skip", skip)
+        _set_compress_attr(model, "normalize", None)
 
-        model.model.config.pyram_mode = pyram_mode
-        model.model.config.pyram_beta = beta
+        _set_compress_attr(model, "pyram_mode", pyram_mode)
+        _set_compress_attr(model, "pyram_beta", beta)
 
-        model.model.config.gqa_support = gqa_support
-        model.model.config.gqa_func = gqa_func
+        _set_compress_attr(model, "gqa_support", gqa_support)
+        _set_compress_attr(model, "gqa_func", gqa_func)
 
-        model.model.config.chunk_size = chunk_size
-        model.model.config.mode = mode
-        model.model.config.lambda_red = lambda_red
+        _set_compress_attr(model, "chunk_size", chunk_size)
+        _set_compress_attr(model, "mode", mode)
+        _set_compress_attr(model, "lambda_red", lambda_red)
 
         # causal_lookahead (Test-Time Lookahead Causal KV Eviction) hyperparameters.
-        model.model.config.lookahead_phase = "collect"
-        model.model.config.lookahead_particle_idx = 0
-        model.model.config.num_particles = num_particles
-        model.model.config.lookahead_len = lookahead_len
-        model.model.config.lookahead_temperature = lookahead_temperature
-        model.model.config.particle_beta = particle_beta
-        model.model.config.particle_gamma = particle_gamma
-        model.model.config.lambda_d = lambda_d
-        model.model.config.normalize_typicality = normalize_typicality
-        model.model.config.robust_alpha = robust_alpha
-        model.model.config.robust_topk_beta = robust_topk_beta
-        model.model.config.lambda_lookahead = lambda_lookahead
-        model.model.config.lambda_k = lambda_k
-        model.model.config.lambda_v = lambda_v
-        model.model.config.budget_tau = budget_tau
-        model.model.config.score_objective = score_objective
+        _set_compress_attr(model, "lookahead_phase", "collect")
+        _set_compress_attr(model, "lookahead_particle_idx", 0)
+        _set_compress_attr(model, "num_particles", num_particles)
+        _set_compress_attr(model, "lookahead_len", lookahead_len)
+        _set_compress_attr(model, "lookahead_temperature", lookahead_temperature)
+        _set_compress_attr(model, "particle_beta", particle_beta)
+        _set_compress_attr(model, "particle_gamma", particle_gamma)
+        _set_compress_attr(model, "lambda_d", lambda_d)
+        _set_compress_attr(model, "normalize_typicality", normalize_typicality)
+        _set_compress_attr(model, "robust_alpha", robust_alpha)
+        _set_compress_attr(model, "robust_topk_beta", robust_topk_beta)
+        _set_compress_attr(model, "lambda_lookahead", lambda_lookahead)
+        _set_compress_attr(model, "lambda_k", lambda_k)
+        _set_compress_attr(model, "lambda_v", lambda_v)
+        _set_compress_attr(model, "budget_tau", budget_tau)
+        _set_compress_attr(model, "score_objective", score_objective)
 
         return model
 
@@ -337,7 +540,7 @@ if __name__ == '__main__':
                     score_objective=args.score_objective)
 
     for length in length_configs:
-        data = load_dataset(args.dataset, str(length), split='test')
+        data = load_ruler_config(args.dataset, args.local_dataset, str(length))
         if not os.path.exists(f"pred/{args.out_name}"):
             os.makedirs(f"pred/{args.out_name}")
         out_path = f"pred/{args.out_name}/{length}.jsonl"
@@ -348,6 +551,18 @@ if __name__ == '__main__':
 
         # attach the config length to each row so it lands in the output jsonl
         data_all = [{**data_sample, "length": int(length)} for data_sample in data]
+        if args.shard:
+            k, K = (int(x) for x in args.shard.split("/"))
+            run_dir = f"pred/{args.out_name}"
+            part = f"{run_dir}/{length}.shard{k}of{K}.jsonl_part"
+            if not os.path.exists(part):
+                rows = [{**data_all[i], "idx": i} for i in range(args.shard_base, len(data_all))
+                        if (i - args.shard_base) % K == k]
+                print(f"shard {k}/{K} of {run_dir}/{length}: {len(rows)} rows from base {args.shard_base}")
+                get_pred(model, tokenizer, rows, max_length, device, model_name_or_path, part,
+                         mode=args.mode, tmp_path=part + "_tmp")
+            merge_shards(run_dir, length, K, args.shard_base, len(data_all))
+            continue
         torch.cuda.synchronize()
         t = time.time()
         get_pred(model, tokenizer, data_all, max_length, device, model_name_or_path, out_path, mode=args.mode)

@@ -20,7 +20,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive, replace_llama_adaptive, replace_llama_fixed, replace_mistral_fixed, replace_mistral_slm, replace_llama_slm, replace_qwen2_adaptive, replace_ministral3_adaptive
 from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro, replace_llama_andpro, replace_qwen2_andpro, replace_ministral3_andpro
 from causal_andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_causal, replace_llama_causal, replace_qwen2_causal, replace_ministral3_causal
-from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead, replace_qwen2_lookahead, replace_ministral3_lookahead
+from causal_lookahead_snapkv.monkeypatch.hybrid_baseline_hijack import replace_hybrid_baseline
+from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead, replace_llama_lookahead, replace_qwen2_lookahead, replace_ministral3_lookahead, replace_hybrid_lookahead
 from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
 
 # Ministral3 postdates the transformers pin (see models_ext/); registering it with
@@ -28,6 +29,62 @@ from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_l
 # every backbone transformers already knows -- Qwen2 among them -- so it runs
 # unconditionally and must run before load_model_and_tokenizer.
 from models_ext import register_extra_architectures
+
+
+def _compress_targets(model):
+    """Every config object the eviction code may read compression settings from.
+
+    config_compress() historically wrote to `model.model.config` only. That is the
+    same object the attention modules see on a flat ForCausalLM -> model -> layers
+    stack, but NOT on a multimodal one: Gemma4UnifiedTextAttention holds a
+    Gemma4UnifiedTextConfig while `model.model.config` is the top-level multimodal
+    config, so every setting landed somewhere the layers never look
+    ("'Gemma4UnifiedTextConfig' object has no attribute 'base_capacity'").
+
+    Returns the whole chain -- top-level, model-level, and any nested text_config --
+    so a write cannot miss the object that is actually read. Writing to all of them
+    is safe: they are the same values, and on a flat stack the chain collapses to
+    one object.
+    """
+    seen, out = {}, []
+    for cfg in (getattr(model, "config", None),
+                getattr(getattr(model, "model", None), "config", None)):
+        while cfg is not None and id(cfg) not in seen:
+            seen[id(cfg)] = True
+            out.append(cfg)
+            cfg = getattr(cfg, "text_config", None)
+    return out
+
+
+def _set_compress_attr(model, name, value):
+    for cfg in _compress_targets(model):
+        setattr(cfg, name, value)
+
+
+
+# The 4.44-only backbone patches (mistral/llama/qwen2/ministral3) monkeypatch
+# *FlashAttention2, which transformers 4.48 deleted. pred.py calls every replace_*
+# unconditionally, so on the transformers 5.x venv used by the hybrid-attention
+# backbones those calls raise AttributeError even though the run does not want them.
+#
+# Gate on ONE explicit capability probe rather than try/except around each call: a
+# blanket except would also swallow a genuine AttributeError on 4.44, where these
+# patches must run and a failure means something is really broken.
+def _legacy_flash_attn_stack():
+    import transformers.models.mistral.modeling_mistral as _m
+    return hasattr(_m, "MistralFlashAttention2")
+
+
+_LEGACY = _legacy_flash_attn_stack()
+
+
+def _legacy(*fns):
+    """Run the 4.44-only backbone patches, or skip them all on a 5.x stack."""
+    if not _LEGACY:
+        return
+    for fn in fns:
+        fn()
+
 
 register_extra_architectures()
 
@@ -302,6 +359,47 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
+def _attn_impl(model_path=None):
+    """Which attention kernel to ask transformers to build the model with.
+
+    "flash_attention_2" when flash-attn is genuinely importable AND is not the
+    import-only stub, AND the model's head_dim is inside what the kernel supports
+    through transformers' autograd-wrapped entry point.
+
+    head_dim 256 is the trap: flash-attn 2.7.4 accepts it for a bare forward, but
+    transformers routes through an autograd custom op whose backward is limited to
+    192, and the guard fires at forward time --
+        RuntimeError: FlashAttention forward only supports head dimension at most 256
+    Gemma 4 and Qwen3.5 both have head_dim 256, and Gemma 4's *sliding* layers hit
+    it first because they fall through to the stock forward.
+
+    Falling back to "sdpa" is not a degradation of the method: the prefill and
+    lookahead phases dispatch through
+    ALL_ATTENTION_FUNCTIONS.get_interface(config._attn_implementation, ...), so the
+    kernel choice is transparent there, and the post-eviction ragged decode calls
+    flash_attn_varlen_func directly (see _varlen_attend) regardless of this setting.
+    """
+    try:
+        import flash_attn
+        if getattr(flash_attn, "__lorekv_stub__", False):
+            return "sdpa"
+    except Exception:
+        return "sdpa"
+    if model_path:
+        try:
+            from transformers import AutoConfig
+            cfg = AutoConfig.from_pretrained(model_path)
+            tcfg = getattr(cfg, "text_config", None) or cfg
+            hd = tcfg.to_dict().get("head_dim")
+            if isinstance(hd, (list, tuple)):
+                hd = max(hd)
+            if hd and int(hd) > 192:
+                return "sdpa"
+        except Exception:
+            pass
+    return "flash_attention_2"
+
+
 def load_model_and_tokenizer(path):
     tokenizer = AutoTokenizer.from_pretrained(path,
                                               trust_remote_code=True,
@@ -311,7 +409,7 @@ def load_model_and_tokenizer(path):
                                              torch_dtype=torch.bfloat16,
                                              # TODO: hard code
                                              device_map="cuda:0",
-                                             attn_implementation="flash_attention_2",
+                                             attn_implementation=_attn_impl(path),
                                              trust_remote_code=True,
                                              )
     model = model.eval()
@@ -360,87 +458,77 @@ if __name__ == '__main__':
 
     if args.mode == "ada":
         print("Ada mode")
-        replace_mistral_adaptive()
-        replace_llama_adaptive()
-        replace_qwen2_adaptive()
-        replace_ministral3_adaptive()
+        _legacy(replace_mistral_adaptive, replace_llama_adaptive, replace_qwen2_adaptive, replace_ministral3_adaptive)
+        replace_hybrid_baseline('adaptive')
     elif args.mode == "andpro":
         print("Andpro mode")
-        replace_mistral_andpro()
-        replace_llama_andpro()
-        replace_qwen2_andpro()
-        replace_ministral3_andpro()
+        _legacy(replace_mistral_andpro, replace_llama_andpro, replace_qwen2_andpro, replace_ministral3_andpro)
+        replace_hybrid_baseline('andpro')
     elif args.mode == "causal_forward_only":
         print("Training-Free Causal AnDPro mode: causal_forward_only")
-        replace_mistral_causal()
-        replace_llama_causal()
-        replace_qwen2_causal()
-        replace_ministral3_causal()
+        _legacy(replace_mistral_causal, replace_llama_causal, replace_qwen2_causal, replace_ministral3_causal)
     elif args.mode == "causal_lookahead":
         print("Training-Free Test-Time Lookahead Causal KV Eviction mode: causal_lookahead")
-        replace_mistral_lookahead()
-        replace_llama_lookahead()
-        replace_qwen2_lookahead()
-        replace_ministral3_lookahead()
+        _legacy(replace_mistral_lookahead, replace_llama_lookahead, replace_qwen2_lookahead, replace_ministral3_lookahead)
+        # Hybrid-attention backbones (Qwen3.5, Gemma 4). No-op unless this venv's
+        # transformers actually ships those architectures -- see the docstring.
+        replace_hybrid_lookahead()
     elif args.mode == "fix":
         print("Fix mode")
-        replace_mistral_fixed()
-        replace_llama_fixed()
+        _legacy(replace_mistral_fixed, replace_llama_fixed)
     elif args.mode == "slm":
         print("Slm mode")
-        replace_mistral_slm()
-        replace_llama_slm()
+        _legacy(replace_mistral_slm, replace_llama_slm)
     elif args.mode == "critical":
         print("Criticalkv mode")
-        replace_mistral_adaptive()
-        replace_llama_adaptive()
-        replace_qwen2_adaptive()
-        replace_ministral3_adaptive()
+        _legacy(replace_mistral_adaptive, replace_llama_adaptive, replace_qwen2_adaptive, replace_ministral3_adaptive)
+        replace_hybrid_baseline('adaptive')
     else:
         print("Base mode")
 
     # config hyperparameters
+
     def config_compress(model, window_size=32, base_capacity=1024, kernel_size=7, pooling="maxpool", floor_alpha=0.5, pyram_mode = False, beta = 20, skip=0, gqa_support=False,gqa_func="mean",
                         chunk_size=4, mode="andpro", lambda_red=0.0,
                         num_particles=4, lookahead_len=8, lookahead_temperature=1.0, particle_beta=1.0, particle_gamma=0.0, lambda_d=0.0, normalize_typicality=False,
                         robust_alpha=0.5, robust_topk_beta=0.5, lambda_lookahead=1.0, lambda_k=0.0, lambda_v=0.0, budget_tau=1.0,
                         score_objective="projected"):
-        model.model.config.window_size = window_size
-        model.model.config.base_capacity = base_capacity
-        model.model.config.kernel_size = kernel_size
+        _set_compress_attr(model, "window_size", window_size)
+        _set_compress_attr(model, "base_capacity", base_capacity)
+        _set_compress_attr(model, "kernel_size", kernel_size)
 
-        model.model.config.pooling = pooling
-        model.model.config.floor_alpha = floor_alpha
-        model.model.config.skip = skip
-        model.model.config.normalize = None
+        _set_compress_attr(model, "pooling", pooling)
+        _set_compress_attr(model, "floor_alpha", floor_alpha)
+        _set_compress_attr(model, "skip", skip)
+        _set_compress_attr(model, "normalize", None)
 
-        model.model.config.pyram_mode = pyram_mode
-        model.model.config.pyram_beta = beta
+        _set_compress_attr(model, "pyram_mode", pyram_mode)
+        _set_compress_attr(model, "pyram_beta", beta)
 
-        model.model.config.gqa_support = gqa_support
-        model.model.config.gqa_func = gqa_func
+        _set_compress_attr(model, "gqa_support", gqa_support)
+        _set_compress_attr(model, "gqa_func", gqa_func)
 
-        model.model.config.chunk_size = chunk_size
-        model.model.config.mode = mode
-        model.model.config.lambda_red = lambda_red
+        _set_compress_attr(model, "chunk_size", chunk_size)
+        _set_compress_attr(model, "mode", mode)
+        _set_compress_attr(model, "lambda_red", lambda_red)
 
         # causal_lookahead (Test-Time Lookahead Causal KV Eviction) hyperparameters.
-        model.model.config.lookahead_phase = "collect"
-        model.model.config.lookahead_particle_idx = 0
-        model.model.config.num_particles = num_particles
-        model.model.config.lookahead_len = lookahead_len
-        model.model.config.lookahead_temperature = lookahead_temperature
-        model.model.config.particle_beta = particle_beta
-        model.model.config.particle_gamma = particle_gamma
-        model.model.config.lambda_d = lambda_d
-        model.model.config.normalize_typicality = normalize_typicality
-        model.model.config.robust_alpha = robust_alpha
-        model.model.config.robust_topk_beta = robust_topk_beta
-        model.model.config.lambda_lookahead = lambda_lookahead
-        model.model.config.lambda_k = lambda_k
-        model.model.config.lambda_v = lambda_v
-        model.model.config.budget_tau = budget_tau
-        model.model.config.score_objective = score_objective
+        _set_compress_attr(model, "lookahead_phase", "collect")
+        _set_compress_attr(model, "lookahead_particle_idx", 0)
+        _set_compress_attr(model, "num_particles", num_particles)
+        _set_compress_attr(model, "lookahead_len", lookahead_len)
+        _set_compress_attr(model, "lookahead_temperature", lookahead_temperature)
+        _set_compress_attr(model, "particle_beta", particle_beta)
+        _set_compress_attr(model, "particle_gamma", particle_gamma)
+        _set_compress_attr(model, "lambda_d", lambda_d)
+        _set_compress_attr(model, "normalize_typicality", normalize_typicality)
+        _set_compress_attr(model, "robust_alpha", robust_alpha)
+        _set_compress_attr(model, "robust_topk_beta", robust_topk_beta)
+        _set_compress_attr(model, "lambda_lookahead", lambda_lookahead)
+        _set_compress_attr(model, "lambda_k", lambda_k)
+        _set_compress_attr(model, "lambda_v", lambda_v)
+        _set_compress_attr(model, "budget_tau", budget_tau)
+        _set_compress_attr(model, "score_objective", score_objective)
 
         return model
 

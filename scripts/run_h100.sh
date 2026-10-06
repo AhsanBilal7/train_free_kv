@@ -169,7 +169,8 @@ echo "Running with BUDGET(s): $BUDGET"
 #   LongBench -> sub-tasks: qasper narrativeqa multifieldqa_en hotpotqa 2wikimqa
 #                musique trec triviaqa samsum gov_report qmsum multi_news
 #                passage_count passage_retrieval_en lcc repobench-p
-#   RULER     -> sequence-length configs: 4096 8192 16384
+#   RULER     -> sequence-length configs: 4096 8192 16384 (Hub), plus
+#                65536 131072 built locally by experiments/RULER/long_context/make_data.sh
 #   NIAH      -> target context lengths (tokens): 4096 8192 16384 32768
 #                (needle depths are a separate sweep: set NIAH_DEPTHS;
 #                 single vs. multi needle: set NIAH_TASK=single|multi)

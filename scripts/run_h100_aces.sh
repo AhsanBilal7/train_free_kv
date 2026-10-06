@@ -274,6 +274,21 @@ done
 # --- Stage 1 on RULER ---
 # for cell in uniform typ logp ent ent-only; do cfg="lorekv-$cell-unif-topk"; echo "===== Running $cfg ====="; EXPERIMENT=RULER CONFIG_FILE="$REPO_ROOT/config/$cfg.conf" BUDGET=128 bash "$REPO_ROOT/scripts/run_h100.sh"; done
 
+# --- RULER long context (64K / 128K), Llama-3.1-8B, B=128 ---
+#     The Hub dataset stops at 16K. Build the long configs once (CPU only; exact
+#     same RULER revision / seed / tokenizer as the Hub 4K-16K, checked row-for-row
+#     by long_context/validate.py):
+#       bash experiments/RULER/long_context/make_data.sh setup            # login node
+#       sbatch -p cpu -t 12:00:00 --ntasks=1 -c 16 --mem=64G <wrapper running:>
+#              bash experiments/RULER/long_context/make_data.sh generate 65536 131072
+#     They land in $SCRATCH/ruler_long (RULER_LOCAL_DIR). Then one GPU per
+#     (method, length) -- the four methods compared are LORE-KV/E, AnDPro,
+#     CriticalKV, LORE-KV/D. MAX_LENGTH must cover the prompt (~65.6K / ~131K
+#     tokens) or pred.py middle-truncates it and can cut the needle out:
+# for L in 65536 131072; do for cfg in lorekv-ent-unif-topk-llama andpro-llama critical-llama lorekv-dis-unif-topk-llama; do echo "===== $cfg @ $L ====="; EXPERIMENT=RULER CONFIG_FILE="$cfg" BUDGET=128 DATASET_NAME_LIST="$L" MAX_LENGTH=131072 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True sbatch --gres=gpu:h100:1 scripts/run_h100_aces.sh; done; done
+#     Interim, task-balanced scores while they run (rows are stored round-robin by task):
+#       cd experiments/RULER && python long_context/progress.py --filter llama
+
 # --- Stage 1 on Llama ---
 # for cell in uniform typ logp ent ent-only; do cfg="lorekv-$cell-unif-topk-llama"; echo "===== Running $cfg ====="; EXPERIMENT=LongBench CONFIG_FILE="$REPO_ROOT/config/$cfg.conf" BUDGET=128 bash "$REPO_ROOT/scripts/run_h100.sh"; done
 
@@ -356,3 +371,7 @@ done
 
 # EXPERIMENT=LongBench CONFIG_FILE=lorekv-obj-attn BUDGET="128 256 512 1024" sbatch scripts/run_h100_aces.sh
 # EXPERIMENT=LongBench CONFIG_FILE=lorekv-obj-unproj BUDGET="128 256 512 1024" sbatch scripts/run_h100_aces.sh
+
+# EXPERIMENT=LongBench CONFIG_FILE=lorekv-dis-unif-topk BUDGET="128 256 512 1024" sbatch scripts/run_h100_aces.sh
+# EXPERIMENT=LongBench CONFIG_FILE=lorekv-ent-unif-topk BUDGET="128 256 512 1024" sbatch scripts/run_h100_aces.sh
+

@@ -34,6 +34,15 @@ fall back to `b<beta>g<gamma>lD<lambdaD>`, which is still unique and parseable.
 
 Other modes (andpro / critical / causal_forward_only) keep their existing
 `<mode>_<model-tag>_<B>_chunk_<cs>_red_<red>` scheme; both are parsed.
+
+A `causal_lookahead` run can also override just the identity prefix (RUN_NAME_PREFIX
+in a config / env, --name-prefix here), so a run whose scoring criterion reads as a
+different method's name -- e.g. config/andpro-compute-eq.conf, which is AnDPro's
+projected-perturbation score with omega_m = 1/M weighting, run on LORE-KV's own
+M x T lookahead queries -- writes to a folder that says so (`andpro-compute-eq_B_...`)
+instead of the `lorekv-uniform-unif-topk_B_...` its numeric params would otherwise
+produce. See CUSTOM_PREFIXES for the fixed coefficients such a prefix maps back to
+for parsing.
 """
 import argparse
 import re
@@ -49,6 +58,16 @@ CELLS = {
     (1.0, 0.0, 0.3): "typ-dis",    # disagreement INSTEAD of entropy
 }
 CELL_COEFFS = {v: k for k, v in CELLS.items()}
+
+# name_prefix -> (beta, gamma, lambda_d, tau, lambda_k, lambda_v) the prefix stands
+# in for. Registered here so parse_run_name can recover the run's actual numeric
+# identity from a folder written with an overridden prefix (build_run_name's
+# name_prefix kwarg / RUN_NAME_PREFIX), the same way it does for the auto-derived
+# `lorekv-...` identity.
+CUSTOM_PREFIXES = {
+    # config/andpro-compute-eq.conf: uniform cell (omega_m = 1/M), unif budgets, top-K.
+    "andpro-compute-eq": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+}
 
 # Model tag -> short suffix. A tag that extends a known base keeps its remainder,
 # so the three-seed runs (MODEL_TAG=Mistral-7B-Instruct-v0.2-s0) become '-s0'.
@@ -132,10 +151,15 @@ def build_run_name(*, mode, model_tag, budget, chunk_size,
                    lookahead_temperature=None, beta=None, gamma=None, lambda_d=None,
                    normalize_typicality=None, robust_alpha=None, robust_topk_beta=None,
                    lambda_k=None, lambda_v=None, budget_tau=None, lambda_red=None,
-                   score_objective=None):
+                   score_objective=None, name_prefix=None):
     if mode != "causal_lookahead":
         return f"{mode}_{model_tag}_{budget}_chunk_{chunk_size}_red_{lambda_red}"
-    ident = config_name(beta, gamma, lambda_d, budget_tau, lambda_k, lambda_v, model_tag)
+    # RUN_NAME_PREFIX / --name-prefix: override just the identity string. Everything
+    # else -- the numeric tail, obj suffix -- is unchanged, so the folder still
+    # encodes exactly what was run; only the leading label differs from what the
+    # numbers would otherwise derive (see CUSTOM_PREFIXES / module docstring).
+    ident = (name_prefix + model_suffix(model_tag)) if name_prefix else \
+        config_name(beta, gamma, lambda_d, budget_tau, lambda_k, lambda_v, model_tag)
     name = (f"{ident}"
             f"_B_{budget}_chunk_{chunk_size}"
             f"_M_{num_particles}_T_{lookahead_len}"
@@ -183,6 +207,26 @@ def parse_run_name(name):
     so a table can mix old and new folders without special-casing.
     """
     name = name[len("multi_"):] if name.startswith("multi_") else name
+
+    for prefix, (b, g, ld, tau, lk, lv) in CUSTOM_PREFIXES.items():
+        if name == prefix or name.startswith(prefix + "-") or name.startswith(prefix + "_"):
+            rest = name[len(prefix):]
+            model = MODEL_BASES[0][0]  # default Mistral; a model suffix (e.g. '-llama')
+            for base, short in MODEL_BASES[1:]:  # would sit right after the prefix
+                if short and rest.startswith(short):
+                    model, rest = base, rest[len(short):]
+                    break
+            _, _, tail = rest.partition("_")
+            p = _pairs(tail)
+            out = {"mode": "causal_lookahead", "model": model,
+                   "cell": cell_name(b, g, ld), "brule": budget_rule_name(tau),
+                   "sel": selection_name(lk, lv),
+                   "b": b, "g": g, "lD": ld, "tau": tau, "lK": lk, "lV": lv,
+                   "budget": p.get("B"), "chunk": p.get("chunk")}
+            for k in ("M", "T", "lL", "lT", "nrm", "alpha", "kappa"):
+                out[k] = p.get(k)
+            out["obj"] = p.get("obj", "projected")
+            return out
 
     if name.startswith("lorekv-"):
         ident, _, tail = name.partition("_")
@@ -274,6 +318,8 @@ def main():
     ap.add_argument("--lambda-k"); ap.add_argument("--lambda-v")
     ap.add_argument("--budget-tau"); ap.add_argument("--lambda-red")
     ap.add_argument("--score-objective")
+    ap.add_argument("--name-prefix", help="Override the identity string (RUN_NAME_PREFIX); "
+                     "see CUSTOM_PREFIXES for how it round-trips through parse_run_name.")
     a = ap.parse_args()
     print(build_run_name(
         mode=a.mode, model_tag=a.model_tag, budget=a.budget, chunk_size=a.chunk_size,
@@ -283,7 +329,8 @@ def main():
         normalize_typicality=a.normalize_typicality,
         robust_alpha=a.robust_alpha, robust_topk_beta=a.robust_topk_beta,
         lambda_k=a.lambda_k, lambda_v=a.lambda_v, budget_tau=a.budget_tau,
-        lambda_red=a.lambda_red, score_objective=a.score_objective))
+        lambda_red=a.lambda_red, score_objective=a.score_objective,
+        name_prefix=a.name_prefix))
 
 
 if __name__ == "__main__":

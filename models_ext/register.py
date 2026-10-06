@@ -8,7 +8,12 @@ transformers already knows, so it is safe to call unconditionally at import time
 """
 
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-from transformers.models.llama.tokenization_llama_fast import LlamaTokenizerFast
+# Import from the package root, not transformers.models.llama.tokenization_llama_fast:
+# transformers 5.x removed that submodule path, and models_ext is imported
+# unconditionally by every experiments/*/pred.py -- so the deep path made the whole
+# run unimportable on the hybrid (5.x) venv. The root re-export exists in both 4.44
+# and 5.x.
+from transformers import LlamaTokenizerFast
 
 from models_ext.configuration_ministral3 import Ministral3Config
 from models_ext.modeling_ministral3 import Ministral3ForCausalLM

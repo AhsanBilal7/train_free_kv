@@ -39,6 +39,10 @@ def score_length_file(path):
     metrics = calculate_metrics(df)  # {task: {"string_match": score} | None}
     return {task: (m["string_match"] if m else None) for task, m in metrics.items()}
 
+# The Hub configs; see the note on the overall average below.
+STANDARD_LENGTHS = {"4096", "8192", "16384"}
+
+
 def mean(values):
     vals = [v for v in values if v is not None]
     return round(sum(vals) / len(vals), 2) if vals else None
@@ -65,8 +69,14 @@ if __name__ == '__main__':
             per_task["average"] = mean(per_task.values())
             scores[length] = per_task
 
-        # overall = mean over the per-length averages
-        scores["average"] = mean([scores[l]["average"] for l in scores])
+        # overall = mean over the per-length averages of the STANDARD lengths only.
+        # The paper's RULER "Avg." is over 4K/8K/16K; the 64K/128K configs are added
+        # to the same run folders (same method, same hyperparameters), and letting
+        # them into this mean would silently change every published average the
+        # moment a long-context file lands. They are reported per length instead.
+        # A folder with no standard length at all falls back to all its lengths.
+        std = [l for l in scores if l in STANDARD_LENGTHS]
+        scores["average"] = mean([scores[l]["average"] for l in (std or list(scores))])
 
         out_path = os.path.join(run_path, "result.json")
         with open(out_path, "w") as f:
@@ -75,5 +85,5 @@ if __name__ == '__main__':
         print(f"\n=== {run} ===")
         for length in [k for k in scores if k != "average"]:
             print(f"  [{length}] average={scores[length]['average']}")
-        print(f"  OVERALL average={scores['average']}")
+        print(f"  OVERALL average (4K-16K)={scores['average']}")
         print(f"  wrote {out_path}")

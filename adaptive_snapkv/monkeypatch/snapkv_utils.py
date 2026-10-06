@@ -7,7 +7,10 @@ import torch.nn as nn
 import math
 from typing import List, Optional, Tuple, Union, Any,Dict
 from transformers.cache_utils import Cache, DynamicCache
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+except ImportError:            # unused here, and flash-attn is optional on the
+    flash_attn_func = None     # transformers-5.x hybrid venv where it may not build
 # perform qk calculation and get indices
 # this version will not update in inference mode
 

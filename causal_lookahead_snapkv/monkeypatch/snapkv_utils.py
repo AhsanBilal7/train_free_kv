@@ -274,7 +274,11 @@ def divergence_from_query_stacks(stacks, num_particles, eps=1e-6, device=None):
 def _cluster_query_stacks(layers, num_particles, layer_stride=1):
     """Yield [M, Hq, T, D] stacks straight off the per-layer lookahead buffers."""
     for layer in layers[::max(1, int(layer_stride))]:
-        kvc = getattr(layer.self_attn, "kv_cluster", None)
+        # getattr on the LAYER first: a hybrid backbone's linear-attention layers have
+        # no `self_attn` attribute at all, so layer.self_attn raises rather than
+        # returning None.
+        _attn = getattr(layer, "self_attn", None)
+        kvc = getattr(_attn, "kv_cluster", None) if _attn is not None else None
         if kvc is None:
             continue
         bufs = [kvc._lookahead_buffers[m] for m in range(num_particles)]
@@ -420,7 +424,11 @@ class TestTimeLookaheadKVCluster:
     def capture_window_queries(self, query_states):
         """Eq. 2/5: Q_W, the last `window_size` prefill queries (post-RoPE)."""
         w = min(self.window_size, query_states.shape[2])
-        self.window_queries = query_states[:, :, -w:, :].detach()
+        # .clone(), not a view: a slice keeps the WHOLE [1, H, n, D] prefill query tensor
+        # alive for every layer until compress() -- 1 GiB per layer at 128K on
+        # Llama-3.1-8B, 32 GiB in total, which made RULER-131072 OOM in the lookahead
+        # rollout. The values are identical; only the retained storage changes.
+        self.window_queries = query_states[:, :, -w:, :].detach().clone()
 
     def store_full_kv(self, key_states, value_states):
         """Full, uncompressed prefill K/V (Eq. 1), kept alive across the whole lookahead rollout."""
@@ -454,6 +462,16 @@ class TestTimeLookaheadKVCluster:
     def _robust_topbeta_mean(self, scores):
         """scores: [Q, chunk] -> [chunk]. Eq. 16-17: alpha * TopAvg_beta + (1-alpha) * Mean, over Q."""
         q = scores.shape[0]
+        if q == 0:
+            # An empty query batch carries no information about any candidate, so it
+            # contributes zero. This is the DESIGNED behaviour, not a workaround:
+            # compress() already builds `self.window_queries[:, :, :0, :]` for a
+            # particle whose buffer is empty (see the q_m line in compress), i.e. a
+            # zero-length batch is an expected input. What was missing is that
+            # topk(k>=1) on a 0-row tensor raises "selected index k out of range", so
+            # the intent was expressible but not reachable. Latent on every backbone;
+            # Gemma 4 is simply the first to produce an empty buffer in practice.
+            return scores.new_zeros(scores.shape[1:])
         k = max(1, math.ceil(self.robust_topk_beta * q))
         topk_vals, _ = scores.topk(k, dim=0)
         topavg = topk_vals.mean(dim=0)

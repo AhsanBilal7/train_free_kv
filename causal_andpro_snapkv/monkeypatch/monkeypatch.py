@@ -49,12 +49,21 @@ def replace_llama_causal():
 # so it brings its own model forward too. Both files are generated from the Llama
 # hijack by scripts/gen_ext_hijacks.py.
 # ---------------------------------------------------------------------------
-from models_ext.hijack_targets import apply_ext_hijack
-from causal_andpro_snapkv.monkeypatch.causal_ext_hijack import causal_ext_flash_attn2_forward
-from causal_andpro_snapkv.monkeypatch.causal_qwen2_hijack import (
-    causal_qwen2_flash_attn2_forward,
-    causal_qwen2_Qwen2Model_forward,
-)
+# Guarded: models_ext reaches llama.tokenization_llama_fast, which transformers 5.x
+# removed. pred.py imports this module unconditionally, so an unguarded ImportError
+# here kills every run on the hybrid (5.x) venv -- including the hybrid backbones,
+# which need none of this. On 4.44 the imports succeed and behaviour is unchanged;
+# on 5.x the names stay undefined and the replace_* functions below are never called
+# for these backbones (pred.py routes them to replace_hybrid_*).
+try:
+    from models_ext.hijack_targets import apply_ext_hijack
+    from causal_andpro_snapkv.monkeypatch.causal_ext_hijack import causal_ext_flash_attn2_forward
+    from causal_andpro_snapkv.monkeypatch.causal_qwen2_hijack import (
+        causal_qwen2_flash_attn2_forward,
+        causal_qwen2_Qwen2Model_forward,
+    )
+except ImportError:      # transformers 5.x: 4.44-only hijacks unavailable
+    pass
 
 
 def replace_ministral3_causal():

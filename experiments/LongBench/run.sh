@@ -74,6 +74,12 @@ budget_tau_scopes=(${BUDGET_TAU:-1.0})
 # Sweepable: SCORE_OBJECTIVE="projected unprojected attention"
 score_objective_scopes=(${SCORE_OBJECTIVE:-projected})
 
+# Overrides the folder identity string (scripts/run_naming.py: name_prefix /
+# CUSTOM_PREFIXES) for a causal_lookahead run whose scoring criterion reads as a
+# different method's name -- e.g. config/andpro-compute-eq.conf. Empty by default,
+# so every other config's folder name is unaffected.
+run_name_prefix="${RUN_NAME_PREFIX:-}"
+
 dataset_name_list=(${DATASET_NAME_LIST:-"qasper" "narrativeqa" "multifieldqa_en" \
     "hotpotqa" "2wikimqa" "musique" \
     "trec" "triviaqa" "samsum" \
@@ -127,7 +133,8 @@ for budget in "${budget_scopes[@]}"; do
                                   --robust-alpha "$robust_alpha" --robust-topk-beta "$robust_topk_beta" \
                                   --lambda-k "$lambda_k" --lambda-v "$lambda_v" \
                                   --budget-tau "$budget_tau" \
-                                  --score-objective "$score_objective")"
+                                  --score-objective "$score_objective" \
+                                  --name-prefix "$run_name_prefix")"
 
                                 CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
                                   --max_length $max_length \

@@ -44,6 +44,8 @@ BACKBONES = {
     "llama":      ("Llama-3.1-8B-Instruct", "-llama"),
     "qwen2":      ("Qwen2.5-14B-Instruct", "-qwen2"),
     "ministral3": ("Ministral-3-8B-Instruct-2512", "-ministral3"),
+    "gemma4":     ("gemma-4-12B-it", "-gemma4"),
+    "qwen35":     ("Qwen3.5-9B", "-qwen35"),
 }
 
 # The lookahead cells differ only in reliability coefficients (Table 3 of the paper).
@@ -153,8 +155,10 @@ def emit(backbone, budgets, pred_root, no_highlight=False):
                   r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b, r"\midrule"]
         block = [(label, score_dir(pred_root, folder)) for label, folder in (
             ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4_red_0.0",
+                            f"critical_{model_tag}_{b}_chunk_4_red_0.5",
                             f"critical_{model_tag}_{b}_chunk_4"]),
             ("AnDPro",     [f"andpro_{model_tag}_{b}_chunk_4_red_0.0",
+                            f"andpro_{model_tag}_{b}_chunk_4_red_0.5",
                             f"andpro_{model_tag}_{b}_chunk_4"]),
             (r"\lorekvE",  lookahead_dir("ent", model_tag, b)),
             (r"\lorekvD",  lookahead_dir("dis", model_tag, b)),

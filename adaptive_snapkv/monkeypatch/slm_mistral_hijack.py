@@ -17,7 +17,10 @@ from transformers.utils import (
     is_flash_attn_2_available,
 )
 from adaptive_snapkv.monkeypatch.snapkv_utils import init_slm
-from flash_attn import flash_attn_func
+try:
+    from flash_attn import flash_attn_func
+except ImportError:            # unused here, and flash-attn is optional on the
+    flash_attn_func = None     # transformers-5.x hybrid venv where it may not build
 
 logger = logging.get_logger(__name__)
 

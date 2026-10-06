@@ -63,6 +63,23 @@ score_objective_scopes=(${SCORE_OBJECTIVE:-projected})
 #     ("4096" / "8192" / "16384") bundles all 13 RULER tasks (500 rows each). ---
 dataset_name_list=(${DATASET_NAME_LIST:-"4096" "8192" "16384"})
 
+# --- Long-context configs ("65536", "131072") are not on the Hub. They are built
+#     locally by long_context/make_data.sh (same RULER revision, seed, tokenizer and
+#     schema as the Hub ones) and read from here. Opt in by listing them:
+#       DATASET_NAME_LIST="65536 131072"
+#     They need a backbone whose window covers them (Llama-3.1-8B: 131072;
+#     Mistral-7B-v0.2: 32768, so not Mistral). ---
+RULER_LOCAL_DIR="${RULER_LOCAL_DIR:-${SCRATCH:-/scratch/user/$USER}/ruler_long}"
+
+# --- Prompt cap. pred.py MIDDLE-truncates anything longer, and on RULER that can
+#     cut the needle out. The old hardcoded 64000 was harmless at <=16k but would
+#     truncate every 64k/128k prompt, so the default is Llama-3.1's full window.
+#     It changes nothing for 4k-16k, whose prompts never approach either value.
+#     Note run_h100.sh exports MAX_LENGTH from the config when one sets it (the
+#     gemma4 configs cap LongBench at 31500 for memory). ---
+MAX_LENGTH="${MAX_LENGTH:-131072}"
+echo "run.sh RULER: MAX_LENGTH=$MAX_LENGTH RULER_LOCAL_DIR=$RULER_LOCAL_DIR lengths=${dataset_name_list[*]}"
+
 for budget in "${budget_scopes[@]}"; do
   for chunk_size in "${chunk_size_scopes[@]}"; do
     for mode in "${mode_scopes[@]}"; do
@@ -112,8 +129,8 @@ for budget in "${budget_scopes[@]}"; do
                                   --score-objective "$score_objective")"
 
                                 CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
-                                  --max_length 64000 \
-                                  --dataset $DATASET_PATH \
+                                  --max_length "$MAX_LENGTH" \
+                                  --dataset $DATASET_PATH --local_dataset "$RULER_LOCAL_DIR" \
                                   --mode $mode \
                                   --budget $budget \
                                   --chunk_size $chunk_size \
@@ -168,8 +185,8 @@ for budget in "${budget_scopes[@]}"; do
           echo "budget=$budget chunk=$chunk_size mode=$mode lambda_red=$lambda_red"
 
           CUDA_VISIBLE_DEVICES=$GPU_ID python pred.py -m $MODEL_PATH \
-            --max_length 64000 \
-            --dataset $DATASET_PATH \
+            --max_length "$MAX_LENGTH" \
+            --dataset $DATASET_PATH --local_dataset "$RULER_LOCAL_DIR" \
             --mode $mode \
             --budget $budget \
             --chunk_size $chunk_size \

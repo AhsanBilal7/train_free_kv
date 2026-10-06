@@ -26,6 +26,27 @@ checkpoint under upstream transformers 5.x in a separate venv and asserts the
 logits agree. See README.md in this directory for the recorded results.
 """
 
-from models_ext.register import register_extra_architectures
+# models_ext vendors Ministral-3 as a subclass of transformers 4.44's Llama modules
+# (it needs LlamaFlashAttention2, which 4.48 deleted). That makes the package
+# unimportable on the transformers 5.x venv used by the hybrid-attention backbones
+# -- and every experiments/*/pred.py imports it unconditionally, so an unguarded
+# ImportError there kills runs that never wanted Ministral-3 in the first place.
+#
+# On 5.x, registration degrades to a no-op: the extra architectures it registers are
+# 4.44-only backbones, and the 5.x-native ones (qwen3_5, gemma4_unified) are already
+# known to AutoConfig without any help. The reason is recorded on the function so a
+# caller can tell "registered nothing because nothing was needed" from "silently
+# broken".
+try:
+    from models_ext.register import register_extra_architectures
+    register_extra_architectures.unavailable_reason = None
+except ImportError as _exc:                      # transformers 5.x: no LlamaFlashAttention2
+    _reason = str(_exc)
+
+    def register_extra_architectures():          # type: ignore[misc]
+        """No-op: the vendored 4.44-only architectures cannot load on this stack."""
+        return None
+
+    register_extra_architectures.unavailable_reason = _reason
 
 __all__ = ["register_extra_architectures"]

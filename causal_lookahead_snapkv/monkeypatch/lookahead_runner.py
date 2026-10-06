@@ -30,21 +30,144 @@ from causal_lookahead_snapkv.monkeypatch.snapkv_utils import (
 )
 
 
+def _phase_configs(model):
+    """Every config object the attention modules might read the phase from.
+
+    The attention hijack reads `self.config.lookahead_phase`, and `self.config` is
+    whatever config that module was constructed with. On a multimodal backbone those
+    differ: Gemma4UnifiedTextAttention holds the TEXT config while `model.model.config`
+    is the top-level multimodal one. Writing only the latter left the attention
+    modules permanently in "collect" -- so after eviction they kept taking the collect
+    branch and called cache.update() without the head_lens/cu_klen kwargs the
+    flattened layer needs (KeyError: 'head_lens'), instead of the varlen decode path.
+    Set it on both, and on the layers' own config, so the read cannot miss it.
+    """
+    seen, out = set(), []
+    for cfg in (getattr(model, "config", None),
+                getattr(getattr(model, "model", None), "config", None)):
+        while cfg is not None and id(cfg) not in seen:
+            seen.add(id(cfg))
+            out.append(cfg)
+            cfg = getattr(cfg, "text_config", None)
+    return out
+
+
 def _set_phase(model, phase):
-    model.model.config.lookahead_phase = phase
+    for cfg in _phase_configs(model):
+        cfg.lookahead_phase = phase
 
 
 def _set_particle(model, idx):
-    model.model.config.lookahead_particle_idx = idx
+    for cfg in _phase_configs(model):
+        cfg.lookahead_particle_idx = idx
+
+
+def _decoder_layers(model):
+    """The decoder layer list, wherever this architecture keeps it.
+
+    `model.model.layers` holds for Mistral/Llama/Qwen2 and for Qwen3.5. It does NOT
+    hold for Gemma 4: Gemma4UnifiedModel is a multimodal wrapper whose decoder lives
+    at `model.model.language_model.layers`. Walk the usual nestings rather than
+    hardcoding one, so a future multimodal backbone does not need another special
+    case here.
+    """
+    for path in (("model", "layers"),
+                 ("model", "language_model", "layers"),
+                 ("model", "text_model", "layers"),
+                 ("language_model", "layers"),
+                 ("layers",)):
+        obj = model
+        for attr in path:
+            obj = getattr(obj, attr, None)
+            if obj is None:
+                break
+        if obj is not None:
+            return obj
+    raise AttributeError(
+        f"cannot locate decoder layers on {type(model).__name__}; add its path to "
+        "_decoder_layers")
+
+
+def _kv_layers(model):
+    """(layer_idx, kv_cluster) for every layer LORE-KV actually owns.
+
+    On a uniform backbone that is every layer. On a hybrid one it is only the
+    full-attention layers: Qwen3_5DecoderLayer has NO `self_attn` at all on a
+    linear-attention layer (it builds `linear_attn` instead), so `layer.self_attn`
+    raises rather than returning something falsy. Layers we never patched have no
+    kv_cluster, which is the definitive test -- it also covers Gemma 4, where every
+    layer does have `self_attn` but only the full-attention ones were hijacked.
+    """
+    for idx, layer in enumerate(_decoder_layers(model)):
+        attn = getattr(layer, "self_attn", None)
+        kvc = getattr(attn, "kv_cluster", None) if attn is not None else None
+        if kvc is not None:
+            yield idx, kvc
 
 
 def _clone_dynamic_cache(cache):
-    new_cache = DynamicCache()
-    for layer_idx in range(len(cache.key_cache)):
-        new_cache.key_cache.append(cache.key_cache[layer_idx].clone())
-        new_cache.value_cache.append(cache.value_cache[layer_idx].clone())
-    new_cache._seen_tokens = cache._seen_tokens
+    """Deep-copy the prefill cache so one lookahead particle cannot disturb another.
+
+    Two cache layouts to support:
+
+    transformers 4.44  `cache.key_cache[i]` / `cache.value_cache[i]` -- flat lists.
+
+    transformers 5.x   `cache.layers[i]`, one object per layer, whose type depends
+                       on the layer (DynamicLayer / DynamicSlidingWindowLayer /
+                       LinearAttentionLayer). Their tensor attributes differ, so the
+                       clone copies every tensor attribute it finds rather than
+                       assuming `keys`/`values` -- which is REQUIRED for a hybrid
+                       backbone, not just tidier: a linear-attention layer carries a
+                       recurrent state and no keys/values at all, and sharing that
+                       state between particles would let each rollout corrupt the
+                       next. Non-tensor attributes (cumulative_length, flags) are
+                       copied by value for the same reason.
+    """
+    if hasattr(cache, "key_cache"):                       # 4.44
+        # A new cache OBJECT over the SAME tensors -- no data copy. 4.44's
+        # DynamicCache.update only ever rebinds `key_cache[i] = torch.cat(...)`, which
+        # allocates a fresh tensor and never writes into the old one, so a particle's
+        # decode can never touch the prefill tensors shared here (the attention hijack
+        # also only reads them via update()). Values are identical to a .clone(); the
+        # difference is memory: a deep copy is one extra full-length cache alive per
+        # particle -- 16 GiB for Llama-3.1-8B at 128K, which is what made RULER-131072
+        # OOM at 78 GiB. The 5.x branch below keeps deep-copying: its recurrent layers
+        # ARE updated in place.
+        new_cache = DynamicCache()
+        new_cache.key_cache = list(cache.key_cache)
+        new_cache.value_cache = list(cache.value_cache)
+        new_cache._seen_tokens = cache._seen_tokens
+        return new_cache
+
+    import copy as _copy
+    new_cache = _copy.copy(cache)                         # 5.x: shallow, then rebuild layers
+    new_cache.layers = []
+    for layer in cache.layers:
+        new_layer = _copy.copy(layer)
+        for name, val in vars(layer).items():
+            setattr(new_layer, name, _deep_clone(val))
+        new_cache.layers.append(new_layer)
     return new_cache
+
+
+def _deep_clone(val):
+    """Clone a cache layer's state, whatever container transformers put it in.
+
+    A DynamicLayer keeps plain tensors (`keys`, `values`), but a LinearAttentionLayer
+    keeps **dicts keyed by state index** -- `conv_states = {0: tensor}`,
+    `recurrent_states = {0: tensor}`. An earlier version of this clone tested only
+    `torch.is_tensor` and `list/tuple`, so those dicts were copied by reference: all M
+    lookahead particles shared ONE recurrent state and each rollout overwrote the
+    previous one's. That does not crash -- it silently corrupts every particle after
+    the first, which is exactly the kind of damage that shows up only as a bad score.
+    """
+    if torch.is_tensor(val):
+        return val.clone()
+    if isinstance(val, dict):
+        return {k: _deep_clone(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return type(val)(_deep_clone(v) for v in val)
+    return val
 
 
 def _shape_logits(logits, temperature, top_k=None, top_p=None):
@@ -100,6 +223,10 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     particle_V = torch.zeros(M, T, device=device)     # varentropy V_u
     for m in range(M):
         _set_particle(model, m)
+        # Drop the previous particle's cache BEFORE building the next one; otherwise
+        # both are alive at once (the old one is still bound to cache_m / step_out
+        # while the right-hand side runs).
+        cache_m = step_out = None
         cache_m = _clone_dynamic_cache(base_cache)
         # First token of the particle: sampled from the SAME truncated/tempered law the
         # per-step statistics below are centered against.
@@ -152,7 +279,7 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     particle_divergence = torch.zeros(M, device=device)
     if lambda_d != 0.0:
         particle_divergence = particle_trajectory_divergence(
-            model.model.layers, M, layer_stride=div_stride, device=device)
+            _decoder_layers(model), M, layer_stride=div_stride, device=device)
     d_hat = standardize_disagreement(particle_divergence)
 
     # Eq. 6: normalized particle reliability weights (no eta -- it is not identifiable
@@ -160,8 +287,8 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     weights, _parts = reliability_weights(
         particle_c, particle_H, particle_V, d_hat,
         beta=beta, gamma=gamma, lambda_d=lambda_d, normalize=normalize)
-    for layer in model.model.layers:
-        layer.self_attn.kv_cluster.set_particle_weights(weights)
+    for _idx, _kvc in _kv_layers(model):
+        _kvc.set_particle_weights(weights)
 
     # base_cache (the full, uncompressed prefill KV cache for every layer) and the lookahead loop's
     # locals (each holding a full-length cloned cache / step output) are no longer needed -- everything
@@ -170,13 +297,29 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     # projection), and letting these stick around as live references is what was causing the
     # CUDA OOM (torch.cuda.empty_cache() in pred.py's outer loop can't reclaim memory that's still
     # referenced by a live Python object).
+    # A hybrid backbone's linear-attention / sliding layers are NOT compressed, but
+    # decoding still needs the state they built during prefill. base_cache is about to
+    # be freed, so keep a reference to exactly those layer objects first -- dropping
+    # them would silently reset 24 of Qwen3.5's 32 layers to empty and produce fluent
+    # nonsense rather than an error.
+    _owned = {i for i, _ in _kv_layers(model)}
+    _carry = None
+    if hasattr(base_cache, "layers"):
+        _carry = [(i, L) for i, L in enumerate(base_cache.layers) if i not in _owned]
+
     del base_cache, cache_m, step_out, tok, next_tok, logits, q0, cs, hs, vs
     torch.cuda.empty_cache()
 
     # ---- Phase 3 (Algorithm 1, lines 9-34): score + evict, once per layer ----
-    compressed_cache = DynamicCacheSplitHeadFlatten()
-    for layer_idx, layer in enumerate(model.model.layers):
-        kv_cluster = layer.self_attn.kv_cluster
+    if _carry is None:
+        compressed_cache = DynamicCacheSplitHeadFlatten()          # 4.44: every layer is ours
+    else:
+        from causal_lookahead_snapkv.monkeypatch.causal_lookahead_hybrid_hijack import (
+            make_hybrid_flat_cache)
+        compressed_cache = make_hybrid_flat_cache(model.config)
+        for _i, _L in _carry:                                       # restore untouched layers
+            compressed_cache.layers[_i] = _L
+    for layer_idx, kv_cluster in _kv_layers(model):
         k_flat, v_flat, cache_kwargs = kv_cluster.compress()
         compressed_cache.update(k_flat, v_flat, layer_idx, cache_kwargs)
         kv_cluster.reset_lookahead_buffers()
@@ -188,7 +331,12 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     # ---- Phase 4 (Algorithm 1, line 35-36 + real decoding): discard lookahead drafts, answer
     # generation continues from the *real* next token (the one sampled right after prefill,
     # before any lookahead branching) using the now-compressed cache.
-    past_key_values = compressed_cache.to_legacy_cache()
+    # 4.44 threads a legacy tuple back through the patched model forward; the 5.x
+    # hybrid path keeps the Cache object (its model forward takes past_key_values
+    # directly and make_hybrid_model_forward already marked this one as flat).
+    past_key_values = (compressed_cache.to_legacy_cache()
+                       if hasattr(compressed_cache, "to_legacy_cache") and _carry is None
+                       else compressed_cache)
     next_token = last_logits.argmax(dim=-1, keepdim=True)
     eos_set = set(eos_token_ids)
     if int(next_token.item()) in eos_set:
