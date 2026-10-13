@@ -1,71 +1,45 @@
-"""Layer-type awareness for hybrid-attention backbones (Qwen3.5, Gemma 4).
+"""Layer-type support for the hybrid-attention backbones (Qwen3.5, Gemma 4).
 
-The 2026 generation of open decoders is hybrid: only a minority of layers keep a
-KV cache that grows with context. Qwen3.5-9B is 8 full-attention layers and 24
-gated-delta-net (linear attention) layers; Gemma 4 12B is 8 full-attention and 40
-sliding-window (1024) layers.
+In a hybrid model only some layers keep a KV cache that grows with the context.
+Qwen3.5-9B has 8 full-attention layers and 24 gated-delta-net (linear-attention)
+layers. Gemma-4-12B has 8 full-attention layers and 40 sliding-window layers
+(window 1024).
 
-Read as "LORE-KV only covers 8/32 layers" that sounds fatal. It is the wrong
-denominator. What matters for a cache-eviction method is not how many layers it
-touches but how much of the *cache* it governs, and the non-full layers are O(1)
-in context length by construction:
+The other layers have a state of constant size:
 
-    Qwen3.5-9B   linear-attention state is a fixed recurrent state (conv kernel +
-                 linear K/V heads), 0.036 GiB TOTAL, independent of n.
-    Gemma 4 12B  sliding layers hold min(n, 1024) entries, so 0.31 GiB total once
-                 n >= 1024 and constant thereafter.
+    Qwen3.5-9B   The linear-attention state is a fixed recurrent state
+                 (0.036 GiB in total for all such layers).
+    Gemma-4-12B  A sliding-window layer keeps min(n, 1024) entries
+                 (0.31 GiB in total for n >= 1024).
 
-Only the full-attention layers grow. Measured share of the KV cache held by the
-full-attention layers (bf16):
+Share of the KV cache in the full-attention layers (bfloat16, measured):
 
-    n            Qwen3.5-9B     Gemma 4 12B
+    n            Qwen3.5-9B     Gemma-4-12B
     4,096          77.9%           16.7%
     8,192          87.6%           28.6%
     32,768         96.6%           61.5%
     64,000         98.2%           75.8%
 
-Gemma 4's numbers come from its PER-LAYER geometry: full-attention layers are
-1 KV head x 512 dims (512 elements/token) while sliding layers are 8 x 256 (2048),
-so a sliding layer holds 4x more per token than a compressed one. The top-level
-config reports the sliding values, and reading it globally overstated the
-compressed share as 92.6% at 64k.
+For Gemma 4 the share uses the per-layer geometry. A full-attention layer has
+1 KV head of 512 dimensions; a sliding-window layer has 8 KV heads of 256.
 
-So LORE-KV applied only to the full-attention layers still governs 98% (Qwen3.5)
-and 76% (Gemma 4) of the KV cache at 64k. The non-full layers are not a gap in coverage -- they are
-already O(1) in context length, which is the problem KV eviction exists to solve.
-In the long-context regime this work targets, those layers have already solved it
-by construction.
+LORE-KV thus compresses only the full-attention layers (paper App. E.2):
 
-That is the framing this module implements: **LORE-KV composes with hybrid
-attention -- the architecture bounds what it can, and LORE-KV compresses what
-remains, which is where the memory actually is.**
-
-Two mechanisms carry it:
-
-1. `compressible_layers(config)` returns exactly the layer indices whose cache
-   grows with n. For Qwen3.5 this is free -- `Qwen3_5DecoderLayer` only builds a
-   `Qwen3_5Attention` for full-attention layers, so patching that class already
-   scopes us correctly. Gemma 4 uses ONE attention class for both layer types
-   (distinguished by `self.layer_type`), so there the check must be explicit.
-   Getting this wrong on Gemma 4 would silently compress sliding layers, which is
-   not the experiment: evicting a 1024-entry window to B=128 and evicting a 64k
-   cache to B=128 are different operations and must not be averaged together.
-
-2. `resolve_budget()` decides what "budget B" means when only a subset of layers
-   is compressible. See HYBRID_BUDGET_MODE below -- this is a reporting decision,
-   not an implementation detail, and it has to be stated in the paper.
+1. :func:`compressible_layers` returns the indices of the layers whose cache
+   grows with n.
+2. :func:`resolve_budget` gives the budget of each compressible layer for a
+   nominal budget B (see ``HYBRID_BUDGET_MODE``).
 """
 
 from __future__ import annotations
 
 import os
 
-# Layer types whose KV cache grows with sequence length. Everything else is either
-# a fixed-size recurrent state or a bounded window, and is left alone.
+# Layer types whose KV cache grows with the sequence length. The other types have a
+# state of fixed size or a bounded window and are not compressed.
 GROWING_LAYER_TYPES = ("full_attention",)
 
-# Layer types we deliberately do NOT compress, with the reason. Used for the
-# run manifest so a results directory records what was skipped and why.
+# Layer types that are not compressed, with the reason. The run manifest records them.
 BOUNDED_LAYER_TYPES = {
     "linear_attention": "fixed-size recurrent state; O(1) in context length",
     "conv": "fixed-size convolution state; O(1) in context length",
@@ -75,7 +49,7 @@ BOUNDED_LAYER_TYPES = {
 
 
 def layer_types(config):
-    """The per-layer type list, or None for a uniform (all-full-attention) model."""
+    """Return the list of layer types, or None for a model with full attention in each layer."""
     text_cfg = getattr(config, "text_config", None) or config
     lt = getattr(text_cfg, "layer_types", None)
     if lt is None:
@@ -84,15 +58,15 @@ def layer_types(config):
 
 
 def is_hybrid(config) -> bool:
+    """Return True if the model has layers other than full-attention layers."""
     lt = layer_types(config)
     return bool(lt) and any(t not in GROWING_LAYER_TYPES for t in lt)
 
 
 def compressible_layers(config):
-    """Indices of layers whose KV cache grows with n -- the ones LORE-KV acts on.
+    """Return the indices of the layers whose KV cache grows with the context length.
 
-    A uniform model returns every layer, so this is safe to call unconditionally
-    and callers need no is_hybrid() branch.
+    For a model with full attention in each layer, the function returns all layers.
     """
     lt = layer_types(config)
     if not lt:
@@ -102,6 +76,7 @@ def compressible_layers(config):
 
 
 def layer_is_compressible(config, layer_idx: int) -> bool:
+    """Return True if layer ``layer_idx`` is compressible."""
     lt = layer_types(config)
     if not lt:
         return True
@@ -112,32 +87,23 @@ def layer_is_compressible(config, layer_idx: int) -> bool:
 
 # --- Budget accounting -------------------------------------------------------
 #
-# With only k of L layers compressible, "budget B" is ambiguous, and the two
-# readings are different experiments:
+# If only k of L layers are compressible, a budget B has two interpretations:
 #
 #   per_layer (default)
-#       Every compressible layer keeps B entries, exactly as on a dense backbone.
-#       A row is then directly comparable to the Mistral/Llama/Qwen2.5 rows at the
-#       same B -- same per-layer working set, same eviction pressure per layer.
-#       Total retained cache is k*B rather than L*B, so the *overall* retention
-#       percentage is lower than a dense model at the same B, and must be reported
-#       as such rather than quietly compared.
+#       Each compressible layer keeps B entries, as on a dense backbone. The results
+#       are comparable to the dense backbones at the same B. The total retained
+#       cache is k * B, not L * B.
 #
 #   total
-#       The compressible layers share the budget a dense model of the same depth
-#       would have spent (L*B), i.e. each gets B*L/k. This holds total cache
-#       footprint constant against a dense baseline, at the cost of much weaker
-#       per-layer pressure -- on Qwen3.5 that is 4x the per-layer budget, which
-#       makes the task substantially easier and is NOT comparable to a dense row
-#       at the same nominal B.
-#
-# Default is per_layer because it keeps the per-layer semantics of every existing
-# table; `total` exists so the memory-matched comparison can be run deliberately.
+#       The compressible layers share L * B entries, so each layer keeps B * L / k.
+#       The total cache is equal to that of a dense model, but the budget of each
+#       layer is larger (4x on Qwen3.5). The results are not comparable to the
+#       dense backbones at the same B.
 HYBRID_BUDGET_MODE = os.environ.get("HYBRID_BUDGET_MODE", "per_layer").lower()
 
 
 def resolve_budget(config, base_capacity: int, mode: str | None = None) -> int:
-    """Per-compressible-layer budget, given the nominal B and the accounting mode."""
+    """Return the budget of each compressible layer for a nominal budget B."""
     mode = (mode or HYBRID_BUDGET_MODE).lower()
     if mode not in ("per_layer", "total"):
         raise ValueError(f"HYBRID_BUDGET_MODE must be per_layer|total, got {mode!r}")
@@ -153,15 +119,10 @@ def resolve_budget(config, base_capacity: int, mode: str | None = None) -> int:
 
 
 def _cfg_get(config, key, default=0):
-    """Read a config value that transformers 5.x may guard as per-layer.
+    """Read a config value that transformers 5.x can guard as a per-layer attribute.
 
-    Gemma 4's text config lists `num_key_value_heads` and `head_dim` in
-    `per_layer_attributes`, so a plain getattr raises
-    AmbiguousGlobalPerLayerAttributeError even when every layer holds the same
-    value (which is the case for the 12B checkpoint). to_dict() returns what the
-    config.json actually says. When the value really does vary per layer it comes
-    back as a list and we take the max, which keeps this an upper bound on the
-    bounded share -- i.e. it never flatters the compressed share.
+    The function reads the value from ``to_dict()``. If the value is a per-layer
+    list, it returns the maximum.
     """
     text_cfg = getattr(config, "text_config", None) or config
     try:
@@ -179,21 +140,17 @@ def _cfg_get(config, key, default=0):
 
 
 def cache_share_of_growing_layers(config, n_tokens: int) -> float:
-    """Fraction of the KV cache held by compressible layers at context length n.
+    """Return the fraction of the KV cache in the compressible layers at context length n.
 
-    This is the number that justifies the whole approach, so it is computed rather
-    than asserted, and written into each run's manifest. Returns 1.0 for a uniform
-    model. Counts elements, not bytes -- dtype cancels in the ratio.
+    The result is 1.0 for a model with full attention in each layer. The function
+    counts elements, so the data type has no effect.
     """
     lt = layer_types(config)
     if not lt:
         return 1.0
-    # Per-LAYER geometry where the architecture has it. Gemma 4's full-attention
-    # layers are head_dim=512 / kv_heads=1 while its sliding layers are 256 / 8 --
-    # the top-level config reports the sliding values, so reading globally
-    # understates the compressed layers' cache by 512*1 vs 256*8 = 4x in the wrong
-    # direction. The whole justification for this port is a cache-share number, so
-    # it has to come from the layers actually being measured.
+    # Use the per-layer geometry if the architecture has it. Gemma 4 full-attention
+    # layers have head_dim 512 and 1 KV head; its sliding-window layers have 256 and
+    # 8. The top-level config gives the sliding-window values.
     per_layer = None
     try:
         text_cfg = getattr(config, "text_config", None) or config
@@ -214,9 +171,8 @@ def cache_share_of_growing_layers(config, n_tokens: int) -> float:
     kv_heads = int(_cfg_get(config, "num_key_value_heads", 0))
     head_dim = int(_cfg_get(config, "head_dim", 0))
     window = _cfg_get(config, "sliding_window", None)
-    # An attention layer caches K *and* V -- except when the architecture ties them.
-    # Gemma 4 sets attention_k_eq_v, and its full-attention layers have v_proj=None
-    # and reuse the key tensor, so they cache one tensor per token, not two.
+    # An attention layer stores K and V. With attention_k_eq_v (Gemma 4) the
+    # full-attention layers store only one tensor per token.
     kv_mult = 1 if bool(_cfg_get(config, "attention_k_eq_v", False)) else 2
     per_tok = max(kv_mult * kv_heads * head_dim, 1)
 
@@ -229,7 +185,7 @@ def cache_share_of_growing_layers(config, n_tokens: int) -> float:
         elif t in ("sliding_attention", "chunked_attention") and window:
             bounded += min(n_tokens, int(window)) * per_tok_i
         else:
-            # Linear/conv state: fixed, and small relative to any real context.
+            # Linear-attention or convolution state: fixed size.
             lk = int(_cfg_get(config, "linear_key_head_dim", 0))
             lv = int(_cfg_get(config, "linear_value_head_dim", 0))
             nk = int(_cfg_get(config, "linear_num_key_heads", 0))
@@ -241,10 +197,9 @@ def cache_share_of_growing_layers(config, n_tokens: int) -> float:
 
 
 def hybrid_manifest(config, base_capacity: int, n_tokens: int = 64000) -> dict:
-    """What was compressed, what was not, and why -- written next to the results.
+    """Return a record of the compressed layers and the layers that are not compressed.
 
-    Records, from the config, which layers were compressed and which were left
-    alone because their state is bounded (App. E.2).
+    The record also gives the reason for each layer type (paper App. E.2).
     """
     lt = layer_types(config)
     comp = compressible_layers(config)

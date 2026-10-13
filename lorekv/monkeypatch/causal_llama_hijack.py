@@ -1,20 +1,21 @@
-"""LORE-KV's phase-aware forwards for Llama under transformers 4.44.2.
+"""LORE-KV attention and model forwards for Llama (transformers 4.44.2).
 
-``causal_lookahead_LlamaModel_forward`` and
-``causal_lookahead_llama_flash_attn2_forward`` replace ``LlamaModel.forward`` and
-``LlamaFlashAttention2.forward``; they are adapted from those transformers 4.44.2
-implementations (Apache-2.0) and from the varlen decode path of the AdaKV / AnDPro
-hijacks. The phase in ``config.lookahead_phase`` selects the behaviour (see
+``causal_lookahead_LlamaModel_forward`` replaces ``LlamaModel.forward``.
+``causal_lookahead_llama_flash_attn2_forward`` replaces
+``LlamaFlashAttention2.forward``. Both are adapted from the transformers 4.44.2
+implementation (Apache-2.0) and from the varlen decode step of the AdaKV and
+AnDPro patches. ``config.lookahead_phase`` selects the operation (see
 :mod:`lorekv.monkeypatch.lookahead_runner`):
 
-* ``collect``   -- causal flash attention on a stock DynamicCache; record Q_W and
-  the full K/V on the layer's ``kv_cluster``.
-* ``lookahead`` -- the same attention for one trajectory step; record its queries.
-* ``final``     -- one decode step against the evicted per-head cache with
+* ``collect``: Causal flash attention on a standard DynamicCache. The layer
+  records Q_W and the full K and V on its ``kv_cluster``.
+* ``lookahead``: The same attention for one step of a continuation. The layer
+  records the query of the step.
+* ``final``: One decode step on the evicted per-head cache with
   ``flash_attn_varlen_func``.
 
-The model forward returns hidden states for the last position only, since only
-those logits are ever used; this avoids the [n, vocab] LM-head product at prefill.
+The model forward returns the hidden state of the last position only. The runner
+uses only these logits, and the prefill does not compute the [n, vocab] product.
 """
 from typing import List, Optional, Tuple, Union
 

@@ -214,7 +214,7 @@ def configure_model(model, args, window_size=32, kernel_size=7, pooling="maxpool
         The same model.
     """
     fields = {
-        # shared by every method
+        # All methods
         "window_size": window_size, "base_capacity": args.budget, "kernel_size": kernel_size,
         "pooling": pooling, "skip": skip, "chunk_size": args.chunk_size, "mode": args.mode,
         # Ada-KV / PyramidKV
@@ -281,8 +281,8 @@ def load_model_and_tokenizer(path, device="cuda:0"):
     Returns:
         A tuple ``(model, tokenizer)``. The model is in evaluation mode.
     """
-    # Ministral3 postdates the transformers 4.44 pin; registering the vendored
-    # implementation with the Auto* factories is a no-op for every other backbone.
+    # Register the Ministral3 implementation of models_ext with the Auto* classes.
+    # This has no effect on the other backbones.
     from models_ext import register_extra_architectures
     register_extra_architectures()
 

@@ -1,21 +1,19 @@
-"""AnDPro / CriticalKV on hybrid-attention backbones (transformers 5.x).
+"""AnDPro and CriticalKV on the hybrid-attention backbones (transformers 5.x).
 
-The baselines are structurally simpler than LORE-KV: there is no lookahead
-rollout, so there are only two branches.
+The baselines have no lookahead, so each forward has two cases:
 
-    prefill (q_len > 1)  score with the prompt's own queries, evict immediately
-                         via kv_cluster.update_kv(), then run attention on the
-                         FULL (pre-eviction) states for this forward pass
-    decode  (q_len == 1) serve the ragged post-eviction cache with varlen
+* Prefill (q_len > 1): Score with the prompt queries, evict with
+  ``kv_cluster.update_kv()``, and compute the attention of this forward on the
+  full states.
+* Decode (q_len == 1): Read the ragged cache after eviction with the varlen kernel.
 
-Both packages (`andpro_snapkv`, `adaptive_snapkv`) expose the same shape --
-`init_*_snapkv(self)` then `self.kv_cluster.update_kv(k, q, v)` -- so one
-parameterised builder covers both rather than two near-identical files that can
-drift apart.
+``andpro_snapkv`` and ``adaptive_snapkv`` have the same interface
+(``init_*_snapkv(self)``, then ``self.kv_cluster.update_kv(k, q, v)``). One
+parameterized builder thus serves both packages.
 
-Layer scoping, the per-layer flat cache and the fall-through-when-not-ours rule
-are shared with the LORE-KV hijack; see causal_lookahead_hybrid_hijack.py and
-hybrid_support.py for why only the full-attention layers are compressed (paper App. E.2).
+The layer scope, the per-layer flat cache and the fall-through to the original
+forward are the same as in :mod:`.causal_lookahead_hybrid_hijack`. Only the
+full-attention layers are compressed (paper App. E.2).
 """
 
 from __future__ import annotations
@@ -31,20 +29,15 @@ from lorekv.monkeypatch.hybrid_support import (
 
 
 def _allow_uniform_per_layer_reads(cfg):
-    """Let the 4.44 baseline code read per-layer-guarded attributes, when it is safe.
+    """Let the baseline code read per-layer config attributes if all layers have the same value.
 
-    Gemma 4's config lists `num_key_value_heads` and `head_dim` in
-    `per_layer_attributes`, so a plain read raises
-    AmbiguousGlobalPerLayerAttributeError -- even when every layer holds the same
-    value, which IS the case for the 12B checkpoint. andpro/adaptive's
-    init_*_snapkv computes `num_attention_heads // num_key_value_heads` that way.
-
-    transformers offers `allow_global_per_layer_attribute_access` for exactly this,
-    with the caveat that the caller must know the config is homogeneous. So verify
-    it rather than assert it: read every layer's value and only lift the guard when
-    they genuinely all agree. On a checkpoint that really does vary per layer this
-    stays closed and the error surfaces, which is the correct outcome -- the
-    baseline's single global `num_key_value_groups` would be wrong there.
+    The Gemma 4 config lists ``num_key_value_heads`` and ``head_dim`` in
+    ``per_layer_attributes``. A global read of these attributes raises
+    AmbiguousGlobalPerLayerAttributeError, also when all layers have the same value.
+    The function reads the value of each layer. It sets
+    ``allow_global_per_layer_attribute_access`` only if all values are equal. If the
+    values differ, the error stays, because one global ``num_key_value_groups`` is
+    then not correct.
     """
     for c in {id(x): x for x in (cfg, getattr(cfg, "text_config", None)) if x is not None}.values():
         guarded = getattr(c, "per_layer_attributes", None)
@@ -68,7 +61,7 @@ def _allow_uniform_per_layer_reads(cfg):
 
 
 def _init_baseline(self, init_fn):
-    """init_*_snapkv plus what the 5.x attention classes do not carry."""
+    """Call ``init_*_snapkv`` and add the values that the 5.x attention classes do not have."""
     if not hasattr(self, "kv_cluster"):
         cfg = self.config
         text_cfg = getattr(cfg, "text_config", None) or cfg
@@ -82,14 +75,9 @@ def _init_baseline(self, init_fn):
     if getattr(self.kv_cluster, "num_heads", None) is None:
         text_cfg = getattr(self.config, "text_config", None) or self.config
         self.kv_cluster.num_heads = int(text_cfg.num_attention_heads)
-    # The ATTENTION MODULE's value is authoritative, not the config's. init_*_snapkv
-    # computes num_key_value_groups as a global
-    # `config.num_attention_heads // config.num_key_value_heads`, but Gemma 4 keeps
-    # num_key_value_heads in per_layer_config, so the global read can disagree with
-    # what this layer's projections actually emit. The cluster then repeat_kv's by the
-    # wrong factor and the score matmul fails ("size of tensor a (4) must match tensor
-    # b (2)"). self.num_key_value_groups was derived from this layer's own config when
-    # the module was built, so it always matches the tensors.
+    # Use num_key_value_groups of the attention module, not of the global config.
+    # Gemma 4 sets num_key_value_heads per layer, so the global value can be
+    # different from the value of this layer.
     self.kv_cluster.num_key_value_groups = int(self.num_key_value_groups)
 
 
@@ -114,7 +102,7 @@ def _decode_varlen(self, query_states, key_states, value_states, past_key_values
 
 
 def make_qwen3_5_baseline_forward(init_fn):
-    """Build a Qwen3.5 attention forward for a baseline package."""
+    """Make a Qwen3.5 attention forward for one baseline package."""
 
     def forward(self, hidden_states, position_embeddings, attention_mask=None,
                 past_key_values=None, **kwargs):
@@ -131,7 +119,7 @@ def make_qwen3_5_baseline_forward(init_fn):
         hidden_shape = (*input_shape, -1, self.head_dim)
         q_len = input_shape[-1]
 
-        # Output gate -- see causal_lookahead_hybrid_hijack for why it is carried.
+        # Output gate of Qwen3.5 (see causal_lookahead_hybrid_hijack).
         query_states, gate = torch.chunk(
             self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2), 2, dim=-1)
         gate = gate.reshape(*input_shape, -1)
@@ -148,7 +136,7 @@ def make_qwen3_5_baseline_forward(init_fn):
             attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
                 self.config._attn_implementation, eager_attention_forward)
             attn_output, _ = attention_interface(
-                # NOT pre-repeated -- the interface applies repeat_kv itself.
+                # Do not repeat K and V here. The interface applies repeat_kv.
                 self, query_states, key_states, value_states,
                 attention_mask, dropout=0.0, scaling=self.scaling, **kwargs)
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
@@ -164,7 +152,7 @@ def make_qwen3_5_baseline_forward(init_fn):
 
 
 def make_gemma4_baseline_forward(init_fn):
-    """Build a Gemma 4 attention forward for a baseline package."""
+    """Make a Gemma 4 attention forward for one baseline package."""
 
     def forward(self, hidden_states, position_embeddings, attention_mask=None,
                 shared_kv_states=None, past_key_values=None, **kwargs):
@@ -187,7 +175,7 @@ def make_gemma4_baseline_forward(init_fn):
         query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape))
         query_states = apply_rotary_pos_emb(query_states, cos, sin, unsqueeze_dim=2).transpose(1, 2)
         key_states = self.k_proj(hidden_states).view(hidden_shape)
-        # attention_k_eq_v: v_proj is None and the value stream IS the key stream.
+        # attention_k_eq_v: v_proj is None, and the values are the keys.
         value_states = self.v_proj(hidden_states).view(hidden_shape) if self.v_proj is not None else key_states
         key_states = self.k_norm(key_states)
         key_states = apply_rotary_pos_emb(key_states, cos, sin, unsqueeze_dim=2).transpose(1, 2)
@@ -201,7 +189,7 @@ def make_gemma4_baseline_forward(init_fn):
             attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
                 self.config._attn_implementation, eager_attention_forward)
             attn_output, _ = attention_interface(
-                # NOT pre-repeated -- the interface applies repeat_kv itself.
+                # Do not repeat K and V here. The interface applies repeat_kv.
                 self, query_states, key_states, value_states,
                 attention_mask, dropout=0.0, scaling=self.scaling,
                 sliding_window=getattr(self, "sliding_window", None), **kwargs)
@@ -218,16 +206,12 @@ def make_gemma4_baseline_forward(init_fn):
 
 
 def _make_baseline_model_forward(orig_forward):
-    """Install the ragged cache for a BASELINE run.
+    """Wrap the model forward so that a baseline run uses the ragged cache.
 
-    LORE-KV has three phases and only needs the flat cache in the "final" one, so
-    make_hybrid_model_forward gates on lookahead_phase == "final". A baseline has no
-    phases at all: it evicts inside the prefill forward and decodes from the evicted
-    cache on the very next token. Reusing the gated wrapper meant the swap never
-    happened -- update_kv wrote a flattened 2-D tensor into a stock DynamicLayer,
-    and the first decode step died in transformers' own cat():
-        RuntimeError: Tensors must have same number of dimensions: got 2 and 4
-    So install it unconditionally here, still only for the compressible layers.
+    A baseline evicts in the prefill forward and decodes from the evicted cache at
+    the next token. It has no phases. The wrapper thus installs the ragged cache for
+    each forward, for the compressible layers only. Without it, the first decode step
+    fails in ``torch.cat`` with a 2-D and a 4-D tensor.
     """
     def forward(self, *args, **kwargs):
         pkv = kwargs.get("past_key_values")
@@ -247,11 +231,10 @@ def _patch(attn_cls, model_cls, fwd):
 
 
 def replace_hybrid_baseline(which: str):
-    """Patch Qwen3.5 + Gemma 4 for a baseline. `which` is 'andpro' or 'adaptive'.
+    """Patch Qwen3.5 and Gemma 4 with a baseline.
 
-    A baseline decodes against the ragged cache from the first generated token, so
-    there is no "final" phase flag to switch on -- the model forward marks the
-    cache as flat up front by setting lookahead_phase="final".
+    Args:
+        which: ``"andpro"`` or ``"adaptive"`` (Ada-KV, also used by ``critical``).
     """
     if which == "andpro":
         from andpro_snapkv.monkeypatch.snapkv_utils import init_andpro_snapkv as init_fn

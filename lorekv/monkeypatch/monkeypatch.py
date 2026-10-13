@@ -32,10 +32,8 @@ def check_version():
                       "they target transformers 4.44.2 (see pyproject.toml).")
 
 
-# NOTE: the active phase (model.model.config.lookahead_phase, one of "collect"/"lookahead"/"final")
-# is what decides at runtime whether the patched Model.forward/attention forward run plain
-# full-attention (prefill + lookahead-particle decode) or the post-eviction varlen decode path.
-# See lorekv.monkeypatch.lookahead_runner for the orchestration that flips it.
+# config.lookahead_phase ("collect", "lookahead" or "final") selects the operation of
+# the patched forwards. lorekv.monkeypatch.lookahead_runner sets the phase.
 def replace_mistral_lookahead():
     check_version()
     transformers.models.mistral.modeling_mistral.MistralForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_lookahead_mistral
@@ -51,20 +49,17 @@ def replace_llama_lookahead():
 
 
 # ---------------------------------------------------------------------------
-# Extra backbones beyond Mistral and Llama.
+# Additional dense backbones.
 #
-# Ministral3 is vendored in models_ext/ as a Llama subclass, so it reuses this
-# package's Llama model forward and prepare_inputs_for_generation unchanged; only
-# the attention forward is re-emitted, because the vendored attention class
-# defines its own `forward` and would otherwise shadow the LlamaFlashAttention2
-# patch. Qwen2 is native in transformers 4.44 but predates the rotary refactor,
-# so it brings its own model forward too. Both files are generated from the Llama
-# hijack by scripts/gen_ext_hijacks.py.
+# models_ext/ implements Ministral3 as a Llama subclass. It uses the Llama model
+# forward and prepare_inputs_for_generation of this package. It needs its own
+# attention forward, because its attention class defines `forward`. Qwen2 in
+# transformers 4.44 uses an older rotary interface, so it also needs its own model
+# forward. scripts/gen_ext_hijacks.py generates both files from the Llama patch.
 # ---------------------------------------------------------------------------
-# Imported lazily. models_ext and the 4.44 hijacks reach into modules that
-# transformers 5.x removed (e.g. llama.tokenization_llama_fast), so importing them
-# at module scope would make this whole file unimportable on the 5.x venv the
-# hybrid backbones run in -- taking replace_qwen3_5_lookahead down with it.
+# These imports are local. models_ext and the 4.44 patches use modules that
+# transformers 5.x removed. A module-level import would prevent the use of this
+# file in the 5.x environment of the hybrid backbones.
 
 
 def replace_ministral3_lookahead():
@@ -90,20 +85,14 @@ def replace_qwen2_lookahead():
 # ---------------------------------------------------------------------------
 # Hybrid-attention backbones (transformers 5.x): Qwen3.5, Gemma 4.
 #
-# These are NOT vendored into models_ext/ the way Ministral3 was. Ministral3 is
-# "Llama plus a tweak", so a 4.44-compatible subclass was a few hundred lines.
-# Qwen3.5 carries a whole second mixer (Qwen3_5GatedDeltaNet) and Gemma 4 is a
-# unified multimodal stack; back-porting either to 4.44 would mean re-implementing
-# machinery we never touch. Instead they run on transformers 5.x in a separate
-# venv, and only the attention forward of the *compressible* layers is replaced.
-#
-# check_version() is deliberately NOT called: it warns for anything that is not
-# 4.37 and these run on 5.16 by design.
+# These backbones run on transformers 5.x in a separate environment. Only the
+# attention forward of the compressible layers is replaced. check_version() is not
+# called, because it expects transformers 4.44.
 # ---------------------------------------------------------------------------
 def _patch_hybrid(attn_cls, model_cls, attn_forward):
     from lorekv.monkeypatch.causal_lookahead_hybrid_hijack import (
         make_hybrid_model_forward)
-    # Keep the original bound so a non-compressible layer can fall through to it.
+    # Keep the original forward for the layers that are not compressed.
     if not hasattr(attn_cls, "_lorekv_orig_forward"):
         attn_cls._lorekv_orig_forward = attn_cls.forward
     attn_cls.forward = attn_forward
