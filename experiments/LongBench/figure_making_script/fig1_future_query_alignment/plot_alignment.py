@@ -1,10 +1,8 @@
-"""Figure 1 (plot stage) - reads alignment_data.npz and draws the alignment curves.
+"""Future-query coverage, plot stage (paper Figure 1(b)).
 
-  x-axis : number of lookahead particles M
-  y-axis : cosine coverage of the true full-cache decode queries
-  curves : prompt-window / single trajectory, then one per (beta, gamma, lambda_D)
-           cell of the Eq. 3 weighting grid (uniform / log-prob / typicality /
-           entropy / disagreement / disagreement-instead-of-entropy)
+x-axis: number of trajectories M. y-axis: cosine coverage of the true queries.
+One curve for the prompt window, one for one trajectory and one for each
+(beta, gamma, lambda_D) setting of Eq. 3.
 """
 import argparse
 import os

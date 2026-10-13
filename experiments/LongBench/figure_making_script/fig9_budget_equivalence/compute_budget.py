@@ -1,14 +1,15 @@
-"""Figure 9 (compute stage) - Budget-equivalence / memory-saving curves.
+"""Budget equivalence, compute stage (paper Figure 13, App. F.7).
 
-Instead of accuracy, we use full-cache behavioral fidelity F(B): the decode-time
-attention-output cosine to the FULL cache achieved at budget B. We sweep B for each
-method (attention / AnDPro-window / LORE-KV) and save the F(B) curves; the plot
-stage inverts them to get the budget a baseline needs to match LORE-KV's fidelity
-and the resulting memory saving.
+The script measures the fidelity F(B): the cosine of the attention output to the
+full-cache output at budget B (Eq. 15). It computes F(B) over a list of budgets for
+the attention, AnDPro-window and LORE-KV scores.
 
-Saved: budget_data.npz. Run on the GPU cluster, e.g.:
-  python compute_budget.py --config config/lorekv-ent-adap-topk.conf \
-         --dataset single --samples-per-dataset 3 --budgets 64 128 256 512 1024
+Output: ``budget_data.npz`` for ``plot_budget.py``.
+
+Usage (one GPU)::
+
+    python compute_budget.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 3 --budgets 64 128 256 512 1024
 """
 import argparse
 import math

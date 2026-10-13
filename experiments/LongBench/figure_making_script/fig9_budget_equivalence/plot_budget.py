@@ -1,9 +1,8 @@
-"""Figure 9 (plot stage) - reads budget_data.npz.
+"""Budget equivalence, plot stage (paper Figure 13).
 
-Left  : fidelity F(B) vs budget for each method.
-Right : memory saving of LORE-KV vs each baseline: for each LORE-KV budget B, the
-        smallest baseline budget B_eq matching F_LORE(B), plotted as
-        saving = 1 - B_eq/B (%). Baseline curves are interpolated for the inversion.
+Left: fidelity F(B) against the budget for each score. Right: the cache saving of
+LORE-KV, 1 - B_eq / B, where B_eq is the smallest baseline budget with the same
+fidelity as LORE-KV at budget B. The baseline curves are interpolated.
 """
 import argparse
 import os
@@ -22,8 +21,7 @@ COLOR = {"attention": "#7f7f7f", "andpro_window": "#1f77b4", "lorekv_multi": "#d
 
 
 def _equiv_budget(target_F, base_budgets, base_F):
-    """Smallest baseline budget whose fidelity >= target_F (linear interpolation,
-    monotone-increasing assumption). Returns np.nan if even the largest can't match."""
+    """Return the smallest baseline budget with fidelity >= ``target_F`` (linear interpolation), or nan."""
     order = np.argsort(base_budgets)
     bb = np.array(base_budgets)[order]; bf = np.array(base_F)[order]
     if target_F <= bf[0]:

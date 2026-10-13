@@ -1,6 +1,7 @@
-"""RULER fig8_layer_head_analysis - plot stage (thin wrapper). Auto-finds the newest tagged .npz in
-this folder (--data-dir HERE) and writes the .png next to it, reusing
-experiments/LongBench/figure_making_script/fig8_layer_head_analysis/plot_layer_head.py."""
+"""RULER version of ``experiments/LongBench/figure_making_script/fig8_layer_head_analysis/plot_layer_head.py`` (plot stage).
+
+The script uses the newest ``.npz`` in this directory and calls the LongBench module.
+"""
 import os
 import sys
 LB_FIG = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..",

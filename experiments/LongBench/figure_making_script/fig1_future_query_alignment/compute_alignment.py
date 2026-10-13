@@ -1,25 +1,18 @@
-"""Figure 1 (compute stage) - Future-query alignment.
+"""Future-query coverage, compute stage (paper Figure 1(b), App. F.2).
 
-Validates the paper's central premise: do confidence-weighted MULTIPLE lookahead
-trajectories approximate the queries that actually drive decoding better than a
-prompt-window reference or a single surrogate trajectory?
+The script measures how well each query set covers the true decoding queries.
+The true queries come from a greedy decode with the full cache. The query sets are:
 
-For each sample we obtain the TRUE decoding queries Q_true by greedy-decoding the
-answer against the FULL (uncompressed) cache, then measure how well several
-estimated query sets cover them (cosine coverage, common.weighted_coverage):
+* the prompt-window queries (as in SnapKV and AnDPro),
+* one lookahead trajectory,
+* M trajectories with uniform, log-probability, LORE-KV /E and LORE-KV /D weights.
 
-  * prompt-window queries              (what SnapKV/AnDPro score with)
-  * a single lookahead trajectory      (Lookahead Q-Cache style)
-  * M trajectories, uniform weights
-  * M trajectories, log-probability weighting
-  * M trajectories, LORE-KV /E weighting
-  * M trajectories, LORE-KV /D weighting
+Output: ``alignment_data.npz`` for ``plot_alignment.py``.
 
-Saved: alignment_data.npz (read by plot_alignment.py). No figure is drawn here.
+Usage (one GPU)::
 
-Run on the GPU cluster, e.g.:
-  python compute_alignment.py --config config/lorekv-ent-unif-topk.conf \
-         --dataset single --samples-per-dataset 3 --budget 128
+    python compute_alignment.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 3 --budget 128
 """
 import argparse
 import os

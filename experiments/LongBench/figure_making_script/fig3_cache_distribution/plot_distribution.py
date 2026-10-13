@@ -1,9 +1,7 @@
-"""Figure 3 (plot stage) - reads distribution_data.npz.
+"""Attention-output fidelity, plot stage (paper Figure 5).
 
-Left  : distribution of decode-time attention-output cosine similarity to the FULL
-        cache, for LORE-KV eviction vs attention-only eviction (mass near 1 = the
-        evicted cache reproduces the full-cache output distribution).
-Right : that fidelity across model depth (per-layer mean cosine).
+Left: distribution of the cosine similarity to the full-cache output for LORE-KV
+and attention-only eviction. Right: the mean cosine of each layer.
 """
 import argparse
 import os

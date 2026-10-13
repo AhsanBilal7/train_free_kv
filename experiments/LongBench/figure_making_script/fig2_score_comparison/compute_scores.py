@@ -1,24 +1,20 @@
-"""Figure 2 (compute stage) - Raw token-importance score comparison.
+"""Retention-order shift, compute stage (paper Figure 9, App. F.3).
 
-Three scoring rules over the same candidate KV pairs, using the same captured
-prompt + lookahead particles:
+Three scores of the same candidate tokens, with the same prompt and trajectories:
 
-  * attention        - simple mean prompt-window attention weight a_{q,i}
-                       (the SnapKV/H2O-style importance signal).
-  * single_lookahead - LORE-KV output-projection perturbation score with the
-                       window queries + ONE lookahead trajectory (Eq. 13, M=1).
-  * lorekv_multi     - LORE-KV score with window + M confidence-weighted
-                       trajectories (Eq. 7, the full method).
+* attention: mean prompt-window attention (SnapKV / H2O).
+* single_lookahead: the LORE-KV score with the window and one trajectory (M = 1).
+* lorekv_multi: the LORE-KV score with the window and M weighted trajectories (Eq. 7).
 
-We reuse the *exact* per-layer scoring already implemented on each layer's
-`kv_cluster` (TestTimeLookaheadKVCluster._project_and_score), so the numbers
-match what the eviction actually uses.
+The script uses ``TestTimeLookaheadKVCluster._project_and_score`` of each layer, so
+the values are the same as during eviction.
 
-Saved: score_data.npz (read by plot_scores.py).
+Output: ``score_data.npz`` for ``plot_scores.py``.
 
-Run on the GPU cluster, e.g.:
-  python compute_scores.py --config config/lorekv-ent-adap-topk.conf \
-         --dataset single --samples-per-dataset 3 --budget 128
+Usage (one GPU)::
+
+    python compute_scores.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 3 --budget 128
 """
 import argparse
 import os
@@ -48,7 +44,7 @@ def _topb_overlap(a, b, B):
 
 @torch.no_grad()
 def attention_score_layer(kvc, key_states):
-    """Mean prompt-window attention weight per candidate token, averaged over heads -> [n]."""
+    """Return the mean prompt-window attention of each candidate token, averaged over heads [n]."""
     import math
     q = kvc.window_queries[0].float()      # [H, w, D]
     k = key_states[0].float()              # [H, n, D]

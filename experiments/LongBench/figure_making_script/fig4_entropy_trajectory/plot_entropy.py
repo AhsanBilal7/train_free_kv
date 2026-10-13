@@ -1,11 +1,7 @@
-"""Figure 4 (plot stage) - reads entropy_data.npz.
+"""Trajectory entropy and coverage, plot stage (paper App. F.4).
 
-Left  : per-particle predictive entropy vs single-trajectory alignment to the true
-        decode queries. A downward trend = high-entropy trajectories are the bad
-        ones to score eviction from.
-Right : alignment when you keep a single (random) trajectory vs when you combine M
-        trajectories (uniform / log-prob / LORE-KV entropy-aware). Entropy-aware
-        weighting lifts the mean above a random single draw and shrinks its spread.
+Left: entropy of each trajectory against its coverage of the true queries. Right:
+coverage of one random trajectory and of M trajectories with each weighting.
 """
 import argparse
 import os

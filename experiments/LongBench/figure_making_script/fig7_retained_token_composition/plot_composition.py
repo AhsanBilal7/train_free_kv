@@ -1,9 +1,8 @@
-"""Figure 7 (plot stage) - reads composition_data.npz.
+"""Retention by token class, plot stage (paper Figure 11).
 
-Left  : per-class retention rate (grouped bars) for attention / AnDPro-window /
-        LORE-KV -> does LORE-KV preserve answer/evidence tokens, not just recent or
-        high-attention ones?
-Right : enrichment (P(class | retained) / P(class | prompt)); >1 = over-retained.
+Left: retention rate of each class for the three scores. Right: enrichment
+P(class | kept) / P(class | prompt); a value above 1 means the class is kept more
+often than its share of the prompt.
 """
 import argparse
 import os

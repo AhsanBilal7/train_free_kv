@@ -1,22 +1,20 @@
-"""Figure 5 (compute stage) - Confidence-weight calibration.
+"""Reliability signals and trajectory utility, compute stage (paper App. F.4).
 
-Do the probability-entropy weights actually pick useful trajectories? For every
-lookahead particle m we measure its ORACLE utility (how well that one trajectory's
-query states match the true full-cache decode path), then relate it to each
-confidence signal:
+For each trajectory m the script measures its oracle utility:
 
-  utility U_m   :  (a) alignment  = cosine coverage of Q_true by particle m's queries
-                   (b) recall@B   = top-B overlap of particle m's perturbation score
-                                    with the oracle score S* (scored under Q_true)
-  signals       :  mean log-prob, mean entropy, trajectory disagreement D_m,
-                   reliability R_m (Eq. 3), normalized weight omega_m
+* alignment: cosine coverage of the true queries by the queries of trajectory m;
+* recall@B: top-B overlap of the score of trajectory m with the oracle score S*.
 
-Terminology note: this is ordinary categorical NEXT-TOKEN entropy, NOT semantic
-entropy (which groups meaning-equivalent generations). Keep them distinct.
+It records the signals: mean log-probability, mean entropy, disagreement D_m,
+reliability R_m (Eq. 3) and weight omega_m. The entropy is the entropy of the
+next-token distribution, not a semantic entropy.
 
-Saved: calibration_data.npz. Run on the GPU cluster, e.g.:
-  python compute_calibration.py --config config/lorekv-ent-unif-topk.conf \
-         --dataset single --samples-per-dataset 4 --num-particles 8 --budget 128
+Output: ``calibration_data.npz`` for ``plot_calibration.py``.
+
+Usage (one GPU)::
+
+    python compute_calibration.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 4 --num-particles 8 --budget 128
 """
 import argparse
 import os

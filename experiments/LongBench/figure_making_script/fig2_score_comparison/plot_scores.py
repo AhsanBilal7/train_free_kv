@@ -1,9 +1,7 @@
-"""Figure 2 (plot stage) - reads score_data.npz.
+"""Retention-order shift, plot stage (paper Figure 9).
 
-Left  : sorted (rank-ordered) importance-score curves for the three scoring rules
-        on a representative layer -> shows the shape of each importance signal.
-Right : how much the rules DISAGREE - top-B selection overlap and Spearman rank
-        correlation between each pair, averaged over layers/samples.
+Left: sorted score profiles of the three scores on one layer. Right: top-B overlap
+and Spearman correlation of each pair, averaged over layers and samples.
 """
 import argparse
 import os

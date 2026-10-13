@@ -1,22 +1,20 @@
-"""Figure 3 (compute stage) - Full-cache vs evicted-cache attention-output distribution.
+"""Attention-output fidelity, compute stage (paper Figure 5).
 
-The claim behind output-aware eviction is that keeping the right KV pairs preserves
-what the model actually computes at decode time. We test this directly: for the TRUE
-full-cache decode queries, we compare the attention output o_q produced by
+For the true decoding queries, the script compares the attention output of
 
-  * the FULL cache,
-  * the cache evicted by LORE-KV (window + confidence-weighted lookahead perturbation),
-  * the cache evicted by a plain attention (SnapKV-style) score,
+* the full cache,
+* the cache that LORE-KV keeps, and
+* the cache that a prompt-window attention score keeps,
 
-all at the same budget B and same per-head budget. We record, per (layer, head,
-query), the cosine similarity and relative L2 error of the evicted output vs the
-full output. A method that preserves the decode-time distribution keeps cosine near 1.
+at the same budget. It records the cosine similarity and the relative L2 error to
+the full-cache output for each layer, head and query.
 
-Saved: distribution_data.npz (read by plot_distribution.py).
+Output: ``distribution_data.npz`` for ``plot_distribution.py``.
 
-Run on the GPU cluster, e.g.:
-  python compute_distribution.py --config config/lorekv-ent-adap-topk.conf \
-         --dataset single --samples-per-dataset 2 --budget 128 --decode-steps 16
+Usage (one GPU)::
+
+    python compute_distribution.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 2 --budget 128 --decode-steps 16
 """
 import argparse
 import math
@@ -33,8 +31,7 @@ import common
 
 @torch.no_grad()
 def head_topb_mask(scores, n, budget, window_size):
-    """scores: [H, n] -> bool mask [H, n] keeping the first token, the last `window_size`
-    tokens, and the top (budget - protected) candidates per head."""
+    """Return a bool mask [H, n] that keeps the first token, the last ``window_size`` tokens and the top candidates of each head."""
     H = scores.shape[0]
     device = scores.device
     protected = torch.zeros(H, n, dtype=torch.bool, device=device)
@@ -51,7 +48,7 @@ def head_topb_mask(scores, n, budget, window_size):
 
 @torch.no_grad()
 def attn_outputs(q, k, v, mask=None):
-    """q:[H,Tt,D] k,v:[H,n,D] mask:[H,n] or None -> o:[H,Tt,D]."""
+    """Return the attention output [H, Tt, D] for q [H, Tt, D], k and v [H, n, D] and an optional mask."""
     D = q.shape[-1]
     logits = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(D)   # [H,Tt,n]
     if mask is not None:

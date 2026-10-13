@@ -1,32 +1,25 @@
-"""Figure 10 (compute stage) - Trajectory disagreement as the confidence signal.
+"""Query-space disagreement and trajectory utility, compute stage (paper App. F.4).
 
-Paper App. F.4. Relates the query-space disagreement of Eq. 10,
+The script relates the disagreement of Eq. 10,
 
-    D_m = 1/(M-1) sum_{r!=m} 1/(T|G|) sum_{u,g} [ 1 - cos(q^m_{u,g}, q^r_{u,g}) ],
+    D_m = 1/(M-1) sum_{r!=m} 1/(T|G|) sum_{u,g} [1 - cos(q^m_{u,g}, q^r_{u,g})],
 
-standardized across the M trajectories (App. C.3), and the entropy channel of the
-reliability score R_m (Eq. 3) to each trajectory's oracle utility.
+standardized across the M trajectories (App. C.3), and the entropy term of Eq. 3 to
+the oracle utility of each trajectory.
 
-Two questions have to be answered with data, and this script measures both on the
-same captured particles (so the comparison is exactly like-for-like):
+1. Signal quality: For each trajectory the script records its coverage of the true
+   queries and its recall@B against the oracle score, with each signal
+   (log-probability, entropy, D_m).
+2. Weighting result: For each sample it weights the same M trajectories with
+   uniform, log-probability, LORE-KV /E and LORE-KV /D weights and measures the
+   coverage of the true queries. Only the weights are different.
 
- (1) IS D_m THE BETTER SIGNAL?  For every particle we record its oracle utility --
-     how well that ONE trajectory covers the true full-cache decode queries
-     Q_future, and its recall@B against the oracle perturbation score S* -- and
-     pair it with each candidate signal (log-prob, entropy, D_m). A particle that
-     disagrees with the ensemble should be a worse proxy for Q_future, i.e. D_m
-     should correlate NEGATIVELY with utility, and more strongly than entropy does.
-     This is the relationship the figure is named after.
+Output: ``divergence_data.npz`` for ``plot_divergence.py``.
 
- (2) DOES THE WEIGHTING THAT USES IT WIN?  For each sample we re-weight the same M
-     particles under uniform / log-prob / LORE-KV /E / LORE-KV /D weights and measure the
-     resulting ensemble coverage of Q_future. Because every scheme sees identical
-     particles, any difference is attributable to the weights alone -- no extra
-     test-time compute is involved.
+Usage (one GPU)::
 
-Saved: divergence_data.npz (read by plot_divergence.py). Run on the GPU cluster:
-  python compute_divergence.py --config config/lorekv-dis-unif-topk.conf \
-         --dataset single --samples-per-dataset 4 --num-particles 8 --budget 128
+    python compute_divergence.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 4 --num-particles 8 --budget 128
 """
 import argparse
 import os

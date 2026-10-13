@@ -1,13 +1,9 @@
-"""Figure 5 (plot stage) - reads calibration_data.npz.
+"""Reliability signals and trajectory utility, plot stage (paper App. F.4).
 
-A  calibration curve  : bin particles by predicted confidence, plot mean predicted
-                        confidence vs mean observed utility.
-B  risk-coverage       : keep the most-confident fraction of particles, plot that
-                        coverage vs mean alignment error of the kept particles.
-C  correlation bars    : Spearman(signal, oracle utility) for log-prob, -entropy,
-                        combined R_m, the normalized weight, and the trajectory
-                        disagreement -D_m -- the critical ablation that isolates
-                        what each second term of R_m actually adds.
+A: calibration curve (mean confidence against mean utility in bins).
+B: risk-coverage curve (coverage of the most confident trajectories against their
+   mean alignment error).
+C: Spearman correlation of each signal with the oracle utility.
 """
 import argparse
 import os

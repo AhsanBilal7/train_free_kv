@@ -1,21 +1,20 @@
-"""Figure 7 (compute stage) - What kinds of tokens does each method retain?
+"""Retention by token class, compute stage (paper Figure 11, App. F.5).
 
-Every prompt token is labeled with a coarse semantic class, then we measure how
-strongly each eviction rule preserves each class (mean fraction of heads that keep
-the token, averaged over layers). Three rules computed from the same machinery:
+Each prompt token gets a class: attention sink (position 0), recent (last window),
+answer or evidence (part of a reference answer), number, capitalized entity,
+punctuation, or other. The script measures for three scores how often each class
+is kept (fraction of heads, averaged over layers):
 
-  * attention      - SnapKV-style mean window attention weight
-  * andpro_window  - output-projection perturbation under window queries only
-                     (the AnDPro-like, prompt-side output-aware baseline)
-  * lorekv_multi   - LORE-KV: window + confidence-weighted lookahead perturbation
+* attention: mean window attention (SnapKV);
+* andpro_window: projected deletion score with the window queries only;
+* lorekv_multi: the full LORE-KV score.
 
-Token classes (priority order): attention-sink (pos 0), recent (last window),
-answer/evidence (matches a gold answer span), number, capitalized entity,
-punctuation/boilerplate, other.
+Output: ``composition_data.npz`` for ``plot_composition.py``.
 
-Saved: composition_data.npz. Run on the GPU cluster, e.g.:
-  python compute_composition.py --config config/lorekv-ent-adap-topk.conf \
-         --dataset single --samples-per-dataset 4 --budget 128
+Usage (one GPU)::
+
+    python compute_composition.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 4 --budget 128
 """
 import argparse
 import math

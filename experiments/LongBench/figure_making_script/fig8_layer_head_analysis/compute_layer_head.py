@@ -1,14 +1,15 @@
-"""Figure 8 (compute stage) - Layer-wise and head-wise structure of the scores.
+"""Layer and head structure, compute stage (paper Figure 12, App. F.6).
 
-  A. layer perturbation energy   E_l   = sum_h sum_i S_i^{l,h}   (LORE-KV multi score)
-  B. head future-query gain      G_lh  = recall@B(S_multi vs S*) - recall@B(S_window vs S*)
-                                         per (layer, head): where does adding future
-                                         queries actually improve retention?
-  C. head query mismatch         MM_lh = 1 - align(window queries, true queries) per head
+A. Layer energy E_l = sum_h sum_i S_i^{l,h} of the LORE-KV score.
+B. Head gain G_lh = recall@B(S_multi, S*) - recall@B(S_window, S*).
+C. Head mismatch MM_lh = 1 - coverage(window queries, true queries).
 
-Saved: layer_head_data.npz. Run on the GPU cluster, e.g.:
-  python compute_layer_head.py --config config/lorekv-ent-adap-topk.conf \
-         --dataset single --samples-per-dataset 3 --budget 128
+Output: ``layer_head_data.npz`` for ``plot_layer_head.py``.
+
+Usage (one GPU)::
+
+    python compute_layer_head.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 3 --budget 128
 """
 import argparse
 import os

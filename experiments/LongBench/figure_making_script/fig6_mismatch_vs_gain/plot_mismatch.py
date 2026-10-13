@@ -1,9 +1,7 @@
-"""Figure 6 (plot stage) - reads mismatch_data.npz.
+"""Gain against query mismatch, plot stage (paper Figure 6).
 
-Scatter of per-example prompt-vs-future query mismatch (x) against LORE-KV's gain
-(y), with a regression line and Spearman correlation. A positive slope is the
-predicted signature: the method helps most exactly where prompt and future queries
-diverge most.
+Scatter of the mismatch of each sample (x) against the gain of LORE-KV (y), with a
+regression line and the Spearman correlation.
 """
 import argparse
 import os

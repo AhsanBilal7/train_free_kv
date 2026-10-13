@@ -1,8 +1,6 @@
-"""Figure 8 (plot stage) - reads layer_head_data.npz.
+"""Layer and head structure, plot stage (paper Figure 12).
 
-Left  : layer perturbation energy E_l across depth.
-Right : heatmap of per-(layer, head) future-query recall gain G_lh -> shows the gain
-        is concentrated in specific heads/layers, motivating adaptive allocation.
+Left: layer energy E_l over the depth. Right: heatmap of the head gain G_lh.
 """
 import argparse
 import os

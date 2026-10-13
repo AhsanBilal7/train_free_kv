@@ -1,18 +1,18 @@
-"""Figure 6 (compute stage) - Query-mismatch vs improvement (per-example causal case).
+"""Gain against query mismatch, compute stage (paper Figure 6).
 
-Tests the predicted condition under which LORE-KV should help: the gain should grow
-with how much the prompt-window queries differ from the true decoding queries.
+For each sample the script computes:
 
-Per sample:
-  mismatch  M(X) = 1 - alignment(Q_window, Q_true)          (layer-averaged)
-  gains (LORE-KV multi over a window-only / AnDPro-like proxy, and over attention):
-    * oracle recall gain   : recall@B(S_multi, S*) - recall@B(S_window, S*)
-    * output-fidelity gain : cos(o_LORE, o_full) - cos(o_window, o_full)
-                             cos(o_LORE, o_full) - cos(o_attn,   o_full)
+* mismatch Mis(X) = 1 - coverage(Q_window, Q_true), averaged over layers;
+* the oracle-recall gain recall@B(S_multi, S*) - recall@B(S_window, S*);
+* the output-fidelity gains of LORE-KV over the window-only score and over the
+  attention score.
 
-Saved: mismatch_data.npz. Run on the GPU cluster, e.g.:
-  python compute_mismatch.py --config config/lorekv-ent-adap-topk.conf \
-         --dataset single --samples-per-dataset 8 --budget 128
+Output: ``mismatch_data.npz`` for ``plot_mismatch.py``.
+
+Usage (one GPU)::
+
+    python compute_mismatch.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 8 --budget 128
 """
 import argparse
 import math

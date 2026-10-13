@@ -1,24 +1,16 @@
-"""Figure 4 (compute stage) - Why we need test-time compute (multiple trajectories).
+"""Trajectory entropy and coverage, compute stage (paper App. F.4).
 
-A single sampled continuation can wander into a high-entropy (uncertain) branch
-whose query states poorly match the queries that actually drive decoding; scoring
-eviction from that one trajectory then hurts. This script quantifies the risk and
-shows the fix:
+For each trajectory the script records its mean entropy (H_bar in Eq. 3) and the
+coverage of the true queries by that trajectory alone. For each sample it records
+the coverage of (a) one random trajectory, (b) M trajectories with uniform weights,
+(c) log-probability weights and (d) LORE-KV /E weights.
 
-  * per particle: mean predictive entropy (H_bar in Eq. 3) and how well that ONE trajectory's
-    query states cover the true full-cache decode queries (single-particle
-    alignment). We expect high-entropy particles to align worse.
-  * per sample: alignment when you (a) pick a random single trajectory
-    (mean/min/max over particles), (b) average M trajectories uniformly,
-    (c) log-prob weight them, (d) LORE-KV log-prob-minus-entropy weight them.
-    The entropy-aware combination should beat a random single draw and reduce
-    its variance.
+Output: ``entropy_data.npz`` for ``plot_entropy.py``.
 
-Saved: entropy_data.npz (read by plot_entropy.py).
+Usage (one GPU)::
 
-Run on the GPU cluster, e.g.:
-  python compute_entropy.py --config config/lorekv-ent-unif-topk.conf \
-         --dataset single --samples-per-dataset 4 --budget 128
+    python compute_entropy.py --config config/lorekv-ent-unif-topk.conf \\
+        --dataset single --samples-per-dataset 4 --budget 128
 """
 import argparse
 import os

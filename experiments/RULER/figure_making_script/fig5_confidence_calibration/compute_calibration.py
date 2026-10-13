@@ -1,9 +1,8 @@
-"""RULER fig5_confidence_calibration - compute stage (thin wrapper).
+"""RULER version of ``experiments/LongBench/figure_making_script/fig5_confidence_calibration/compute_calibration.py`` (compute stage).
 
-Reuses experiments/LongBench/figure_making_script/fig5_confidence_calibration/compute_calibration.py with RULER
-defaults (--benchmark ruler, --dataset 8192). The tagged .npz (config/model/budget/
-dataset in its name) is written INTO this folder via --out-dir. All underlying
-flags pass through, e.g.: python compute_calibration.py --dataset 4096,8192 --budget 128
+The script calls the LongBench module with ``--benchmark ruler``, the default
+dataset ``8192`` (use ``--dataset 4096`` for the paper setting) and this
+directory as the output directory.
 """
 import os
 import sys

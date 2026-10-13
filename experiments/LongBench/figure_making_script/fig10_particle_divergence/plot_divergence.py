@@ -1,18 +1,10 @@
-"""Figure 10 (plot stage) - reads divergence_data.npz.
+"""Query-space disagreement and trajectory utility, plot stage (paper App. F.4).
 
-A  D_m vs utility     : one point per lookahead particle. A DOWNWARD trend means a
-                        particle whose future-query trajectory disagrees with the
-                        ensemble is a worse proxy for the true decode queries --
-                        the premise for penalizing D_m in R_m (Eq. 7).
-B  entropy vs utility : the same particles against the signal D_m replaces. Plotted
-                        on its own axes so the two fits can be read side by side.
-C  correlation bars   : Spearman(signal, utility) for log-prob, -entropy, -D_m and
-                        the two combined confidences. This is the panel that says
-                        which term actually carries information about usefulness.
-D  weighting outcome  : ensemble coverage of Q_future under uniform / log-prob /
-                        log-prob-entropy / log-prob-divergence weights, plus the
-                        per-sample win rate of the divergence rule over the entropy
-                        rule (same particles, so weights are the only difference).
+A: D_m against utility, one point per trajectory.
+B: entropy against utility for the same trajectories.
+C: Spearman correlation of each signal with the utility.
+D: coverage of the true queries with each weighting, and the per-sample win rate
+   of the disagreement weighting over the entropy weighting.
 """
 import argparse
 import os

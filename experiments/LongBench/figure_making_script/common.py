@@ -1,34 +1,25 @@
-"""Shared backbone for the LORE-KV mechanism-analysis figures (paper App. F).
+"""Shared functions of the LORE-KV mechanism-analysis figures (paper App. F).
 
-Everything the four figure scripts need that touches the model lives here so the
-compute scripts stay short and every figure is produced from the *same* captured
-quantities (same prompts, same particles, same weights).
+All compute scripts use this module, so all figures use the same prompts,
+trajectories and weights.
 
-What this module gives you
---------------------------
-* `parse_conf(path)`               - read a repo `.conf` file into a dict (first
-                                     value of every space-separated sweep field).
-* `add_repo_root()`                - put the repo root on sys.path so the proven
-                                     `lorekv` package imports.
-* `load_model_and_tokenizer(path)` - lorekv.harness, as in experiments/*/pred.py.
-* `apply_lookahead_patch()`        - install LORE-KV's phase-aware forwards.
-* `configure_model(model, conf)`   - push the `.conf` hyper-parameters onto the
-                                     model config, exactly as pred.py does.
-* `load_longbench_samples(...)`    - the same prompt-building path pred.py uses.
-* `PostRoPEQueryCapture`           - non-invasive forward-pre-hooks that recompute
-                                     the post-RoPE query states for every layer
-                                     (used to record the TRUE full-cache decode
-                                     queries Q_future without disturbing the graph).
-* `collect_and_lookahead(...)`     - a faithful copy of phases 1-2 of
-                                     `lookahead_runner.generate_with_lookahead`
-                                     that STOPS before compress(), so the figures
-                                     can read the captured window queries, the M
-                                     lookahead particle queries, the full K/V, the
-                                     per-particle (log-prob, entropy, trajectory
-                                     divergence, weight), and the true decode queries.
-* scoring helpers reused straight from `TestTimeLookaheadKVCluster`.
+Functions:
+    parse_conf: Read a ``.conf`` file into a dict (first value of each sweep list).
+    add_repo_root: Add the repository root to ``sys.path``.
+    load_model_and_tokenizer: Load the model with :mod:`lorekv.harness`, as pred.py does.
+    apply_lookahead_patch: Install the LORE-KV forwards.
+    configure_model: Write the ``.conf`` hyperparameters to the model config.
+    load_samples: Make the prompts as experiments/*/pred.py does.
+    PostRoPEQueryCapture: Forward pre-hooks that compute the post-RoPE queries of
+        each layer. They record the true decoding queries Q_future and do not
+        change the forward.
+    collect_and_lookahead: Phases 1-2 of
+        :func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead`. It
+        stops before ``compress()`` and returns the window queries, the lookahead
+        queries, the full K and V, the trajectory statistics and the true queries.
+    Scoring helpers: They use ``TestTimeLookaheadKVCluster`` directly.
 
-These load a 7B/8B model and need one GPU.
+The functions load a 7B or 8B model and need one GPU.
 """
 import gc
 import json
@@ -107,7 +98,7 @@ def load_model_and_tokenizer(path):
 
 
 def configure_model(model, conf, budget):
-    """Write a parsed .conf's LORE-KV hyper-parameters onto the model, as pred.py does."""
+    """Write the LORE-KV hyperparameters of a parsed ``.conf`` to the model, as pred.py does."""
     import argparse
     add_repo_root()
     from lorekv.harness import add_method_args, configure_model as _configure
@@ -171,10 +162,11 @@ def _build_chat(tokenizer, prompt, model_name):
 
 def load_samples(benchmark, tokenizer, dataset, model_name, dataset_path=None,
                  max_length=64000, samples_per_dataset=2, device="cuda:0"):
-    """Benchmark-aware dispatcher used by every figure's compute script.
+    """Yield the prompts of one benchmark.
 
-    benchmark == 'longbench' -> LongBench sub-tasks (default 'single' = single-doc QA).
-    benchmark == 'ruler'     -> RULER sequence-length configs (default '8192')."""
+    ``benchmark="longbench"`` gives LongBench tasks (default ``single``: single-document
+    QA). ``benchmark="ruler"`` gives RULER lengths (default ``8192``).
+    """
     if benchmark == "ruler":
         path = dataset_path or "simonjegou/ruler"
         configs = resolve_ruler_configs(dataset)
@@ -191,9 +183,11 @@ def load_samples(benchmark, tokenizer, dataset, model_name, dataset_path=None,
 
 def load_longbench_samples(tokenizer, datasets, model_name, dataset_path="THUDM/LongBench",
                            max_length=64000, samples_per_dataset=2, device="cuda:0"):
-    """Yield dicts {dataset, max_gen, input_ids, attention_mask, context_length} using the
-    identical prompt pipeline as experiments/LongBench/pred.py (truncate-in-the-middle,
-    build_chat, per-dataset max_gen)."""
+    """Yield ``{dataset, max_gen, input_ids, attention_mask, context_length}`` for each sample.
+
+    The prompts are made as in experiments/LongBench/pred.py: middle truncation, chat
+    format and the generation length of each task.
+    """
     from datasets import load_dataset
     d2prompt = json.load(open(os.path.join(LONGBENCH_DIR, "config", "dataset2prompt.json")))
     d2maxlen = json.load(open(os.path.join(LONGBENCH_DIR, "config", "dataset2maxlen.json")))
@@ -331,7 +325,7 @@ class PostRoPEQueryCapture:
         self.buffers = [[] for _ in self.layers]
 
     def stacked(self):
-        """Return per-layer [1, Hq, Tsteps, D] concatenation of captured queries."""
+        """Return the captured queries of each layer as a tensor [1, Hq, T_steps, D]."""
         out = []
         for buf in self.buffers:
             out.append(torch.cat(buf, dim=2) if buf else None)
@@ -353,9 +347,11 @@ def _clone_dynamic_cache(cache):
 
 @torch.no_grad()
 def collect_and_lookahead(model, input_ids, attention_mask, decode_steps=32, capture_true=True):
-    """OOM-safe wrapper: if a sample is too large for the GPU, release everything and return
-    a skip sentinel (true_queries=None, per_layer=[]) so the caller drops it and continues,
-    instead of crashing the whole run. Otherwise returns the full capture dict."""
+    """Run :func:`_collect_and_lookahead_impl` and skip a sample that does not fit in GPU memory.
+
+    If an out-of-memory error occurs, the function releases the memory and returns
+    ``true_queries=None`` and ``per_layer=[]``. The caller then skips the sample.
+    """
     try:
         return _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps, capture_true)
     except torch.cuda.OutOfMemoryError:
@@ -386,14 +382,15 @@ def collect_and_lookahead(model, input_ids, attention_mask, decode_steps=32, cap
 
 @torch.no_grad()
 def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=32, capture_true=True):
-    """Run collect prefill + M lookahead particles + (optionally) a greedy full-cache decode
-    for the TRUE future queries. Returns a dict of captured, per-layer analysis tensors.
+    """Run the prefill, the M lookahead trajectories and, optionally, a greedy full-cache decode.
 
-    Faithful to phases 1-2 of lookahead_runner.generate_with_lookahead; the only additions are
-    (a) recording the PER-STEP statistics (c_u, H_u, V_u) and per-particle logprob/entropy
-        separately, not just the combined R_m -- tests V3/V4/V5 need the sequence, and
-        cbar_m = logp_mean + H_mean is exactly recoverable from the two means alone, and
-    (b) the true-decode capture via PostRoPEQueryCapture.
+    The function follows phases 1-2 of
+    :func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead`. It also
+    records the per-step statistics (c_u, H_u, V_u), the mean log-probability and
+    entropy of each trajectory, and the true decoding queries (PostRoPEQueryCapture).
+
+    Returns:
+        A dict of per-layer analysis tensors.
     """
     device = input_ids.device
     # Optional analysis-length cap (env FIG_MAX_ANALYSIS_TOKENS): the mechanism figures
@@ -549,8 +546,7 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
 
 
 def cleanup_clusters(model):
-    """Drop the big per-layer full K/V and query buffers between samples (matches
-    kv_cluster.release_collected_state + reset_lookahead_buffers in the runner)."""
+    """Release the full K, V and query buffers of each layer between samples."""
     for layer in model.model.layers:
         kvc = layer.self_attn.kv_cluster
         kvc.reset_lookahead_buffers()
@@ -559,15 +555,12 @@ def cleanup_clusters(model):
 
 
 def free_sample(model, cap=None):
-    """Fully release a finished sample's GPU memory BEFORE the next one is processed.
+    """Release all GPU memory of a finished sample before the next sample.
 
-    cleanup_clusters() only clears the per-layer kv_cluster tensors, but the dict
-    returned by collect_and_lookahead still holds the true-query tensors AND per-layer
-    references to those same K/V tensors -- so nothing is actually freed until `cap`
-    is dropped. This clears `cap` too, then forces a GC pass and empties the CUDA
-    allocator cache. Without it, a finished (up to ~40K-token) sample's memory carries
-    into the next sample's allocation and OOMs when a longer dataset (e.g. NarrativeQA)
-    follows a shorter one (e.g. Qasper)."""
+    :func:`cleanup_clusters` clears only the tensors of each kv_cluster. The capture
+    dict also holds the true queries and references to the K and V tensors. This
+    function clears the dict, runs the garbage collector and empties the CUDA cache.
+    """
     for layer in model.model.layers:
         kvc = layer.self_attn.kv_cluster
         kvc.reset_lookahead_buffers()
@@ -593,8 +586,16 @@ def _unit(x, eps=1e-8):
 
 @torch.no_grad()
 def weighted_coverage(true_q, sources, weights):
-    """true_q: [Hq, Tt, D]; sources: list of [Hq, Qi, D]; weights: 1D len == len(sources).
-    Returns a scalar float (mean over heads and true-query steps)."""
+    """Return the weighted coverage of the true queries by a set of query sources (Eq. 13).
+
+    Args:
+        true_q: Tensor [Hq, Tt, D].
+        sources: List of tensors [Hq, Qi, D].
+        weights: One weight for each source.
+
+    Returns:
+        The mean over heads and true steps, as a float.
+    """
     Hq = true_q.shape[0]
     tq = _unit(true_q.float())                       # [Hq, Tt, D]
     per_source = []
@@ -612,9 +613,10 @@ def weighted_coverage(true_q, sources, weights):
 
 
 def softmax_weights(scores, eta=1.0):
-    """Kept for back-compatibility. eta is NOT identifiable alongside (beta, gamma,
-    lambda_D) -- softmax(eta*(b*c - g*H - lD*D)) == softmax((eta*b)*c - ...) -- so new
-    code should call reliability_weights_from_capture() and leave eta at 1."""
+    """Return softmax(eta * scores). For compatibility only; use :func:`reliability_weights_from_capture`.
+
+    eta is redundant with (beta, gamma, lambda_D), so keep eta = 1.
+    """
     return F.softmax(eta * scores, dim=0)
 
 
@@ -636,13 +638,13 @@ def softmax_weights(scores, eta=1.0):
 #   disagreement without entropy        (1,   0,       0.3)
 # ---------------------------------------------------------------------------
 def centered_score(logprob_mean, entropy_mean):
-    """cbar_m = mean_u log q(y_u|h_u) + mean_u H_u."""
+    """Return c_bar_m = mean_u log q(y_u | h_u) + mean_u H_u."""
     return logprob_mean + entropy_mean
 
 
 def reliability_R(c_bar, H_bar, d_hat=None, beta=1.0, gamma=0.0, lambda_d=0.0,
                   V_bar=None, T=None, normalize=False):
-    """R_m = beta * (cbar or ctilde) - gamma * Hbar - lambda_D * Dhat."""
+    """Return R_m = beta * c_bar (or the normalized c_bar) - gamma * H_bar - lambda_D * D_hat (Eq. 3)."""
     x = c_bar
     if normalize:
         if V_bar is None or not T:
@@ -655,12 +657,14 @@ def reliability_R(c_bar, H_bar, d_hat=None, beta=1.0, gamma=0.0, lambda_d=0.0,
 
 
 def reliability_weights_from_capture(c_bar, H_bar, d_hat=None, **kw):
+    """Return omega = softmax(R) (Eq. 4) from the values of a capture."""
     return F.softmax(reliability_R(c_bar, H_bar, d_hat, **kw), dim=0)
 
 
 # The (beta, gamma, lambda_D) grid every score-level figure compares; gamma_E is
 # LORE-KV /E's entropy coefficient.
 def weighting_grid(gamma_E=1.3, lambda_D=0.3):
+    """Return the (beta, gamma, lambda_D) settings that the score-level figures compare."""
     return {
         "uniform":     (0.0, 0.0,     0.0),
         "logprob":     (1.0, 1.0,     0.0),
@@ -681,7 +685,7 @@ def weighting_grid(gamma_E=1.3, lambda_D=0.3):
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def divergence_from_capture(per_layer, num_particles, layer_stride=1, device=None):
-    """per_layer: the capture's list of per-layer dicts. Returns D [M] (zeros if M < 2)."""
+    """Return D [M] from the per-layer capture (zero if M < 2)."""
     add_repo_root()
     from lorekv.monkeypatch.scoring import divergence_from_query_stacks
 
@@ -701,7 +705,7 @@ def divergence_from_capture(per_layer, num_particles, layer_stride=1, device=Non
 
 
 def standardize_scores(x):
-    """Zero-mean/unit-std across particles, exactly as R_m consumes D_m in the runner."""
+    """Standardize across the trajectories (zero mean, unit deviation), as the runner does for D_m."""
     add_repo_root()
     from lorekv.monkeypatch.scoring import standardize_particle_scores
     return standardize_particle_scores(x)
@@ -712,7 +716,7 @@ def standardize_scores(x):
 # per-layer TestTimeLookaheadKVCluster scoring so every figure scores identically.
 # ---------------------------------------------------------------------------
 def get_repeated_kv(kvc):
-    """GQA-repeat a layer's compact full K/V to query-head count -> ([1,H,n,D], [1,H,n,D])."""
+    """Return the full K and V of a layer, repeated to the query-head count: ([1, H, n, D], [1, H, n, D])."""
     add_repo_root()
     from lorekv.monkeypatch.scoring import repeat_kv
     key = repeat_kv(kvc.full_key_states, kvc.num_key_value_groups)
@@ -721,7 +725,7 @@ def get_repeated_kv(kvc):
 
 
 def make_lookahead_batches(kvc, M):
-    """Return (query_batches, causal_flags) = [window] + [particle_0..M-1], matching compress()."""
+    """Return ``(query_batches, causal_flags)``: the window, then trajectories 0 to M-1, as in compress()."""
     batches = [kvc.window_queries]
     flags = [True]
     for m in range(M):
@@ -733,8 +737,11 @@ def make_lookahead_batches(kvc, M):
 
 
 def combine_lookahead_scores(scores, weights, lambda_L, M):
-    """Given _project_and_score output [window, p0..pM-1], build the window-only, single-
-    trajectory, and confidence-weighted multi scores (Eq. 7). Each is [H, n]."""
+    """Make the window-only, single-trajectory and weighted multi-trajectory scores (Eq. 7).
+
+    The input is the output of ``_project_and_score``: window, then trajectories 0 to
+    M-1. Each result is a tensor [H, n].
+    """
     s_window = scores[0]
     s_single = s_window + lambda_L * scores[1] if M >= 1 else s_window.clone()
     s_multi = s_window.clone()
@@ -745,15 +752,17 @@ def combine_lookahead_scores(scores, weights, lambda_L, M):
 
 @torch.no_grad()
 def oracle_scores(kvc, key, val, true_queries):
-    """Perturbation score under the TRUE full-cache decode queries -> the oracle
-    importance S* every proxy is trying to match. true_queries: [1,Hq,Tt,D]. -> [H,n]."""
+    """Return the oracle score S* [H, n]: the deletion score under the true decoding queries.
+
+    Args:
+        true_queries: Tensor [1, Hq, Tt, D].
+    """
     return kvc._project_and_score(key, val, [true_queries], [False])[0]
 
 
 @torch.no_grad()
 def head_topb_mask(scores, n, budget, window_size):
-    """scores:[H,n] -> bool mask [H,n] keeping token 0, the last `window_size` tokens,
-    and the top (budget) candidates per head (protected positions forced in)."""
+    """Return a bool mask [H, n] that keeps token 0, the last ``window_size`` tokens and the top candidates of each head."""
     H = scores.shape[0]
     device = scores.device
     protected = torch.zeros(H, n, dtype=torch.bool, device=device)
@@ -770,7 +779,7 @@ def head_topb_mask(scores, n, budget, window_size):
 
 @torch.no_grad()
 def attn_outputs(q, k, v, mask=None):
-    """q:[H,Tt,D] k,v:[H,n,D] mask:[H,n] bool or None -> attention output o:[H,Tt,D]."""
+    """Return the attention output [H, Tt, D] for q [H, Tt, D], k and v [H, n, D] and an optional mask [H, n]."""
     D = q.shape[-1]
     logits = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(D)   # [H,Tt,n]
     if mask is not None:
@@ -780,8 +789,7 @@ def attn_outputs(q, k, v, mask=None):
 
 
 def recall_at_b(pred_score, oracle_score, budget):
-    """Fraction of the oracle's top-B tokens that the predicted score also ranks in its
-    top-B (1-D numpy arrays, same length). Symmetric to top-B overlap when both are B."""
+    """Return the fraction of the oracle top-B tokens that the predicted score also ranks in its top-B (Eq. 14)."""
     import numpy as _np
     B = min(int(budget), len(pred_score))
     top_pred = set(_np.argsort(-pred_score)[:B].tolist())
@@ -801,7 +809,7 @@ def _sanitize(s):
 
 
 def build_tag(conf_path, model_path, budget, dataset):
-    """A filesystem-safe tag string identifying config / model / budget / dataset."""
+    """Return a tag for file names that identifies the config, model, budget and dataset."""
     conf = os.path.splitext(os.path.basename(str(conf_path)))[0] if conf_path else "conf"
     model = str(model_path).rstrip("/").split("/")[-1]
     b = str(budget)
@@ -812,7 +820,7 @@ def build_tag(conf_path, model_path, budget, dataset):
 
 
 def default_npz_path(out, out_dir, here, data_base, tag):
-    """Explicit --out wins; else <out_dir or here>/<data_base>__<tag>.npz."""
+    """Return ``--out`` if given, else ``<out_dir or here>/<data_base>__<tag>.npz``."""
     if out:
         return out
     d = out_dir or here
@@ -820,8 +828,7 @@ def default_npz_path(out, out_dir, here, data_base, tag):
 
 
 def pick_npz(data, data_dir, here, data_base):
-    """Explicit --data wins; else the newest <data_base>__*.npz in <data_dir or here>
-    (falling back to the legacy untagged <data_base>.npz)."""
+    """Return ``--data`` if given, else the newest ``<data_base>__*.npz`` (or ``<data_base>.npz``)."""
     if data:
         return data
     d = data_dir or here
@@ -832,8 +839,7 @@ def pick_npz(data, data_dir, here, data_base):
 
 
 def png_path_for(npz_path, fig_base, out):
-    """Explicit --out wins; else write the PNG next to the NPZ, carrying its tag:
-    <dir(npz)>/<fig_base>__<tag>.png (tag = everything after the first '__')."""
+    """Return ``--out`` if given, else ``<dir of npz>/<fig_base>__<tag>.png``."""
     if out:
         return out
     d = os.path.dirname(os.path.abspath(npz_path))
@@ -853,7 +859,7 @@ def png_path_for(npz_path, fig_base, out):
 # success.
 # ---------------------------------------------------------------------------
 def scratch_ckpt_dir():
-    """Where the per-entry running checkpoints live (scratch, never $HOME)."""
+    """Return the directory of the running checkpoints (``FIG_CKPT_DIR``, else a temporary directory)."""
     d = os.environ.get("FIG_CKPT_DIR")
     if d:
         return d
@@ -865,18 +871,21 @@ def scratch_ckpt_dir():
 
 
 class Checkpoint:
-    """Crash-safe resume for a single compute run, keyed to its final .npz name.
+    """Checkpoint of one compute run, so that an interrupted run continues.
 
-    Usage:
+    Usage::
+
         ckpt = common.Checkpoint(args.out)
-        state, done = ckpt.load_or({... fresh accumulators ...})
-        for sample in ...:
+        state, done = ckpt.load_or({...})       # empty accumulators
+        for sample in samples:
             key = common.entry_key(sample)
-            if key in done: continue
-            ... update state[...] ...
-            done.add(key); ckpt.flush(state, done)
-        ... build final arrays from state ...; np.savez(args.out, **save)
-        ckpt.done()          # remove the scratch checkpoint
+            if key in done:
+                continue
+            ...                                  # update state
+            done.add(key)
+            ckpt.flush(state, done)
+        np.savez(args.out, **final_arrays)
+        ckpt.done()                              # remove the checkpoint
     """
     def __init__(self, final_out):
         d = scratch_ckpt_dir()
@@ -890,8 +899,7 @@ class Checkpoint:
         self.path = os.path.join(d, f"{base}__{h}.ckpt.pkl")
 
     def load_or(self, fresh_state):
-        """Return (state, done_set): the resumed accumulators + finished keys, or a
-        fresh copy of `fresh_state` and an empty set if there is no checkpoint."""
+        """Return ``(state, done)`` from the checkpoint, or a copy of ``fresh_state`` and an empty set."""
         if os.path.exists(self.path):
             try:
                 with open(self.path, "rb") as f:
@@ -916,5 +924,5 @@ class Checkpoint:
 
 
 def entry_key(sample):
-    """Stable per-entry id used to mark an entry finished (dataset + sample index)."""
+    """Return the identifier of one sample (dataset and sample index)."""
     return f"{sample['dataset']}#{sample['sample_idx']}"
