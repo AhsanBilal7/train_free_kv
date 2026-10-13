@@ -195,3 +195,5 @@ experiments/RULER/results_summary.csv
 # README figures are tracked
 !assets/*.png
 !assets/*.gif
+figures_combined/
+!assets/paper/*.png

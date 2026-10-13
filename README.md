@@ -7,12 +7,21 @@
 *Most KV-cache eviction methods ask which memory looked important while reading the prompt.
 LORE-KV asks which memory will matter while answering.*
 
-[Method](#method) · [Results](#results) · [Installation](#installation) · [Quick start](#quick-start) · [Reproducing the paper](#reproducing-the-paper) · [Layout](#repository-layout) · [Citation](#citation)
+<p>
+  <a href="https://ahsanbilal7.github.io/train_free_kv/"><img alt="Project page" src="https://img.shields.io/badge/%F0%9F%8C%90_project-page-2a78d6?style=flat-square"></a>
+  <img alt="Training-free" src="https://img.shields.io/badge/%E2%9A%A1_training-free-1baf7a?style=flat-square">
+  <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776ab?style=flat-square&logo=python&logoColor=white">
+  <img alt="PyTorch 2.1" src="https://img.shields.io/badge/pytorch-2.1-ee4c2c?style=flat-square&logo=pytorch&logoColor=white">
+  <img alt="Transformers 4.44 / 5.16" src="https://img.shields.io/badge/%F0%9F%A4%97_transformers-4.44%20%7C%205.16-ffcc4d?style=flat-square">
+  <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-52514e?style=flat-square">
+</p>
+
+🌐 [Project page](https://ahsanbilal7.github.io/train_free_kv/) · 🧭 [Method](#-method) · 📊 [Results](#-results) · ⚙️ [Installation](#%EF%B8%8F-installation) · 🚀 [Quick start](#-quick-start) · 🔁 [Reproducing the paper](#-reproducing-the-paper) · 📚 [Citation](#-citation)
 
 </div>
 
 <p align="center">
-  <img src="assets/lorekv_pipeline.png" width="100%" alt="LORE-KV pipeline: prefill, Monte Carlo lookahead, reliability weights, projected deletion score, eviction">
+  <img src="assets/lorekv_architecture.svg" width="100%" alt="LORE-KV pipeline: prefill, Monte Carlo lookahead, reliability weights, projected deletion score, eviction">
 </p>
 
 LORE-KV is a **training-free** KV-cache eviction method for long-context LLM inference. Before the
@@ -21,22 +30,22 @@ model itself, uses their query states as Monte Carlo samples of the queries the 
 answering, and keeps the tokens whose deletion would most change the attention output under those
 queries. The continuations are then discarded; decoding runs on the compressed cache only.
 
-## Highlights
+## ✨ Highlights
 
-- **Future-query reference.** Prompt-side methods (SnapKV, Ada-KV, CriticalKV, AnDPro) rank tokens with the
+- 🔭 **Future-query reference.** Prompt-side methods (SnapKV, Ada-KV, CriticalKV, AnDPro) rank tokens with the
   queries of the last prompt tokens, which can differ from the queries used during generation. LORE-KV
   scores against sampled answer-time queries.
-- **No auxiliary model, no training.** The lookahead uses the target model; its weights are untouched.
-- **Output-aware scoring.** Tokens are ranked by the projected leave-one-out change of the attention
+- 🧊 **No auxiliary model, no training.** The lookahead uses the target model; its weights are untouched.
+- 🎯 **Output-aware scoring.** Tokens are ranked by the projected leave-one-out change of the attention
   output, not by attention mass alone.
-- **Matched evaluation.** All methods share budgets, observation window, chunk size and selector, on six
+- ⚖️ **Matched evaluation.** All methods share budgets, observation window, chunk size and selector, on six
   dense and hybrid-attention backbones.
 
 At $B=128$, LORE-KV raises the LongBench average on Qwen2.5-14B from 45.49 to 48.24 and the 16K RULER
 average on Mistral-7B from 45.20 to 51.05, at 1.46-2.77x AnDPro's per-sample time. Gains are largest under
 tight budgets and shrink as the budget grows.
 
-## Method
+## 🧭 Method
 
 <p align="center">
   <img src="assets/lorekv_mechanism.gif" width="92%" alt="Animated walk-through of LORE-KV on a toy prompt">
@@ -88,20 +97,74 @@ of the cache at long context (App. E.2).
 | $\tau$ | adaptive head budgets (plug-in) | 0 | `BUDGET_TAU` |
 | $\lambda_k,\lambda_v$ | diversity-aware selection (plug-in) | 0, 0 | `LAMBDA_K`, `LAMBDA_V` |
 
-## Results
+## 📊 Results
+
+All figures below are the paper's.
+
+**Monte Carlo future-query estimation (Fig. 1).** Sampled lookahead queries (blue) move toward the queries the
+model really issues while answering (stars); coverage of those queries rises with the number of trajectories
+$M$ and saturates near $M=4$.
+
+<p align="center"><img src="assets/paper/fig1_montecarlo_queries.png" width="92%" alt="Query states of the prompt window, sampled trajectories and true future queries; coverage versus M"></p>
+
+**Accuracy under compression.** LORE-KV leads at every budget on RULER across context lengths (Fig. 3) and reaches
+AnDPro's LongBench accuracy with 1.50-1.63x less cache (Fig. 2).
 
 <p align="center">
-  <img src="assets/results_budget.png" width="96%" alt="LongBench and RULER-16K average scores versus cache budget">
+  <img src="assets/paper/fig3_ruler.png" width="58%" alt="RULER accuracy versus KV budget at 4K, 8K and 16K for Mistral-7B and Llama-3.1-8B">
+  <img src="assets/paper/fig2_kv_efficiency.png" width="40%" alt="KV-cache efficiency at equal accuracy relative to AnDPro">
 </p>
+
+| LongBench avg., $B=128$ | Full cache | CriticalKV | AnDPro | LORE-KV /E | LORE-KV /D |
+|---|---:|---:|---:|---:|---:|
+| Mistral-7B-Instruct-v0.2 | 42.51 | 38.42 | 38.96 | **40.28** | 40.21 |
+| Llama-3.1-8B-Instruct | 49.29 | 44.62 | 46.06 | 46.11 | **46.27** |
+| Qwen2.5-14B-Instruct | 49.37 | 43.47 | 45.49 | 48.16 | **48.24** |
+| Ministral-3-8B-Instruct-2512 | 49.67 | 44.79 | 46.74 | **47.30** | 47.24 |
+| Qwen3.5-9B (hybrid) | 52.97 | 46.30 | 46.89 | 48.49 | **48.57** |
+| Gemma-4-12B-it (hybrid) | 27.27 | 19.74 | 20.21 | 20.85 | **20.93** |
+
+**Long context.** On RULER at 64K and 128K tokens (Llama-3.1-8B, $B=128$), the margin over AnDPro grows with
+context length.
+
+| RULER, 13-task avg. | CriticalKV | AnDPro | LORE-KV /E | LORE-KV /D |
+|---|---:|---:|---:|---:|
+| 64K | 34.82 | 49.62 | **57.75** | 57.29 |
+| 128K | 30.28 | 39.40 | **51.05** | 51.04 |
+
+<p align="center"><img src="assets/paper/ruler_64k_128k.png" width="88%" alt="RULER average versus context length up to 128K, and per-category scores at 64K and 128K"></p>
+
+**Where the gain comes from.** The gain grows with the mismatch between prompt-window and future queries (Fig. 6),
+and the cache LORE-KV keeps reproduces the full-cache attention output more faithfully (Fig. 5).
 
 <p align="center">
-  <img src="assets/ablation_lookahead.png" width="52%" alt="LongBench average versus number of lookahead trajectories">
+  <img src="assets/paper/fig6_gain_vs_mismatch.png" width="49%" alt="Per-example gain versus prompt-to-future query mismatch">
+  <img src="assets/paper/fig5_output_fidelity.png" width="49%" alt="Attention-output fidelity of the retained cache">
 </p>
 
-A single sampled future recovers about 89% of the gain over the prompt-window control; more trajectories
-add smaller improvements. Full tables for every backbone, benchmark and budget are in the paper.
+**Cost.** The lookahead is a one-time overhead per request; Fig. 7 splits latency by stage and plots quality against
+total latency. Under a matched lookahead-token budget LORE-KV stays above AnDPro scoring the same continuations
+(Table 13b).
 
-## Installation
+<p align="center">
+  <img src="assets/paper/fig7_latency_quality.png" width="62%" alt="Latency breakdown by stage and quality versus latency">
+  <img src="assets/paper/table13b_compute_pareto.png" width="34%" alt="Quality versus lookahead tokens M times T">
+</p>
+
+<details>
+<summary>🔍 More analyses: NIAH, accuracy-memory trade-off, retention shift, criterion comparison, token classes, layers and heads, budget equivalence</summary>
+
+<p align="center"><img src="assets/paper/fig8_niah.png" width="90%" alt="Needle-in-a-haystack exact match and word recall grids"></p>
+<p align="center"><img src="assets/paper/fig4_accuracy_memory.png" width="90%" alt="Accuracy-memory trade-off against OBCache, CAOTE and Expected Attention"></p>
+<p align="center"><img src="assets/paper/fig9_retention_shift.png" width="90%" alt="Retention-order shift between criteria"></p>
+<p align="center"><img src="assets/paper/fig10_criterion_comparison.png" width="90%" alt="Recall at B against the future-query oracle, output error and layer-wise correlation"></p>
+<p align="center"><img src="assets/paper/fig11_token_classes.png" width="90%" alt="Retention rate and enrichment by token class"></p>
+<p align="center"><img src="assets/paper/fig12_layer_head.png" width="90%" alt="Perturbation energy by layer and recall gain by head"></p>
+<p align="center"><img src="assets/paper/fig13_budget_equivalence.png" width="90%" alt="Behavioral fidelity versus budget and budget saving at equal fidelity"></p>
+
+</details>
+
+## ⚙️ Installation
 
 Two environments are used: transformers 4.44 for the dense backbones and transformers 5.x for the
 hybrid-attention ones. Both need an NVIDIA GPU with compute capability 8.0 or 9.0 (A100, H100) and CUDA 12.
@@ -134,7 +197,7 @@ python scripts/convert_ministral3.py --src mistralai/Ministral-3-8B-Instruct-251
 
 For the hybrid backbones, download the checkpoints into `models/Qwen3.5-9B` and `models/gemma-4-12B-it`.
 
-## Quick start
+## 🚀 Quick start
 
 Every experiment is one config on one benchmark. The sweep driver expands the config's value lists, calls
 the benchmark's `pred.py` once per setting and scores the results:
@@ -180,9 +243,9 @@ print(tok.decode(answer_ids, skip_special_tokens=True))
 `--mode` also accepts the baselines: `andpro`, `critical`, `ada` (Ada-KV), `fix` (SnapKV; add `--pyram` for
 PyramidKV), `slm` (StreamingLLM) and `full` (uncompressed).
 
-## Reproducing the paper
+## 🔁 Reproducing the paper
 
-### Benchmarks
+### 🧪 Benchmarks
 
 | Benchmark | Data | Metric |
 |---|---|---|
@@ -191,7 +254,7 @@ PyramidKV), `slm` (StreamingLLM) and `full` (uncompressed).
 | RULER 64K / 128K | generated by `bash experiments/RULER/long_context/make_data.sh` | as above |
 | Needle-in-a-Haystack | Paul Graham essays in `experiments/NIAH/PaulGrahamEssays` | exact match, word recall |
 
-### Main results
+### 📋 Main results
 
 Each table is the listed configs on the listed benchmark (`EXPERIMENT=LongBench | RULER | NIAH`).
 
@@ -206,7 +269,7 @@ Each table is the listed configs on the listed benchmark (`EXPERIMENT=LongBench 
 | RULER 64K / 128K | Llama-3.1-8B | the `-llama` configs with `DATASET_NAME_LIST="65536 131072"` |
 | Fig. 8 | Llama-3.1-8B | the `-llama` configs with `EXPERIMENT=NIAH BUDGET=1024` |
 
-### Ablations (Mistral-7B, Tables 13-15)
+### 🔬 Ablations (Mistral-7B, Tables 13-15)
 
 | Ablation | How to run |
 |---|---|
@@ -218,7 +281,7 @@ Each table is the listed configs on the listed benchmark (`EXPERIMENT=LongBench 
 | Adaptive budgets / diversity | `lorekv-{ent,dis,logp}-adap-topk`, `lorekv-{ent,dis,logp}-adap-div` |
 | Robust aggregation | `ROBUST_ALPHA=0.5 ROBUST_TOPK_BETA=0.5` with `lorekv-ent-unif-topk` |
 
-### Tables, latency and figures
+### 📈 Tables, latency and figures
 
 ```bash
 python scripts/collect_results.py --benchmark LongBench --plot    # every run -> CSV (+ PNG)
@@ -255,7 +318,7 @@ Figure folders live in `experiments/LongBench/figure_making_script/`; the RULER 
 around the same code. Each has a `compute_*.py` (GPU, writes a `.npz`) and a `plot_*.py` (CPU, draws the
 `.png`); `PLOT_ONLY=1 bash scripts/run_figures.sh` redraws from saved data.
 
-## Repository layout
+## 🗂️ Repository layout
 
 ```
 lorekv/                       the method
@@ -276,17 +339,18 @@ experiments/
 config/                       one .conf per configuration in the paper
 scripts/                      sweep driver, launchers, tables, latency, analyses, checks
 tests/                        CPU unit tests
-assets/                       README figures (scripts/make_readme_assets.py)
+assets/                       README and project-page figures (scripts/make_readme_assets.py)
+website/                      project page (index.html)
 ```
 
-## Limitations
+## ⚠️ Limitations
 
 LORE-KV adds a one-time lookahead and scoring overhead to every request (Table 3), makes irreversible
 eviction decisions, and does not model cross-head or cross-layer interactions. Its gains shrink at large
 budgets and coexist with task-level regressions. On hybrid backbones the per-trajectory cache copy can
 exceed device memory at very long context.
 
-## Citation
+## 📚 Citation
 
 ```bibtex
 @inproceedings{lorekv2027,
@@ -297,7 +361,7 @@ exceed device memory at very long context.
 }
 ```
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 This code builds on [LLM-AnDPro](https://github.com/MIRALab-USTC/LLM-AnDPro) (Geng et al., NeurIPS 2025)
 and [AdaKV](https://github.com/FFY0/AdaKV) (Feng et al.), which include code from
@@ -308,7 +372,7 @@ Evaluation code is adapted from [LongBench](https://github.com/THUDM/LongBench),
 [Hugging Face Transformers](https://github.com/huggingface/transformers). We thank the authors for
 releasing their work.
 
-## License
+## 📄 License
 
 MIT; see [LICENSE](LICENSE). Adapted components keep their original licenses (MIT, or Apache-2.0 for code
 derived from Transformers and RULER).
