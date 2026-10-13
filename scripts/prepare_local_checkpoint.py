@@ -4,11 +4,10 @@
 Two things stand between a Hub id and `from_pretrained` here, neither about the
 model weights:
 
-1. Cache layout. `.env` sets TRANSFORMERS_CACHE to $HF_HOME while huggingface_hub
-   downloads into $HF_HOME/hub, and ACES compute nodes have no outbound network to
-   paper over the difference -- so a Hub id resolves on the login node and fails on
-   a worker. A plain local directory (weights symlinked, so no second copy) is
-   immune to both, and its basename becomes a clean MODEL_TAG.
+1. Cache layout. On clusters whose compute nodes have no outbound network, a Hub
+   id that resolves on the login node can fail on a worker when the transformers
+   and huggingface_hub caches disagree. A plain local directory (weights symlinked,
+   so no second copy) avoids both, and its basename becomes a clean MODEL_TAG.
 
 2. tokenizer.json format. Files written by tokenizers >= 0.20 store BPE merges as
    ["a", "b"] pairs; tokenizers 0.19 (pinned by transformers 4.44) only parses the

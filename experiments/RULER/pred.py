@@ -116,8 +116,8 @@ def get_pred(model, tokenizer, data, max_length, out_path, mode, tmp_path=None, 
         # there. Appending after a torn line is not safe: the next row lands on the
         # same line as the fragment, that line never parses, and every later resume
         # stops at it -- so each new allocation re-decodes the same rows forever
-        # while the file grows. A kill mid-write is routine here (gpu_debug's 2 h
-        # wall clock lands mid-row), so the torn tail must be removed, not skipped.
+        # while the file grows. A wall-clock kill usually lands mid-row, so the torn
+        # tail must be removed, not skipped.
         good_end = 0
         with open(tmp_path, "rb") as f:
             for raw in f:

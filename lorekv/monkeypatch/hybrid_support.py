@@ -243,9 +243,8 @@ def cache_share_of_growing_layers(config, n_tokens: int) -> float:
 def hybrid_manifest(config, base_capacity: int, n_tokens: int = 64000) -> dict:
     """What was compressed, what was not, and why -- written next to the results.
 
-    A reviewer's first question about a hybrid-backbone row is "did you actually
-    compress this model or just a slice of it?". This answers it from the config
-    rather than from prose.
+    Records, from the config, which layers were compressed and which were left
+    alone because their state is bounded (App. E.2).
     """
     lt = layer_types(config)
     comp = compressible_layers(config)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Check the vendored models_ext backbones against upstream transformers.
 
-models_ext/ re-expresses Qwen3 and Ministral3 in the transformers 4.44 Llama
+models_ext/ re-expresses Ministral3 in the transformers 4.44 Llama
 idiom because the eviction hijacks cannot survive the transformers version those
 architectures actually shipped in. That is only sound if the re-expression is
 numerically the same model, so this script runs the SAME checkpoint on the SAME
@@ -10,17 +10,17 @@ tokens under both implementations and compares the logits.
 It is deliberately two processes, because the two implementations cannot coexist
 in one interpreter -- they need different transformers releases:
 
-  # 1. reference, in the transformers 5.x venv
+  # 1. reference, in the transformers 5.x environment
   $TF5_PY scripts/validate_models_ext.py --impl upstream \
-      --model Qwen/Qwen3-8B --out /scratch/$USER/val/qwen3_upstream.npz
+      --model models/Ministral-3-8B-Instruct-2512 \
+      --ref-model mistralai/Ministral-3-8B-Instruct-2512 --out val/upstream.npz
 
-  # 2. this repo's implementation, in the project venv
+  # 2. this repo's implementation, in the main environment
   python scripts/validate_models_ext.py --impl vendored \
-      --model Qwen/Qwen3-8B --out /scratch/$USER/val/qwen3_vendored.npz
+      --model models/Ministral-3-8B-Instruct-2512 --out val/vendored.npz
 
-  # 3. compare (either venv)
-  python scripts/validate_models_ext.py --compare \
-      /scratch/$USER/val/qwen3_upstream.npz /scratch/$USER/val/qwen3_vendored.npz
+  # 3. compare (either environment)
+  python scripts/validate_models_ext.py --compare val/upstream.npz val/vendored.npz
 
 Both runs use sdpa and bfloat16 so the only difference is the modelling code:
 flash-attention is not installed in the reference venv, and matching the kernel

@@ -23,9 +23,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRATCH="${SCRATCH:-/scratch/user/$USER}"
-GEN_ROOT="${RULER_GEN_ROOT:-$SCRATCH/ruler_gen}"
-OUT_DIR="${RULER_LOCAL_DIR:-$SCRATCH/ruler_long}"
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
+GEN_ROOT="${RULER_GEN_ROOT:-$REPO_ROOT/data/ruler_gen}"
+OUT_DIR="${RULER_LOCAL_DIR:-$REPO_ROOT/data/ruler_long}"
 RULER_REV="3b8928f"                     # NVIDIA/RULER HEAD on 2024-09-30
 NUM_SAMPLES="${NUM_SAMPLES:-500}"       # per task, as in the Hub configs
 TASKS=(niah_single_1 niah_single_2 niah_single_3 niah_multikey_1 niah_multikey_2
@@ -37,7 +37,7 @@ SHIM="$GEN_ROOT/shim"
 
 _env() {
     export NLTK_DATA="$GEN_ROOT/nltk_data"
-    export HF_HOME="${HF_HOME:-$SCRATCH/hf_cache}" HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false
+    export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}" HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false
     # prepare.py shells out to a bare `python`, so the venv must lead PATH.
     export PATH="$VENV/bin:$PATH"
     export PYTHONPATH="$SHIM${PYTHONPATH:+:$PYTHONPATH}"

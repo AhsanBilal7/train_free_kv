@@ -13,7 +13,7 @@ Draws the method pipeline of "Training-Free Test-Time Lookahead Causal KV Evicti
                           sum_m omega_m rho(E_m), Alloc -> Select -> Gather, then decode
                           from (K*, V*) with the drafts discarded                       (Eq. 5-8)
 
-Style follows the scientific-figure-making skill: PALETTE / FigureStyle /
+Style: PALETTE / FigureStyle /
 apply_publication_style / make_* helpers / finalize_figure, minimalist spines,
 frameless legends, tight_layout finish, 300 dpi raster + vector PDF.
 
@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch, Rectangle
 
 # ---------------------------------------------------------------------------
-# Palette and style (scientific-figure-making conventions)
+# Palette and style
 # ---------------------------------------------------------------------------
 PALETTE = {
     "blue_main": "#0F4D92",

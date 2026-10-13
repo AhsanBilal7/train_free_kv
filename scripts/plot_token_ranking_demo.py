@@ -17,7 +17,7 @@ publication-style figures:
      (b) Retention strip for one prompt                    -- which positions each
          criterion keeps, with the gold-answer positions marked.
 
-Style follows the scientific-figure-making skill (PALETTE, apply_publication_style,
+Style: shared PALETTE, apply_publication_style,
 make_* helpers, finalize_figure), matching make_arch_figure.py.
 
 Usage
@@ -42,7 +42,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # ---------------------------------------------------------------------------
-# House style (scientific-figure-making)
+# House style
 # ---------------------------------------------------------------------------
 PALETTE = {
     "blue_main": "#0F4D92", "blue_secondary": "#3775BA",

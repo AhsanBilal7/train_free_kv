@@ -54,9 +54,9 @@ def _varlen_attend(q, k, v, cu_qlen, cu_klen, max_seqlen_k, softmax_scale=None):
 
     The decode step attends ONE query per head against that head's own slice of the
     flattened cache, and head slices have different lengths. flash_attn_varlen_func
-    is the fast path. It is not always available here -- prebuilt wheels need
-    GLIBC >= 2.32 and ACES has 2.28, so flash-attn must be compiled from source --
-    and a missing kernel should not silently become a wrong answer or a hard stop.
+    is the fast path. It is not always available -- prebuilt wheels need
+    GLIBC >= 2.32, so older systems must compile flash-attn from source -- and a
+    missing kernel should not become a wrong answer or a hard stop.
 
     The fallback pads the per-head slices into [H, max_len, D] and masks the padding
     to -inf. That is exact, not approximate: with q_len == 1 every query attends to

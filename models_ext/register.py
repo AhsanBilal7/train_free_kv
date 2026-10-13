@@ -19,8 +19,8 @@ from models_ext.configuration_ministral3 import Ministral3Config
 from models_ext.modeling_ministral3 import Ministral3ForCausalLM
 
 # Ministral-3 names its tokenizer in tokenizer_config.json, so AutoTokenizer
-# normally never needs this mapping. It does need it on a compute node: ACES
-# workers have no outbound network, the tokenizer_config fetch fails,
+# normally never needs this mapping. It does on a compute node without outbound
+# network access: the tokenizer_config fetch fails,
 # `config_tokenizer_class` comes back None, and AutoTokenizer falls through to
 # TOKENIZER_MAPPING[type(config)] -- which without this raises
 # KeyError('Ministral3Config') at model-load time.
