@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Run prefill, lookahead, compression and ragged decoding on a small random hybrid model.
 
-The script uses the same LORE-KV and baseline code as a real hybrid-backbone run,
-on a random Qwen3.5 model (2 full-attention and 6 linear-attention layers) or a
-random Gemma 4 model with small dimensions. One run takes seconds on CPU. It
+The script uses the same LORE-KV and baseline code as a real hybrid-backbone run.
+The model is a small random Qwen3.5 model (2 full-attention and 6 linear-attention
+layers) or a small random Gemma 4 model. One run takes seconds on CPU. The script
 requires the transformers 5.x environment of the hybrid backbones.
 
 The test checks the data flow, not the quality: random weights give random

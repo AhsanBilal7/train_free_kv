@@ -113,8 +113,8 @@ def score_andpro(kvc, key, value, chunk_size=4, window_size=32, kernel_size=7,
     """Return the AnDPro score [H, n] (scoring part of ``update_kv_wo_gqa``).
 
     For each window query the function sums the attention-weighted values of each
-    chunk, takes the inner product with the summed droppable chunk direction (the
-    anchor), and adds the result over the queries. Chunk scores are copied to their
+    chunk. It takes the inner product with the summed droppable chunk direction (the
+    anchor). It adds the results over the queries. Chunk scores are copied to their
     tokens, so all criteria use the same [H, n] grid.
     """
     q = kvc.window_queries[0].float()          # [H, w, D]

@@ -1,8 +1,8 @@
 """LORE-KV scoring, reliability weights and token selection (paper Secs. 3.2-3.5).
 
 The notation follows the paper. For layer l and head h, K and V are the prefill
-keys and values, Q_W are the queries of the last w prompt tokens, and
-Q_look^(m) are the queries of lookahead trajectory m = 1, ..., M.
+keys and values. Q_W are the queries of the last w prompt tokens. Q_look^(m) are
+the queries of lookahead trajectory m = 1, ..., M.
 
 Contents:
     step_stats: Centered score c_u (Eq. 2), entropy H_u and varentropy V_u (Eq. 9)
