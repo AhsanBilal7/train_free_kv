@@ -1,4 +1,4 @@
-"""🔬 Shared backbone for the LORE-KV mechanism-analysis figures (paper App. F).
+"""Shared backbone for the LORE-KV mechanism-analysis figures (paper App. F).
 
 Everything the four figure scripts need that touches the model lives here so the
 compute scripts stay short and every figure is produced from the *same* captured

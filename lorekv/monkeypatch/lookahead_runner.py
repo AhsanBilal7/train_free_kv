@@ -1,23 +1,22 @@
-"""🔭 LORE-KV generation for one prompt: lookahead, reliability weighting, eviction, decoding.
+"""LORE-KV generation for one prompt (Algorithm 1).
 
-:func:`generate_with_lookahead` implements Algorithm 1 of the paper around the
-per-layer state in :class:`lorekv.monkeypatch.scoring.TestTimeLookaheadKVCluster`.
-The patched attention forwards read ``config.lookahead_phase`` to decide what to do:
+:func:`generate_with_lookahead` runs the method around the per-layer state in
+:class:`lorekv.monkeypatch.scoring.TestTimeLookaheadKVCluster`. The patched
+attention forwards read ``config.lookahead_phase``:
 
-1. ``"collect"`` -- full prefill of the prompt with no eviction. Every layer records
-   its observation-window queries Q_W and the full K/V (Algorithm 1, lines 1-2).
-2. ``"lookahead"`` -- M continuations of T tokens are sampled from the frozen model
-   (Eq. 1), each on its own copy of the prefill cache. Every layer records the
-   query states of each trajectory, and the per-step statistics c_u, H_u, V_u of
-   each sampled token are kept (Eqs. 2, 9; lines 3-6).
-3. Trajectory weights omega (Eqs. 3-4, 10; lines 8-10), then ``compress()`` on every
-   layer scores, allocates and selects (Eqs. 5-8; lines 11-24).
-4. ``"final"`` -- the continuations are discarded (they were never appended to the
-   real cache) and the answer is decoded greedily from the compressed cache with
-   varlen flash attention (lines 26-27).
+1. ``collect``: The model reads the full prompt without eviction. Each layer
+   records Q_W and the full K and V (Algorithm 1, lines 1-2).
+2. ``lookahead``: The model samples M continuations of T tokens (Eq. 1). Each
+   continuation uses its own copy of the prefill cache. Each layer records the
+   queries of each continuation. The runner keeps c_u, H_u and V_u of each
+   sampled token (Eqs. 2 and 9; lines 3-6).
+3. The runner computes the weights omega (Eqs. 3-4, 10; lines 8-10). It then
+   calls ``compress()`` on each layer (Eqs. 5-8; lines 11-24).
+4. ``final``: The runner discards the continuations and decodes the answer
+   greedily from the compressed cache (lines 26-27).
 
-The first token of a trajectory is sampled from the prefill logits; the
-statistics of step u belong to the token sampled at that step.
+The runner samples the first token of each continuation from the prefill logits.
+The statistics of step u belong to the token sampled at step u.
 """
 import torch
 from transformers.cache_utils import DynamicCache
@@ -32,10 +31,10 @@ from lorekv.monkeypatch.scoring import (
 
 
 def _phase_configs(model):
-    """Every config object an attention module may read the phase from.
+    """Return each config object that an attention module can read the phase from.
 
-    On a multimodal backbone (Gemma 4) the attention modules hold the nested text
-    config, not ``model.model.config``, so the phase is written to the whole chain.
+    On a multimodal backbone (Gemma 4) the attention modules read the nested text
+    config. The phase is thus written to each config in the chain.
     """
     seen, out = set(), []
     for cfg in (getattr(model, "config", None),
@@ -58,10 +57,10 @@ def _set_particle(model, idx):
 
 
 def _decoder_layers(model):
-    """The decoder layer list, wherever this architecture keeps it.
+    """Return the list of decoder layers of the model.
 
-    ``model.model.layers`` for Mistral, Llama, Qwen2 and Qwen3.5;
-    ``model.model.language_model.layers`` for the multimodal Gemma 4 wrapper.
+    The list is ``model.model.layers`` for Mistral, Llama, Qwen2 and Qwen3.5, and
+    ``model.model.language_model.layers`` for the multimodal Gemma 4 model.
     """
     for path in (("model", "layers"),
                  ("model", "language_model", "layers"),
@@ -81,10 +80,11 @@ def _decoder_layers(model):
 
 
 def _kv_layers(model):
-    """(layer_idx, kv_cluster) for every layer LORE-KV compresses.
+    """Yield ``(layer_idx, kv_cluster)`` for each layer that LORE-KV compresses.
 
-    Every layer on a dense backbone; only the full-attention layers on a hybrid one
-    (App. E.2). A layer is ours iff its attention module carries a ``kv_cluster``.
+    On a dense backbone this is each layer. On a hybrid backbone it is each
+    full-attention layer (paper App. E.2). A layer is compressed if its attention
+    module has a ``kv_cluster``.
     """
     for idx, layer in enumerate(_decoder_layers(model)):
         attn = getattr(layer, "self_attn", None)
@@ -94,26 +94,20 @@ def _kv_layers(model):
 
 
 def _clone_dynamic_cache(cache):
-    """A per-trajectory copy of the prefill cache, so trajectories cannot interfere.
+    """Make a copy of the prefill cache for one continuation.
 
-    transformers 4.44 (``key_cache`` / ``value_cache`` lists): a new cache object over
-    the same tensors. ``DynamicCache.update`` only ever rebinds a layer to a new
-    ``torch.cat`` result, so sharing is safe and saves one full-length cache per
-    trajectory (16 GiB for Llama-3.1-8B at 128K).
+    transformers 4.44: The copy is a new cache object over the same tensors.
+    ``DynamicCache.update`` makes a new tensor with ``torch.cat`` and does not write to
+    the old tensor, so the tensors can be shared. This saves one full cache for each
+    continuation (16 GiB for Llama-3.1-8B at 128K tokens).
 
-    transformers 5.x (``cache.layers``): every tensor attribute of every layer is
-    cloned, because linear-attention layers update their recurrent state in place.
+    transformers 5.x: The function clones each tensor of each layer, because the
+    linear-attention layers change their recurrent state in place.
     """
     if hasattr(cache, "key_cache"):                       # 4.44
-        # A new cache OBJECT over the SAME tensors -- no data copy. 4.44's
-        # DynamicCache.update only ever rebinds `key_cache[i] = torch.cat(...)`, which
-        # allocates a fresh tensor and never writes into the old one, so a particle's
-        # decode can never touch the prefill tensors shared here (the attention hijack
-        # also only reads them via update()). Values are identical to a .clone(); the
-        # difference is memory: a deep copy is one extra full-length cache alive per
-        # particle -- 16 GiB for Llama-3.1-8B at 128K, which is what made RULER-131072
-        # OOM at 78 GiB. The 5.x branch below keeps deep-copying: its recurrent layers
-        # ARE updated in place.
+        # A new cache object over the same tensors (no copy). DynamicCache.update
+        # replaces a layer with a new torch.cat result and does not write to the old
+        # tensor. The prefill tensors thus stay unchanged.
         new_cache = DynamicCache()
         new_cache.key_cache = list(cache.key_cache)
         new_cache.value_cache = list(cache.value_cache)
@@ -132,11 +126,7 @@ def _clone_dynamic_cache(cache):
 
 
 def _deep_clone(val):
-    """Clone a cache layer's state through tensors, dicts, lists and tuples.
-
-    LinearAttentionLayer keeps its conv / recurrent states in dicts keyed by state
-    index; copying those by reference would let trajectories share one state.
-    """
+    """Clone a value of a cache layer. Tensors in dicts, lists and tuples are also cloned."""
     if torch.is_tensor(val):
         return val.clone()
     if isinstance(val, dict):
@@ -147,10 +137,10 @@ def _deep_clone(val):
 
 
 def _shape_logits(logits, temperature, top_k=None, top_p=None):
-    """Apply the sampler's temperature and truncation.
+    """Apply the temperature and truncation of the sampler to the logits.
 
-    The trajectory statistics are centered against exactly this distribution (see
-    :func:`lorekv.monkeypatch.scoring.step_stats`), which keeps Eq. 2 zero-mean.
+    :func:`lorekv.monkeypatch.scoring.step_stats` centers the statistics on the same
+    distribution, so E[c_u | h_u] = 0 (Eq. 2).
     """
     from lorekv.monkeypatch.scoring import mask_top_k, mask_top_p
     z = logits.float() / max(float(temperature), 1e-5)
@@ -163,15 +153,21 @@ def _shape_logits(logits, temperature, top_k=None, top_p=None):
 
 @torch.no_grad()
 def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen, eos_token_ids):
-    """Run Algorithm 1 for one prompt and return the answer's token ids (1D, prompt excluded).
+    """Run Algorithm 1 on one prompt and return the token IDs of the answer.
 
-    model          a backbone patched by ``replace_*_lookahead`` and configured by
-                   :func:`lorekv.harness.configure_model` (batch size 1)
-    input_ids      [1, n] prompt token ids; attention_mask the matching mask
-    max_gen        maximum number of answer tokens
-    eos_token_ids  token ids that stop decoding
+    The answer is decoded greedily, as in ``model.generate`` for the baselines.
 
-    The answer is decoded greedily, exactly as the baselines' ``model.generate``.
+    Args:
+        model: A backbone patched with ``replace_*_lookahead`` and configured with
+            :func:`lorekv.harness.configure_model`. The batch size is 1.
+        tokenizer: The tokenizer of the model.
+        input_ids: Tensor [1, n] with the prompt token IDs.
+        attention_mask: Tensor [1, n].
+        max_gen: Maximum number of answer tokens.
+        eos_token_ids: Token IDs that stop decoding.
+
+    Returns:
+        A 1-D tensor with the answer token IDs. The prompt is not included.
     """
     device = input_ids.device
     n = input_ids.shape[1]
@@ -206,13 +202,10 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     particle_V = torch.zeros(M, T, device=device)     # varentropy V_u
     for m in range(M):
         _set_particle(model, m)
-        # Drop the previous particle's cache BEFORE building the next one; otherwise
-        # both are alive at once (the old one is still bound to cache_m / step_out
-        # while the right-hand side runs).
+        # Release the cache of the previous trajectory before the next copy is made.
         cache_m = step_out = None
         cache_m = _clone_dynamic_cache(base_cache)
-        # First token of the particle: sampled from the SAME truncated/tempered law the
-        # per-step statistics below are centered against.
+        # Sample the first token from the same distribution that centers the statistics.
         q0 = torch.log_softmax(_shape_logits(last_logits, temperature, top_k, top_p), dim=-1).exp()
         tok = torch.multinomial(q0, num_samples=1)
         cs, hs, vs = [], [], []
@@ -240,8 +233,8 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
         particle_V[m] = torch.stack(vs)
 
     # ---- Algorithm 1, lines 8-10: trajectory weights ----
-    # D_m (Eq. 10) is read from the per-layer lookahead query buffers, so it must be
-    # computed before compress() / reset_lookahead_buffers() free them.
+    # Compute D_m (Eq. 10) before compress() and reset_lookahead_buffers() clear the
+    # lookahead query buffers.
     particle_divergence = torch.zeros(M, device=device)
     if lambda_d != 0.0:
         particle_divergence = particle_trajectory_divergence(
@@ -255,10 +248,10 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     for _idx, _kvc in _kv_layers(model):
         _kvc.set_particle_weights(weights)
 
-    # Everything compress() needs is already stored on each layer's kv_cluster, so free
-    # the prefill cache and the rollout's locals before the memory-heavy scoring.
-    # A hybrid backbone's linear-attention / sliding layers are not compressed but
-    # their prefill state is still needed for decoding, so keep those layer objects.
+    # Each kv_cluster holds the data that compress() needs. Release the prefill cache
+    # and the loop tensors before scoring. Keep the layers that are not compressed
+    # (linear-attention and sliding-window layers of a hybrid backbone), because
+    # decoding needs their prefill state.
     _owned = {i for i, _ in _kv_layers(model)}
     _carry = None
     if hasattr(base_cache, "layers"):
@@ -286,9 +279,8 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     _set_phase(model, "final")
 
     # ---- Phase 4 (Algorithm 1, lines 26-27): discard the trajectories, decode greedily ----
-    # The first answer token is the argmax of the prefill logits, as for the full cache.
-    # transformers 4.44 threads a legacy tuple through the patched model forward; the
-    # 5.x hybrid path keeps the Cache object.
+    # The first answer token is the argmax of the prefill logits, as with the full cache.
+    # transformers 4.44 uses a legacy tuple cache; the 5.x hybrid path uses the Cache object.
     past_key_values = (compressed_cache.to_legacy_cache()
                        if hasattr(compressed_cache, "to_legacy_cache") and _carry is None
                        else compressed_cache)

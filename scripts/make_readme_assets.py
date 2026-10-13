@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""🎨 Build the README and project-page figures into ``assets/``.
+"""Build the README and project-page figures into ``assets/``.
 
     python scripts/make_readme_assets.py [--figures-dir figures_combined]
 

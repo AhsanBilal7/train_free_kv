@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""📋 Emit the LaTeX body of a LongBench results table from pred/.
+"""Emit the LaTeX body of a LongBench results table from pred/.
 
 The paper's per-backbone tables (tab:longbench_qwen2, tab:longbench_ministral3)
 are 16 datasets x 4 methods x 4 budgets plus a Full Cache row. Typing that by

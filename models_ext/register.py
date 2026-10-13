@@ -1,4 +1,4 @@
-"""🧩 Register the vendored backbone with the Auto* factories.
+"""Register the vendored backbone with the Auto* factories.
 
 Only Ministral3 is vendored: `qwen2` and every other backbone the paper uses is
 native to the pinned Transformers release. pred.py loads every backbone through

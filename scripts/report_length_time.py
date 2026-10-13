@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""⏱️ Average prompt length and per-sample wall-clock time over finished runs (Table 3).
+"""Average prompt length and per-sample wall-clock time over finished runs (Table 3).
 
 For every (benchmark, config, budget) this locates the run folder that
 ``scripts/sweep.py`` writes for that config (names come from ``run_naming.py``),

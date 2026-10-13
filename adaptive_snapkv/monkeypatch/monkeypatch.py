@@ -1,4 +1,4 @@
-"""🔌 Install the SnapKV (``fixed``), Ada-KV (``adaptive``) and StreamingLLM (``slm``) forwards.
+"""Install the SnapKV (``fixed``), Ada-KV (``adaptive``) and StreamingLLM (``slm``) forwards.
 
 Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT).
 """

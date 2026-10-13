@@ -1,6 +1,8 @@
-"""🔌 Install LORE-KV on a backbone: ``replace_{mistral,llama,qwen2,ministral3}_lookahead``
-for the dense backbones (transformers 4.44) and ``replace_hybrid_lookahead`` for Qwen3.5 and
-Gemma 4 (transformers 5.x). :func:`lorekv.harness.install_method` calls them.
+"""Functions that install LORE-KV on a backbone.
+
+``replace_{mistral,llama,qwen2,ministral3}_lookahead`` patch the dense backbones
+(transformers 4.44). ``replace_hybrid_lookahead`` patches Qwen3.5 and Gemma 4
+(transformers 5.x). :func:`lorekv.harness.install_method` calls these functions.
 """
 from importlib.metadata import version
 import warnings
@@ -19,7 +21,7 @@ from lorekv.monkeypatch.causal_llama_hijack import (
 
 
 def check_version():
-    """Warn when transformers is not the 4.44 release these patches were written for."""
+    """Warn if the installed transformers is not release 4.44."""
     try:
         transformers_version = version("transformers")
     except Exception as e:
@@ -126,14 +128,12 @@ def replace_gemma4_lookahead():
 
 
 def replace_hybrid_lookahead():
-    """Patch whichever hybrid backbones this transformers build actually has.
+    """Patch the hybrid backbones that the installed transformers contains.
 
-    pred.py calls every replace_* unconditionally, so this must be a no-op rather
-    than an error on the 4.44 venv, where transformers.models.qwen3_5 does not
-    exist at all. Guarded per model so a future partial install still patches what
-    it can. Anything unexpected is re-raised: a silently unpatched model would run
-    uncompressed and report a full-cache score under a compression label, which is
-    the worst possible failure here.
+    The function does nothing on transformers 4.44, which does not contain these
+    architectures. It catches only ImportError and AttributeError. Other errors
+    propagate, because an unpatched model decodes with the full cache and gives an
+    incorrect result for a compressed setting.
     """
     for name, fn in (("qwen3_5", replace_qwen3_5_lookahead),
                      ("gemma4_unified", replace_gemma4_lookahead)):

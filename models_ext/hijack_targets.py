@@ -1,4 +1,4 @@
-"""🧩 The three class attributes every eviction package has to patch, per backbone.
+"""The three class attributes every eviction package has to patch, per backbone.
 
 Each `<pkg>/monkeypatch/monkeypatch.py` patches the same trio for Mistral and
 Llama:

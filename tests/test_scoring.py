@@ -1,4 +1,4 @@
-"""🧪 CPU checks of LORE-KV's estimator and scoring against the paper's equations."""
+"""CPU checks of LORE-KV's estimator and scoring against the paper's equations."""
 import math
 
 import pytest

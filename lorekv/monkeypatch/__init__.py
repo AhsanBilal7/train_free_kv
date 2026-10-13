@@ -1,6 +1,6 @@
-"""🔌 LORE-KV's monkeypatches: attention hijacks, scoring/selection and the generation loop.
+"""LORE-KV attention patches, scoring, selection and generation loop.
 
-Entry points: ``replace_*_lookahead`` in :mod:`.monkeypatch` install the method on
-a backbone, and :func:`.lookahead_runner.generate_with_lookahead` runs Algorithm 1
-for one prompt.
+Use ``replace_*_lookahead`` in :mod:`.monkeypatch` to install the method on a
+backbone. Use :func:`.lookahead_runner.generate_with_lookahead` to run
+Algorithm 1 on one prompt.
 """

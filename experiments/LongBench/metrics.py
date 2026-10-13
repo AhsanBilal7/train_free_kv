@@ -1,4 +1,4 @@
-"""📏 LongBench task metrics: QA F1, ROUGE-L, classification / retrieval / count
+"""LongBench task metrics: QA F1, ROUGE-L, classification / retrieval / count
 accuracy and code edit similarity.
 
 Taken from the official LongBench evaluator (Bai et al., ACL 2024;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""🧪 Check the vendored models_ext backbones against upstream transformers.
+"""Check the vendored models_ext backbones against upstream transformers.
 
 models_ext/ re-expresses Ministral3 in the transformers 4.44 Llama
 idiom because the eviction hijacks cannot survive the transformers version those

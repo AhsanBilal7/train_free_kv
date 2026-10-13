@@ -1,4 +1,4 @@
-"""🧬 Layer-type awareness for hybrid-attention backbones (Qwen3.5, Gemma 4).
+"""Layer-type awareness for hybrid-attention backbones (Qwen3.5, Gemma 4).
 
 The 2026 generation of open decoders is hybrid: only a minority of layers keep a
 KV cache that grows with context. Qwen3.5-9B is 8 full-attention layers and 24

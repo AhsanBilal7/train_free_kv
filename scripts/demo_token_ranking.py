@@ -1,4 +1,4 @@
-"""🔬 Token-ranking analysis: CriticalKV vs AnDPro vs LORE-KV on the SAME captured state.
+"""Token-ranking analysis: CriticalKV vs AnDPro vs LORE-KV on the SAME captured state.
 
 Paper App. F.1-F.5 (Figures 9-11): the score-level evidence behind the end-to-end
 tables. Given one prompt, one prefill and one set of lookahead particles, it scores

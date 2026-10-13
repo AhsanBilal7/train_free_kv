@@ -1,4 +1,4 @@
-"""🧩 Ministral3 text tower for transformers 4.44, expressed in the Llama idiom.
+"""Ministral3 text tower for transformers 4.44, expressed in the Llama idiom.
 
 Structurally Ministral3 is Llama-3 (SwiGLU MLP, RMSNorm pre-norm blocks, GQA,
 no attention bias, no sliding window). It departs in exactly two places, both

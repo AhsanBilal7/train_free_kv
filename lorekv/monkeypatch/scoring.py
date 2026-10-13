@@ -1,23 +1,21 @@
-"""🎯 LORE-KV scoring, reliability weighting and selection (paper Secs. 3.2-3.5, Algorithm 1).
+"""LORE-KV scoring, reliability weights and token selection (paper Secs. 3.2-3.5).
 
-Notation follows the paper. For layer ``l`` and head ``h``, ``K``/``V`` are the
-prefill keys and values, ``Q_W`` the queries of the last ``w`` prompt tokens, and
-``Q_look^(m)`` the queries of lookahead trajectory ``m = 1..M`` of length ``T``.
+The notation follows the paper. For layer l and head h, K and V are the prefill
+keys and values, Q_W are the queries of the last w prompt tokens, and
+Q_look^(m) are the queries of lookahead trajectory m = 1, ..., M.
 
-* :func:`step_stats` -- per-step centered score ``c_u`` (Eq. 2), entropy ``H_u``
-  and varentropy ``V_u`` (Eq. 9) of one sampled token.
-* :func:`reliability_weights` -- trajectory reliability ``R_m`` (Eq. 3) and soft
-  weights ``omega = softmax(R)`` (Eq. 4).
-* :func:`divergence_from_query_stacks` / :func:`standardize_disagreement` --
-  query-space disagreement ``D_m`` (Eq. 10) and its standardization ``D_hat``
-  (App. C.3).
-* :class:`TestTimeLookaheadKVCluster` -- the per-layer state and the eviction
-  itself: projected leave-one-out deletion scores (Eqs. 5-6), their aggregation
-  into the token score ``S_i`` (Eq. 7), head-budget allocation and selection
-  (Eq. 8, Eq. 11, App. D), and the compressed per-head cache.
+Contents:
+    step_stats: Centered score c_u (Eq. 2), entropy H_u and varentropy V_u (Eq. 9)
+        of one sampled token.
+    reliability_weights: Reliability R_m (Eq. 3) and weights omega (Eq. 4).
+    divergence_from_query_stacks, standardize_disagreement: Query-space
+        disagreement D_m (Eq. 10) and its standardized value D_hat (App. C.3).
+    TestTimeLookaheadKVCluster: Per-layer state and eviction. It computes the
+        projected deletion scores (Eqs. 5-6), the token score S_i (Eq. 7), the head
+        budgets and the selection (Eq. 8, Eq. 11, App. D).
 
-Selection operates on chunks of ``chunk_size`` adjacent tokens scored by their
-maximum (Table 4: chunk size 4).
+Selection uses chunks of ``chunk_size`` adjacent tokens. The score of a chunk is
+the maximum score of its tokens (paper Table 4: chunk size 4).
 """
 import math
 from typing import List, Optional, Tuple
@@ -28,14 +26,13 @@ from transformers.cache_utils import Cache
 
 
 class DynamicCacheSplitHeadFlatten(Cache):
-    """KV cache whose heads hold different numbers of tokens after eviction.
+    """KV cache in which each head can keep a different number of tokens.
 
-    Each layer stores its heads back to back as one ``[sum_h len_h, head_dim]``
-    tensor; ``head_lens`` and the cumulative offsets ``cu_klen`` locate each head,
-    which is the layout ``flash_attn_varlen_func`` consumes at decode time. New
-    tokens are appended per head by the ``update_flatten_view`` CUDA kernel in
-    ``csrc/``. Adapted from the AdaKV code base (https://github.com/FFY0/AdaKV, MIT),
-    with the same contract as ``andpro_snapkv`` / ``adaptive_snapkv``.
+    Each layer stores its heads one after the other in one tensor of shape
+    [sum_h len_h, head_dim]. ``head_lens`` and the offsets ``cu_klen`` give the
+    position of each head. ``flash_attn_varlen_func`` reads this layout during
+    decoding. The CUDA kernel ``update_flatten_view`` (``csrc/``) appends one token to
+    each head. Adapted from AdaKV (https://github.com/FFY0/AdaKV, MIT).
     """
 
     def __init__(self) -> None:
@@ -108,28 +105,26 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 # Trajectory reliability (Sec. 3.3, App. C.3).
 #
-# For a token y_u sampled from q(.|h_u), the centered score (Eq. 2)
+# For a token y_u sampled from q(.|h_u), the centered score (Eq. 2) is
 #
-#     c_u = log q(y_u | h_u) + H(q(. | h_u)),        E[c_u | h_u] = 0,
+#     c_u = log q(y_u | h_u) + H(q(. | h_u)),        E[c_u | h_u] = 0.
 #
-# separates how atypical the sampled branch was from how uncertain the context
-# was. Trajectory reliability (Eq. 3) combines per-step means with the
-# query-space disagreement of Eq. 10:
+# c_u measures how atypical the sampled token is. H measures how uncertain the
+# context is. The trajectory reliability (Eq. 3) is
 #
 #     R_m = beta * c_bar_m - gamma * H_bar_m - lambda_D * D_hat_m,   omega = softmax(R).
 #
-# Because mean_u log q = c_bar - H_bar, uniform weights are (0, 0, 0) and
-# log-probability-only weighting is (1, 1, 0) (App. C.3); LORE-KV /E is
-# (1, 1.3, 0) and /D is (1, 1, 0.3) (Table 4). A softmax temperature would be
-# redundant with the three coefficients, so there is none.
+# mean_u log q = c_bar - H_bar. Thus (0, 0, 0) gives uniform weights and (1, 1, 0)
+# gives log-probability weights (App. C.3). LORE-KV /E uses (1, 1.3, 0) and /D uses
+# (1, 1, 0.3) (Table 4). The softmax has no temperature, because the three
+# coefficients set the scale.
 #
-# E[c_u | h_u] = 0 holds only if c_u is centered against the distribution the
-# token was sampled from. Any temperature or top-k / top-p truncation must
-# therefore be applied to the logits before the log-softmax (step_stats does);
-# the paper samples at temperature 1 without truncation (App. E.1).
+# E[c_u | h_u] = 0 only if c_u is centered on the sampling distribution. Apply each
+# temperature and truncation to the logits before the log-softmax. The paper
+# samples at temperature 1 without truncation (App. E.1).
 # ---------------------------------------------------------------------------
 def mask_top_k(z, top_k):
-    """-inf outside the top-k support, so log_softmax gives the truncated law exactly."""
+    """Set the logits outside the top-k tokens to -inf."""
     if not top_k or top_k <= 0 or top_k >= z.shape[-1]:
         return z
     kth = z.topk(int(top_k), dim=-1).values[..., -1:]
@@ -137,7 +132,7 @@ def mask_top_k(z, top_k):
 
 
 def mask_top_p(z, top_p):
-    """-inf outside the nucleus, so log_softmax gives the truncated law exactly."""
+    """Set the logits outside the top-p nucleus to -inf."""
     if top_p is None or top_p >= 1.0:
         return z
     srt, idx = z.sort(dim=-1, descending=True)
@@ -148,19 +143,22 @@ def mask_top_p(z, top_p):
 
 
 def step_stats(logits, y, temperature=1.0, top_k=None, top_p=None):
-    """Per-step reliability statistics of one sampled token (Eqs. 2 and 9).
+    """Compute the reliability statistics of one sampled token (Eqs. 2 and 9).
 
-    logits : [M, |V|] raw next-token logits (the same logits the sampler consumed)
-    y      : [M] the sampled token ids at this step
+    Use the same temperature and truncation as the sampler. Otherwise the centering
+    distribution is not the sampling distribution, and E[c | h] is not zero.
 
-    Returns (logp, H, V, c), each [M]:
-      logp -- log q(y | h)
-      H    -- entropy of q(. | h) in nats
-      V    -- varentropy Var_{y~q}[log q(y)] (Eq. 9)
-      c    -- centered score logp + H (Eq. 2), with E[c | h] = 0
+    Args:
+        logits: Tensor [M, V]. The raw next-token logits that the sampler used.
+        y: Tensor [M]. The sampled token IDs.
+        temperature: Sampling temperature.
+        top_k: Optional top-k truncation.
+        top_p: Optional top-p truncation.
 
-    ``temperature``, ``top_k`` and ``top_p`` must match the sampler's, otherwise
-    the centering law is not the sampling law and E[c | h] != 0.
+    Returns:
+        A tuple ``(logp, H, V, c)`` of tensors [M]: log q(y | h), the entropy of
+        q(. | h) in nats, the varentropy Var_{y~q}[log q(y)], and the centered score
+        c = logp + H.
     """
     z = logits.float() / max(float(temperature), 1e-5)
     if top_k is not None:
@@ -171,8 +169,8 @@ def step_stats(logits, y, temperature=1.0, top_k=None, top_p=None):
     logq = torch.log_softmax(z, dim=-1)          # centering law == sampling law
     q = logq.exp()
 
-    # Masked reductions: outside a truncated support q == 0 and logq == -inf, and the
-    # plain product 0 * -inf is nan.
+    # Mask the products: outside a truncated support q = 0 and log q = -inf, and
+    # 0 * -inf is NaN.
     zeros = torch.zeros_like(q)
     qlogq = torch.where(q > 0, q * logq, zeros)
     qlogq2 = torch.where(q > 0, q * logq.pow(2), zeros)
@@ -184,14 +182,22 @@ def step_stats(logits, y, temperature=1.0, top_k=None, top_p=None):
 
 
 def reliability_weights(c, H, V, D_hat, beta, gamma, lambda_d=0.0, normalize=False):
-    """Trajectory weights omega (Eqs. 3-4).
+    """Compute the trajectory weights omega (Eqs. 3-4).
 
-    c, H, V : [M, T] per-step centered score / entropy / varentropy
-    D_hat   : [M] standardized query-space disagreement (App. C.3), or None
-    normalize : use c_bar / sqrt(V_bar / T), the standard-error-normalized
-                typicality of App. C.3, instead of c_bar (ablation only)
+    Args:
+        c: Tensor [M, T]. Centered scores.
+        H: Tensor [M, T]. Entropies.
+        V: Tensor [M, T]. Varentropies.
+        D_hat: Tensor [M] with the standardized disagreement, or None.
+        beta: Coefficient of the mean centered score.
+        gamma: Coefficient of the mean entropy.
+        lambda_d: Coefficient of the disagreement.
+        normalize: If True, use c_bar / sqrt(V_bar / T) in place of c_bar (App. C.3,
+            ablation only).
 
-    Returns (omega [M], parts) where ``parts`` holds the per-trajectory channels.
+    Returns:
+        A tuple ``(omega, parts)``. ``omega`` is a tensor [M] that sums to one.
+        ``parts`` contains the per-trajectory values c_bar, H_bar, V_bar and R.
     """
     T = max(int(c.shape[-1]), 1)
     c_bar, H_bar, V_bar = c.mean(-1), H.mean(-1), V.mean(-1)
@@ -205,28 +211,31 @@ def reliability_weights(c, H, V, D_hat, beta, gamma, lambda_d=0.0, normalize=Fal
 
 
 # ---------------------------------------------------------------------------
-# Query-space disagreement (Eq. 10). How far trajectory m's lookahead queries
-# sit from those of the other trajectories:
+# Query-space disagreement (Eq. 10). D_m is the mean cosine distance between the
+# lookahead queries of trajectory m and those of the other trajectories:
 #
 #   D_m = 1/(M-1) sum_{r != m} 1/(T L H_q) sum_{u,l,g} [1 - cos(q^(m)_{u,l,g}, q^(r)_{u,l,g})].
 #
-# Queries compared at step u occupy the same absolute position n + u and hence the
-# same rotary phase, so their cosine is meaningful. D_m is ensemble-relative: once
-# standardized it sums to zero over the trajectories, so it re-weights within the
-# sample rather than shifting the estimator's target (App. C.3).
+# The two queries of a pair at step u have the same position n + u and the same
+# rotary phase. After standardization D_hat sums to zero over the trajectories.
+# It thus changes the weights inside the sample and does not move the target of
+# the estimator (App. C.3).
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def divergence_from_query_stacks(stacks, num_particles, eps=1e-6, device=None):
-    """D_m of Eq. 10, shared by the runner and the analysis figures.
+    """Compute the query-space disagreement D_m (Eq. 10).
 
-    ``stacks`` yields one [M, Hq, T, D] tensor per layer -- trajectory m's post-RoPE
-    lookahead queries, stacked along dim 0. Returns a float32 tensor [M]. It is all
-    zeros when M <= 2 or no layer supplied a query: disagreement is undefined for
-    one trajectory and degenerate for two (D_1 = D_2 by symmetry, so sd(D) = 0), so
-    any (M <= 2, lambda_D > 0) setting reduces exactly to lambda_D = 0.
+    Args:
+        stacks: Iterable of tensors [M, Hq, T, D], one for each layer. Entry m holds
+            the post-RoPE lookahead queries of trajectory m.
+        num_particles: Number of trajectories M.
+        eps: Value that prevents division by zero.
+        device: Device of the result. If None, the device of the first stack.
 
-    `device` may be left None, in which case the accumulator adopts the device of the
-    first stack (the caller's query tensors normally live on the GPU already).
+    Returns:
+        A float32 tensor [M]. The tensor is zero if M <= 2 or if no layer has
+        queries. For M = 2 the two values are equal and their standard deviation is
+        zero, so lambda_D has no effect.
     """
     M = int(num_particles)
     if M <= 2:
@@ -245,7 +254,7 @@ def divergence_from_query_stacks(stacks, num_particles, eps=1e-6, device=None):
         if cos_sum is None:
             cos_sum = torch.zeros(M, M, dtype=torch.float32, device=device)
         q = q / (q.norm(dim=-1, keepdim=True) + eps)
-        # mean over (head, step) of the cosine between every ordered particle pair
+        # Mean cosine over heads and steps for each ordered pair of trajectories.
         cos_sum += torch.einsum("mhtd,rhtd->mr", q, q) / (q.shape[1] * q.shape[2])
         n_groups += 1
 
@@ -257,11 +266,9 @@ def divergence_from_query_stacks(stacks, num_particles, eps=1e-6, device=None):
 
 
 def _cluster_query_stacks(layers, num_particles, layer_stride=1):
-    """Yield [M, Hq, T, D] stacks straight off the per-layer lookahead buffers."""
+    """Yield the lookahead queries of each compressed layer as a tensor [M, Hq, T, D]."""
     for layer in layers[::max(1, int(layer_stride))]:
-        # getattr on the LAYER first: a hybrid backbone's linear-attention layers have
-        # no `self_attn` attribute at all, so layer.self_attn raises rather than
-        # returning None.
+        # The linear-attention layers of a hybrid backbone have no `self_attn`.
         _attn = getattr(layer, "self_attn", None)
         kvc = getattr(_attn, "kv_cluster", None) if _attn is not None else None
         if kvc is None:
@@ -269,20 +276,26 @@ def _cluster_query_stacks(layers, num_particles, layer_stride=1):
         bufs = [kvc._lookahead_buffers[m] for m in range(num_particles)]
         if any(len(b) == 0 for b in bufs):
             continue
-        # A particle that stopped early would break the (u, g) pairing, so compare only
-        # over the steps every particle actually produced.
+        # Compare only the steps that all trajectories produced.
         T = min(len(b) for b in bufs)
         yield torch.stack([torch.cat(b[:T], dim=2)[0] for b in bufs], dim=0)
 
 
 @torch.no_grad()
 def particle_trajectory_divergence(layers, num_particles, layer_stride=1, eps=1e-6, device=None):
-    """Query-space disagreement D_m (Eq. 10), one scalar per trajectory.
+    """Compute D_m (Eq. 10) from the lookahead buffers of the decoder layers.
 
-    `layers` are the decoder layers whose `self_attn.kv_cluster._lookahead_buffers[m]`
-    hold the m-th particle's captured post-RoPE query states (list of T x [1,Hq,1,D]);
-    they are populated by the attention hijack during the "lookahead" phase and must
-    still be alive (i.e. call this BEFORE reset_lookahead_buffers()).
+    Call this function before ``reset_lookahead_buffers()``, which clears the buffers.
+
+    Args:
+        layers: The decoder layers.
+        num_particles: Number of trajectories M.
+        layer_stride: Use every ``layer_stride``-th layer.
+        eps: Value that prevents division by zero.
+        device: Device of the result.
+
+    Returns:
+        A float32 tensor [M].
     """
     return divergence_from_query_stacks(
         _cluster_query_stacks(layers, int(num_particles), layer_stride),
@@ -290,11 +303,10 @@ def particle_trajectory_divergence(layers, num_particles, layer_stride=1, eps=1e
 
 
 def standardize_disagreement(x, eps=1e-6):
-    """D_hat = (D - mean D) / sd(D) across the M trajectories (App. C.3).
+    """Return D_hat = (D - mean(D)) / sd(D) across the M trajectories (App. C.3).
 
-    The standardization makes lambda_D scale-free across prompts and bounds the
-    tilt (|z| <= sqrt(M - 1)). Returns zeros for M <= 2 and when every trajectory
-    has the same disagreement.
+    The standardization makes lambda_D independent of the prompt scale. The result
+    is zero if M <= 2 or if all trajectories have the same disagreement.
     """
     if x.numel() <= 2:
         return torch.zeros_like(x)
@@ -310,15 +322,14 @@ standardize_particle_scores = standardize_disagreement
 
 
 class TestTimeLookaheadKVCluster:
-    """Per-layer LORE-KV state and eviction (Algorithm 1, lines 7-24).
+    """Per-layer state and eviction of LORE-KV (Algorithm 1, lines 7-24).
 
-    One instance lives on every compressed attention layer (``self.kv_cluster``).
-    Unlike the baselines, which evict inside the prefill forward, LORE-KV must
-    first generate the lookahead trajectories against the full cache. The
-    attention hijack therefore only records observations -- the window queries
-    Q_W, each trajectory's queries Q_look^(m) and the full K/V -- and
-    :func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead` calls
-    :meth:`compress` once per layer after the rollout.
+    Each compressed attention layer has one instance (``self.kv_cluster``). The
+    baselines evict during the prefill forward. LORE-KV must first generate the
+    lookahead trajectories with the full cache. The attention forward thus only
+    records Q_W, the queries of each trajectory and the full K and V.
+    :func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead` then calls
+    :meth:`compress` one time for each layer.
     """
 
     def __init__(self, window_size, base_capacity, chunk_size, skip, layer_idx, num_hidden_layers,
@@ -354,7 +365,7 @@ class TestTimeLookaheadKVCluster:
         self.lambda_k = lambda_k
         self.lambda_v = lambda_v
 
-        # Per-query deletion score (App. D, ablation iii); everything else is unchanged:
+        # Per-query deletion score (App. D, ablation iii):
         #   'projected'   |c_{q,i}| * || W_O v_i - W_O o_q ||   (Eqs. 5-6, the core method)
         #   'unprojected' |c_{q,i}| * ||      v_i -      o_q ||   (W_O dropped)
         #   'attention'   a_{q,i}                                (accumulated attention mass)
@@ -366,7 +377,7 @@ class TestTimeLookaheadKVCluster:
         self.causal_eps = causal_eps
         self.candidate_chunk = candidate_chunk
 
-        # Filled in by the attention hijack during the "collect" phase.
+        # Set by the attention forward in the "collect" phase.
         self.o_proj_weight = None
         self.head_dim = None
         self.num_key_value_groups = 1       # num_heads // num_key_value_heads; set by init_lookahead_snapkv
@@ -376,11 +387,11 @@ class TestTimeLookaheadKVCluster:
                                              # the whole lookahead rollout. compress() repeats_kv
                                              # transiently, one layer at a time, right before scoring.
 
-        # Filled in during "lookahead" phase, one list of [1,H,1,D] tensors per particle.
+        # Set in the "lookahead" phase: one list of [1, H, 1, D] tensors per trajectory.
         self._lookahead_buffers = [[] for _ in range(num_particles)]
         self.particle_weights = None        # tensor [M], set after particle confidence scoring
 
-        # Decode-time (varlen flash-attn) metadata, same convention as the baselines.
+        # Metadata for the varlen flash-attention decode step (as in the baselines).
         self.head_lens = None
         self.max_seqlen_k = 0
         self.klen_sum = 0
@@ -392,24 +403,22 @@ class TestTimeLookaheadKVCluster:
         self.layer_qlens = None
 
     # ------------------------------------------------------------------
-    # Observation hooks called from the attention forward hijack.
+    # Observation hooks. The attention forward calls them.
     # ------------------------------------------------------------------
     def capture_window_queries(self, query_states):
         """Record Q_W, the post-RoPE queries of the last ``window_size`` prompt tokens."""
         w = min(self.window_size, query_states.shape[2])
-        # .clone(), not a view: a slice keeps the WHOLE [1, H, n, D] prefill query tensor
-        # alive for every layer until compress() -- 1 GiB per layer at 128K on
-        # Llama-3.1-8B, 32 GiB in total, which made RULER-131072 OOM in the lookahead
-        # rollout. The values are identical; only the retained storage changes.
+        # Clone the slice. A view keeps the full [1, H, n, D] query tensor of each layer
+        # in memory until compress() (32 GiB for Llama-3.1-8B at 128K tokens).
         self.window_queries = query_states[:, :, -w:, :].detach().clone()
 
     def store_full_kv(self, key_states, value_states):
-        """Record the full prefill K/V (KV-head count), needed until :meth:`compress`."""
+        """Record the full prefill K and V (KV-head count) until :meth:`compress`."""
         self.full_key_states = key_states.detach()
         self.full_value_states = value_states.detach()
 
     def capture_lookahead_query(self, particle_idx, query_states):
-        """Append one step of Q_look^(m), the queries of lookahead trajectory m."""
+        """Append the query of one step of lookahead trajectory ``particle_idx``."""
         self._lookahead_buffers[particle_idx].append(query_states.detach())
 
     def set_particle_weights(self, weights):
@@ -417,10 +426,11 @@ class TestTimeLookaheadKVCluster:
         self.particle_weights = weights
 
     def release_collected_state(self):
-        """Drop the full, uncompressed prefill K/V and window queries once compress() has
-        consumed them. Without this, every layer keeps its (potentially 64K-token) full K/V
-        alive for the rest of the document's decode loop -- and into the next document's collect
-        phase -- which is the single largest source of peak memory in this pipeline."""
+        """Release the full K, V and Q_W after :meth:`compress`.
+
+        Without this step each layer keeps its full prefill cache during decoding. This
+        is the largest contribution to the peak memory.
+        """
         self.full_key_states = None
         self.full_value_states = None
         self.window_queries = None
@@ -433,10 +443,16 @@ class TestTimeLookaheadKVCluster:
     # Deletion scores (Eqs. 5-6) aggregated over a query set (psi in Eq. 7).
     # ------------------------------------------------------------------
     def _robust_topbeta_mean(self, scores):
-        """psi(E) = alpha * TopAvg_kappa(E) + (1 - alpha) * Mean(E) over queries (App. D-A).
+        """Aggregate scores over queries: psi(E) = alpha * TopAvg_kappa(E) + (1 - alpha) * Mean(E).
 
-        scores: [Q, chunk] -> [chunk]. The core method uses alpha = 0, i.e. the mean;
-        kappa is ``robust_topk_beta``. Motivated by DefensiveKV (Feng et al., 2025a).
+        The core method uses alpha = 0, which gives the mean (App. D-A). ``robust_topk_beta``
+        is kappa. The rule follows DefensiveKV (Feng et al., 2025a).
+
+        Args:
+            scores: Tensor [Q, n_chunk].
+
+        Returns:
+            Tensor [n_chunk]. Zero if Q = 0.
         """
         q = scores.shape[0]
         if q == 0:
@@ -450,34 +466,34 @@ class TestTimeLookaheadKVCluster:
         return self.robust_alpha * topavg + (1.0 - self.robust_alpha) * mean_
 
     def _project_and_score(self, key_states, value_states, query_batches, causal_flags):
-        """Aggregated leave-one-out deletion scores for each query set (Eqs. 5-7).
+        """Compute the aggregated leave-one-out deletion scores for each query set (Eqs. 5-7).
 
-        With a_{q,i} the full-cache attention weight and o_q the full-cache output,
-        deleting token i and renormalizing changes the output by (Eq. 5)
+        a_{q,i} is the full-cache attention weight and o_q is the full-cache output. If
+        token i is deleted and the weights are normalized again, the output changes by
 
-            delta_o_{q,i} = c_{q,i} * (v_i - o_q),     c_{q,i} = a_{q,i} / (1 - a_{q,i} + eps),
+            delta_o_{q,i} = c_{q,i} * (v_i - o_q),    c_{q,i} = a_{q,i} / (1 - a_{q,i} + eps).
 
-        and its residual-stream impact is measured through the head's output-projection
-        block W_O (Eq. 6). It is computed with the Gram identity
+        The score measures this change after the output projection W_O of the head
+        (Eq. 6). The function computes the norm with the Gram identity
 
-            |c_{q,i}| * ||W_O v_i - W_O o_q|| = |c_{q,i}| * sqrt(||W_O v_i||^2 + ||W_O o_q||^2
-                                                             - 2 <W_O v_i, W_O o_q>),
+            ||W_O v_i - W_O o_q||^2 = ||W_O v_i||^2 + ||W_O o_q||^2 - 2 <W_O v_i, W_O o_q>,
 
-        so the [Q, n, hidden] perturbation tensor is never materialized; W_O v_i is
-        computed once per head and shared by every query set. Attention is computed
-        explicitly only for the w + M*T scoring queries (App. C.1), so prefill and
-        decoding keep their fused kernels.
+        so it does not make the [Q, n, hidden] tensor. Attention is computed only for the
+        w + M*T scoring queries (App. C.1). Prefill and decoding keep their fused kernels.
 
-        ``self.score_objective`` selects the per-query score (App. D, ablation iii):
-            'projected'   |c_{q,i}| * ||W_O v_i - W_O o_q||   (default)
-            'unprojected' |c_{q,i}| * ||v_i - o_q||
-            'attention'   a_{q,i}
+        ``score_objective`` selects the per-query score (App. D, ablation iii):
+        ``projected`` uses |c_{q,i}| * ||W_O v_i - W_O o_q||, ``unprojected`` uses
+        |c_{q,i}| * ||v_i - o_q||, and ``attention`` uses a_{q,i}.
 
-        key_states, value_states: [1, H, n, D] (already GQA-repeated to query-head count).
-        query_batches: list of [1, H, Qi, D] tensors (Q_W first, then Q_look^(1..M)).
-        causal_flags: True only for Q_W, whose queries must not attend to later window
-            positions; lookahead queries come after the whole prompt and need no mask.
-        Returns: one [H, n] float32 tensor per query set, psi(E_{i,W}), psi(E_{i,1..M}).
+        Args:
+            key_states: Tensor [1, H, n, D], repeated to the query-head count.
+            value_states: Tensor [1, H, n, D], repeated to the query-head count.
+            query_batches: List of tensors [1, H, Q_b, D]: Q_W first, then Q_look^(1..M).
+            causal_flags: True only for Q_W. The window queries must not see later window
+                positions. The lookahead queries come after the prompt and need no mask.
+
+        Returns:
+            One float32 tensor [H, n] for each query set: psi(E_{i,W}), psi(E_{i,1..M}).
         """
         H = key_states.shape[1]
         n = key_states.shape[2]
@@ -546,14 +562,16 @@ class TestTimeLookaheadKVCluster:
     # Budget allocation and selection (Eq. 8; Eq. 11 and App. D-C as plug-ins).
     # ------------------------------------------------------------------
     def _select_chunks(self, token_score, n, H, key_states, value_states):
-        """Per-head retention mask over chunks: R = P u Select(S, B_h) (Eq. 8).
+        """Return the retention mask R = P u Select(S, B_h) over chunks (Eq. 8).
 
-        Tokens are grouped into chunks of ``chunk_size`` scored by their maximum. The
-        first chunk (attention sink) and the observation-window chunks form the
-        protected set P. Scores are normalized by each head's mean over droppable
-        chunks; the remaining budget is split across heads by Eq. 11 (uniform when
-        tau = 0) and filled by top-k, or by the greedy diversity rule when
-        lambda_k or lambda_v > 0. Returns a bool [H, n_chunk] mask.
+        The first chunk (attention sink) and the observation-window chunks are the
+        protected set P. Each chunk score is divided by the mean droppable score of its
+        head. Eq. 11 divides the remaining budget across heads (uniform if tau = 0).
+        Top-k selection fills each head budget. If lambda_k or lambda_v is more than
+        zero, greedy diversity-aware selection fills it.
+
+        Returns:
+            A bool tensor [H, n_chunk].
         """
         device = token_score.device
         pad_len = (self.chunk_size - (n % self.chunk_size)) % self.chunk_size
@@ -579,7 +597,7 @@ class TestTimeLookaheadKVCluster:
         weight = (E + self.causal_eps).pow(self.budget_tau)
         raw_alloc = total_budget * weight / weight.sum()
         head_budget = raw_alloc.floor().long()
-        # floor() in Eq. 11 can undershoot the layer budget by a few chunks; give the
+        # floor() in Eq. 11 can give a few chunks less than the layer budget. Give the
         # remainder to the heads with the largest fractional part.
         deficit = int(total_budget - head_budget.sum().item())
         if deficit > 0:
@@ -599,12 +617,13 @@ class TestTimeLookaheadKVCluster:
         return preserve
 
     def _greedy_diverse_select(self, normalized, drop, head_budget, n, n_chunk, key_states, value_states):
-        """Diversity-aware greedy selection (App. D-C), inspired by GraphKV (Li et al., 2025b):
+        """Select chunks with the greedy diversity-aware rule (App. D-C).
 
-            i* = argmax_i [S_i - lambda_k max_{j in R} cos(k_i, k_j) - lambda_v max_{j in R} cos(v_i, v_j)],
+            i* = argmax_i [S_i - lambda_k max_{j in R} cos(k_i, k_j) - lambda_v max_{j in R} cos(v_i, v_j)]
 
-        applied per head to chunks represented by their mean key/value, until the
-        head's budget is filled."""
+        Each chunk is represented by its mean key and mean value. The rule follows
+        GraphKV (Li et al., 2025b).
+        """
         H = normalized.shape[0]
         device = normalized.device
         D = self.head_dim
@@ -649,13 +668,17 @@ class TestTimeLookaheadKVCluster:
     # Entry point, called once per layer after the rollout (Algorithm 1, lines 11-24).
     # ------------------------------------------------------------------
     def compress(self):
-        """Score, select and gather this layer's compressed cache.
+        """Score, select and gather the compressed cache of this layer.
 
-        S_i = psi(E_{i,W}) + lambda_L * sum_m omega_m psi(E_{i,m})   (Eq. 7)
+            S_i = psi(E_{i,W}) + lambda_L * sum_m omega_m * psi(E_{i,m})    (Eq. 7)
 
-        Layers below ``skip`` and prompts no longer than the budget are kept whole.
-        Returns the flattened per-head K/V and the varlen metadata for
-        :class:`DynamicCacheSplitHeadFlatten`.
+        Layers below ``skip`` and prompts that are not longer than the budget are not
+        compressed.
+
+        Returns:
+            A tuple ``(keys, values, cache_kwargs)``. ``keys`` and ``values`` are the
+            flattened per-head tensors. ``cache_kwargs`` holds the metadata for
+            :class:`DynamicCacheSplitHeadFlatten`.
         """
         # GQA-repeat here, transiently, instead of persisting the repeated (num_heads-count, up to
         # 4x larger for Mistral) tensor on self.full_key_states/full_value_states for the whole
@@ -728,10 +751,10 @@ class TestTimeLookaheadKVCluster:
 
 
 def init_lookahead_snapkv(self):
-    """Attach a :class:`TestTimeLookaheadKVCluster` to an attention module on first use.
+    """Attach a :class:`TestTimeLookaheadKVCluster` to an attention module on its first call.
 
-    Hyper-parameters are read from the module's config, where
-    :func:`lorekv.harness.configure_model` wrote them.
+    The hyperparameters come from the module config. :func:`lorekv.harness.configure_model`
+    writes them.
     """
     assert hasattr(self.config, "window_size"), "window_size not set"
     assert hasattr(self.config, "base_capacity"), "base_capacity not set"

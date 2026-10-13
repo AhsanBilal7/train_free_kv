@@ -1,4 +1,4 @@
-"""🧬 AnDPro / CriticalKV on hybrid-attention backbones (transformers 5.x).
+"""AnDPro / CriticalKV on hybrid-attention backbones (transformers 5.x).
 
 The baselines are structurally simpler than LORE-KV: there is no lookahead
 rollout, so there are only two branches.

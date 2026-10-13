@@ -1,17 +1,15 @@
-"""📦 Dataset loaders shared by the benchmark drivers and the analysis figures.
+"""Dataset loaders for the benchmark drivers and the analysis figures.
 
-LongBench (Bai et al., ACL 2024; https://huggingface.co/datasets/THUDM/LongBench)
-    The Hub repository is a loading-script dataset (``LongBench.py`` plus one
-    ``data.zip`` with every sub-task as jsonl). ``datasets>=3`` no longer runs
-    loading scripts, so :func:`load_longbench_split` extracts the archive once
-    into ``$HF_HOME/longbench_jsonl`` and reads the jsonl directly. Rows and fields
-    are identical to the scripted build.
+LongBench (Bai et al., ACL 2024):
+    The Hub dataset ``THUDM/LongBench`` uses a loading script and one ``data.zip``.
+    ``datasets>=3`` does not run loading scripts. :func:`load_longbench_split` thus
+    extracts the archive one time to ``$HF_HOME/longbench_jsonl`` and reads the
+    jsonl files. The rows and fields are the same as in the scripted build.
 
-RULER (Hsieh et al., 2024; https://github.com/NVIDIA/RULER)
-    4K/8K/16K come from the Hub mirror ``simonjegou/ruler`` (the kvpress release of
-    RULER). 64K/128K are generated locally with
-    ``experiments/RULER/long_context/make_data.sh`` in the same schema and read
-    from parquet by :func:`load_ruler_config`.
+RULER (Hsieh et al., 2024):
+    The 4K, 8K and 16K configs come from the Hub dataset ``simonjegou/ruler``.
+    ``experiments/RULER/long_context/make_data.sh`` makes the 64K and 128K configs
+    with the same schema. :func:`load_ruler_config` reads them from parquet.
 """
 from __future__ import annotations
 
@@ -60,11 +58,18 @@ def _find_longbench_zip():
 
 
 def longbench_jsonl(task, dataset_path=None):
-    """Local ``<task>.jsonl`` for a LongBench sub-task, or None if only the Hub has it.
+    """Return the path of the local jsonl file of a LongBench task.
 
-    Looks in ``dataset_path`` (a directory of jsonl files, or its parent) first,
-    then in the extracted copy of the Hub snapshot's ``data.zip``, extracting it on
-    first use. Extraction is atomic, so concurrent jobs cannot see a partial copy.
+    The function first looks in ``dataset_path``. It then looks in the extracted
+    copy of the Hub ``data.zip`` and extracts the archive if necessary. The
+    extraction is atomic, so parallel jobs do not read a partial copy.
+
+    Args:
+        task: The LongBench task name, for example ``"qasper"``.
+        dataset_path: Optional directory that contains the jsonl files.
+
+    Returns:
+        The file path, or None if only the Hub has the data.
     """
     if dataset_path and os.path.isdir(dataset_path):
         for cand in (os.path.join(dataset_path, f"{task}.jsonl"),
@@ -93,7 +98,11 @@ def longbench_jsonl(task, dataset_path=None):
 
 
 def load_longbench_split(dataset_path, task):
-    """One LongBench sub-task as a ``datasets.Dataset``, preferring the local jsonl."""
+    """Load one LongBench task as a ``datasets.Dataset``.
+
+    The function uses the local jsonl file if it exists. Otherwise it loads the task
+    from the Hub.
+    """
     jsonl = longbench_jsonl(task, dataset_path)
     if jsonl is not None:
         return load_dataset("json", data_files=jsonl, split="train")
@@ -108,12 +117,14 @@ RULER_HUB_LENGTHS = {"4096", "8192", "16384"}
 
 
 def load_ruler_config(hub_dataset, local_dir, length):
-    """One RULER sequence-length config (all 13 tasks) as a ``datasets.Dataset``.
+    """Load one RULER sequence-length config (13 tasks) as a ``datasets.Dataset``.
 
-    Lengths shipped by the Hub mirror are loaded from it; longer ones must have been
-    generated into ``local_dir`` by ``experiments/RULER/long_context/make_data.sh``
-    (``long_context/validate.py`` checks that the local generator reproduces the Hub
-    rows byte for byte).
+    The function loads 4096, 8192 and 16384 from the Hub dataset. It loads other
+    lengths from ``local_dir``. ``long_context/validate.py`` checks that the local
+    generator gives the same rows as the Hub.
+
+    Raises:
+        FileNotFoundError: If a local length is not available.
     """
     length = str(length)
     if length in RULER_HUB_LENGTHS:

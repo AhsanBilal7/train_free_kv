@@ -1,4 +1,4 @@
-r"""📏 RULER prediction driver (paper Sec. 4.3, Figure 3, Tables 7, 10, 15).
+r"""RULER prediction driver (paper Sec. 4.3, Figure 3, Tables 7, 10, 15).
 
 Runs the 13 RULER tasks (Hsieh et al., 2024; https://github.com/NVIDIA/RULER) at
 the requested sequence lengths with one KV-eviction method and writes

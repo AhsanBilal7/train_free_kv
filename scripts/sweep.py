@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""🔁 Run one benchmark over every combination of a config's sweep values.
+"""Run one benchmark over every combination of a config's sweep values.
 
 A config file (``config/<name>.conf``) holds ``KEY = VALUE`` lines; a value may
 list several space-separated settings (``BUDGET = 128 256 512 1024``), and every

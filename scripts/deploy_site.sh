@@ -1,5 +1,5 @@
 #!/bin/bash
-# 🌐 Publish the project page (website/index.html + assets/) to the gh-pages branch.
+# Publish the project page (website/index.html + assets/) to the gh-pages branch.
 #
 #   bash scripts/deploy_site.sh            # commit and push gh-pages
 #   NO_PUSH=1 bash scripts/deploy_site.sh  # build the branch locally only

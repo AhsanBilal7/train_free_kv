@@ -1,4 +1,4 @@
-"""🔤 Make a modern tokenizer.json readable by the pinned tokenizers 0.19.
+"""Make a modern tokenizer.json readable by the pinned tokenizers 0.19.
 
 transformers 4.44 pins `tokenizers>=0.19,<0.20`. Files written by tokenizers
 >= 0.20 store BPE merges as ["a", "b"] pairs; 0.19 only parses the older "a b"

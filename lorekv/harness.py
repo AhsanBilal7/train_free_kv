@@ -1,35 +1,33 @@
-"""⚙️ Benchmark harness shared by ``experiments/{LongBench,RULER,NIAH}/pred.py``.
+"""Benchmark harness for ``experiments/{LongBench,RULER,NIAH}/pred.py``.
 
-Every benchmark driver needs the same four things before it can decode a single
-prompt, and they must be identical across benchmarks for the comparison in the
-paper to be matched (same budgets, observation window, chunk size and selector for
-every method; Sec. 4 and App. E.1):
+Each benchmark driver uses the same four steps. All methods thus use the same
+budgets, observation window, chunk size and selector (paper Sec. 4, App. E.1).
 
-1. :func:`add_method_args` -- the command-line arguments that select an eviction
-   method and its hyper-parameters (Table 4 of the paper for LORE-KV).
-2. :func:`install_method` -- monkeypatch the attention / model forwards of every
-   supported backbone with the chosen method. Must run *before* the model is built.
-3. :func:`load_model_and_tokenizer` -- load the frozen backbone in bf16.
-4. :func:`configure_model` -- write the method's hyper-parameters onto the model
-   config, which is where the patched attention layers read them from.
+1. :func:`add_method_args` adds the arguments that select the eviction method and
+   its hyperparameters (paper Table 4).
+2. :func:`install_method` patches the attention and model forwards of each
+   supported backbone. Call it before you load the model.
+3. :func:`load_model_and_tokenizer` loads the frozen backbone in bfloat16.
+4. :func:`configure_model` writes the hyperparameters to the model config. The
+   patched attention layers read them from there.
 
 Methods (``--mode``):
 
 ========================  ====================================================
 ``causal_lookahead``      LORE-KV (this work), :mod:`lorekv.monkeypatch`
 ``andpro``                AnDPro (Geng et al., NeurIPS 2025), :mod:`andpro_snapkv`
-``critical``              CriticalKV baseline configuration, routed through the
-                          Ada-KV cluster in :mod:`adaptive_snapkv`
+``critical``              CriticalKV baseline configuration, through the Ada-KV
+                          cluster in :mod:`adaptive_snapkv`
 ``ada``                   Ada-KV (Feng et al., 2025), :mod:`adaptive_snapkv`
 ``fix``                   SnapKV (Li et al., 2024); ``--pyram`` gives PyramidKV
 ``slm``                   StreamingLLM (Xiao et al., 2024)
-``full``                  uncompressed full-cache reference
+``full``                  Uncompressed full-cache reference
 ========================  ====================================================
 
-The ``ada``/``fix``/``slm``/``critical`` patches and the varlen per-head cache they
-share come from the AdaKV code base (https://github.com/FFY0/AdaKV, MIT); the
-``andpro`` patches come from LLM-AnDPro (https://github.com/MIRALab-USTC/LLM-AnDPro,
-MIT), on which this repository is built.
+The ``ada``, ``fix``, ``slm`` and ``critical`` patches and their per-head cache
+come from AdaKV (https://github.com/FFY0/AdaKV, MIT). The ``andpro`` patches come
+from LLM-AnDPro (https://github.com/MIRALab-USTC/LLM-AnDPro, MIT). This
+repository is built on LLM-AnDPro.
 """
 from __future__ import annotations
 
@@ -46,12 +44,17 @@ METHODS = ("causal_lookahead", "andpro", "critical", "ada", "fix", "slm", "full"
 # Command line
 # ---------------------------------------------------------------------------
 def add_method_args(parser):
-    """Add the eviction-method arguments shared by every benchmark driver.
+    """Add the eviction-method arguments to a parser.
 
-    Defaults for the LORE-KV arguments are the paper's core configuration,
-    LORE-KV /E (Table 4): w=32, M=4, T=8, lambda_L=1, (beta, gamma, lambda_D) =
-    (1, 1.3, 0), chunk size 4, and every plug-in (robust aggregation, adaptive head
-    budgets, diversity selection) switched off.
+    The LORE-KV defaults are the core configuration of the paper, LORE-KV /E
+    (Table 4): w = 32, M = 4, T = 8, lambda_L = 1, (beta, gamma, lambda_D) =
+    (1, 1.3, 0) and chunk size 4. All plug-ins are off.
+
+    Args:
+        parser: An ``argparse.ArgumentParser``.
+
+    Returns:
+        The same parser.
     """
     g = parser.add_argument_group("eviction method")
     g.add_argument("--mode", type=str, default="causal_lookahead", choices=METHODS,
@@ -109,19 +112,26 @@ def add_method_args(parser):
 # Method installation
 # ---------------------------------------------------------------------------
 def _has_legacy_flash_attn_stack():
-    """True on transformers 4.44, whose *FlashAttention2 classes the dense hijacks patch.
+    """Return True if transformers contains the ``*FlashAttention2`` classes (release 4.44).
 
-    transformers 4.48 removed those classes; the hybrid backbones (Qwen3.5, Gemma 4)
-    run on a 5.x environment where only :func:`replace_hybrid_lookahead` /
-    :func:`replace_hybrid_baseline` apply. One explicit capability probe is used
-    instead of a blanket ``try/except`` so a genuine failure on 4.44 still surfaces.
+    The dense-backbone patches replace these classes. Release 4.48 removed them. The
+    hybrid backbones run on transformers 5.x and use only the hybrid patches.
     """
     import transformers.models.mistral.modeling_mistral as m
     return hasattr(m, "MistralFlashAttention2")
 
 
 def install_method(mode):
-    """Monkeypatch every supported backbone with ``mode``. Call before loading the model."""
+    """Patch each supported backbone with the method ``mode``.
+
+    Call this function before you load the model.
+
+    Args:
+        mode: One of :data:`METHODS`.
+
+    Raises:
+        ValueError: If ``mode`` is not a known method.
+    """
     if mode == "full":
         return
     legacy = _has_legacy_flash_attn_stack()
@@ -169,12 +179,10 @@ def install_method(mode):
 # Model configuration
 # ---------------------------------------------------------------------------
 def _config_chain(model):
-    """Every config object a patched attention layer may read its settings from.
+    """Return each config object that a patched attention layer can read.
 
-    On a flat ``ForCausalLM -> model -> layers`` stack this collapses to one object.
-    On a multimodal backbone (Gemma 4) the attention modules hold the nested
-    ``text_config`` while ``model.model.config`` is the top-level one, so writing a
-    setting to a single object would leave the layers without it.
+    A dense ``ForCausalLM`` model has one config object. A multimodal model (Gemma 4)
+    also has a nested ``text_config``, and its attention layers read that object.
     """
     seen, out = set(), []
     for cfg in (getattr(model, "config", None),
@@ -187,13 +195,23 @@ def _config_chain(model):
 
 
 def configure_model(model, args, window_size=32, kernel_size=7, pooling="maxpool", skip=0):
-    """Write the method hyper-parameters onto every config in :func:`_config_chain`.
+    """Write the method hyperparameters to each config in :func:`_config_chain`.
 
-    ``window_size`` (w), ``kernel_size`` and ``pooling`` are the SnapKV observation
-    window and smoothing shared by every method (App. E.1: matched observation
-    windows). The LORE-KV fields are read by
-    :func:`lorekv.monkeypatch.scoring.init_lookahead_snapkv` and by
+    ``window_size``, ``kernel_size`` and ``pooling`` set the SnapKV observation window
+    and smoothing. All methods use the same values (paper App. E.1). The LORE-KV
+    values are read by :func:`lorekv.monkeypatch.scoring.init_lookahead_snapkv` and
     :func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead`.
+
+    Args:
+        model: The loaded model.
+        args: The namespace from a parser built with :func:`add_method_args`.
+        window_size: Observation window w.
+        kernel_size: Pooling kernel of the SnapKV-family baselines.
+        pooling: Pooling type of the SnapKV-family baselines.
+        skip: Number of first layers that are not compressed.
+
+    Returns:
+        The same model.
     """
     fields = {
         # shared by every method
@@ -223,14 +241,12 @@ def configure_model(model, args, window_size=32, kernel_size=7, pooling="maxpool
 # Model loading
 # ---------------------------------------------------------------------------
 def attn_implementation(model_path=None):
-    """``flash_attention_2`` when usable for this model, else ``sdpa``.
+    """Return ``"flash_attention_2"`` if it supports the model, else ``"sdpa"``.
 
-    Falls back to ``sdpa`` when flash-attn is missing or when the model's head_dim
-    exceeds 192: transformers routes flash-attn through an autograd op whose limit
-    is 192, which Qwen3.5 and Gemma 4 (head_dim 256) exceed. This does not change
-    the method -- the prefill/lookahead phases dispatch through transformers'
-    attention interface, and the post-eviction ragged decode calls
-    ``flash_attn_varlen_func`` directly.
+    The function returns ``"sdpa"`` if flash-attn is not installed or if the head
+    dimension is more than 192. Transformers limits flash-attn to a head dimension of
+    192, and Qwen3.5 and Gemma 4 use 256. The choice does not change the method. The
+    post-eviction decode step always calls ``flash_attn_varlen_func``.
     """
     try:
         import flash_attn
@@ -254,7 +270,17 @@ def attn_implementation(model_path=None):
 
 
 def load_model_and_tokenizer(path, device="cuda:0"):
-    """Load a frozen backbone in bf16 on one GPU, after :func:`install_method`."""
+    """Load a frozen backbone in bfloat16 on one GPU.
+
+    Call :func:`install_method` first.
+
+    Args:
+        path: A Hugging Face Hub ID or a local checkpoint directory.
+        device: The target device.
+
+    Returns:
+        A tuple ``(model, tokenizer)``. The model is in evaluation mode.
+    """
     # Ministral3 postdates the transformers 4.44 pin; registering the vendored
     # implementation with the Auto* factories is a no-op for every other backbone.
     from models_ext import register_extra_architectures
@@ -268,7 +294,7 @@ def load_model_and_tokenizer(path, device="cuda:0"):
 
 
 def seed_everything(seed=42):
-    """Seed every RNG the pipeline touches (the lookahead sampler uses torch's)."""
+    """Seed the Python, NumPy and PyTorch random number generators."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
