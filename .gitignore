@@ -191,3 +191,7 @@ experiments/RULER/results_summary.csv
 *.png
 *.jsonl_tmp*.npz
 *.npz
+
+# README figures are tracked
+!assets/*.png
+!assets/*.gif
