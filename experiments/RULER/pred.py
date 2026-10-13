@@ -1,21 +1,22 @@
 r"""RULER prediction driver (paper Sec. 4.3, Figure 3, Tables 7, 10, 15).
 
-Runs the 13 RULER tasks (Hsieh et al., 2024; https://github.com/NVIDIA/RULER) at
-the requested sequence lengths with one KV-eviction method and writes
-``pred/<out_name>/<length>.jsonl``; ``eval.py`` scores them with RULER's
-``string_match_all`` / ``string_match_part`` metrics (``calculate_metrics.py``).
+The driver runs the 13 RULER tasks (Hsieh et al., 2024;
+https://github.com/NVIDIA/RULER) at the selected sequence lengths with one
+eviction method. It writes ``pred/<out_name>/<length>.jsonl``. ``eval.py`` scores
+the rows with ``string_match_all`` and ``string_match_part``
+(``calculate_metrics.py``).
 
-Every Hub row (``simonjegou/ruler``, the kvpress release of RULER) ships its own
-``context``, ``question``, ``answer_prefix``, gold ``answer`` list, ``task`` and
-``max_new_tokens``. The prompt is the backbone's chat template over
-``context + question`` with the assistant turn primed by ``answer_prefix``.
-64K/128K configs are generated locally (``long_context/make_data.sh``).
+Each row of the Hub dataset ``simonjegou/ruler`` (the kvpress release of RULER)
+contains ``context``, ``question``, ``answer_prefix``, the reference ``answer``
+list, ``task`` and ``max_new_tokens``. The prompt is the chat template of the
+backbone applied to ``context + question``, followed by ``answer_prefix``.
+``long_context/make_data.sh`` makes the 64K and 128K configs.
 
-Long contexts are expensive, so this driver is resumable at the row level (a torn
-last line of ``<length>.jsonl_tmp`` is cut and re-decoded) and can split one
-length across several workers with ``--shard k/K`` (see :func:`merge_shards`).
+The driver continues an interrupted run from the last complete row of
+``<length>.jsonl_tmp``. It removes an incomplete last line. ``--shard k/K``
+divides one length across K workers (see :func:`merge_shards`).
 
-Usage (from this directory; see ``run.sh`` for the sweep wrapper)::
+Usage (from this directory; ``scripts/sweep.py`` runs it for each setting)::
 
     python pred.py -m meta-llama/Llama-3.1-8B-Instruct --max_length 140000 \
         -d simonjegou/ruler --mode causal_lookahead --budget 128 \
@@ -59,15 +60,17 @@ def parse_args(args=None):
 
 
 def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, device):
-    """Assemble a RULER prompt.
+    """Make the token IDs of one RULER prompt.
 
-    User turn = context + question; the assistant turn is primed with
-    `answer_prefix` (e.g. "The special magic number for ... is"). When the
-    tokenizer exposes a chat template (Mistral / Llama-Instruct) we apply it so
-    the format matches the instruct model's expectations; otherwise we fall back
-    to raw concatenation. Truncation (middle) is only a safety net -- with
-    max_length >> the largest RULER config it never triggers, so needles are
-    preserved.
+    The user turn is ``context + question``. The assistant turn starts with
+    ``answer_prefix``, for example "The special magic number for ... is". If the
+    tokenizer has a chat template, the function applies it. Otherwise it
+    concatenates the text. Middle truncation applies only if the prompt is longer
+    than ``max_length``. Set ``max_length`` larger than the longest prompt, because a
+    truncation can remove the needle.
+
+    Returns:
+        A tuple ``(input_ids, attention_mask)`` on ``device``.
     """
     user_content = context + question
     if getattr(tokenizer, "chat_template", None):
@@ -88,9 +91,8 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
         input_ids = tokenizer(prompt, truncation=False, return_tensors="pt").input_ids
 
     if input_ids.shape[1] > max_length:
-        # A RULER needle can sit anywhere, so middle truncation can delete it and the
-        # row then scores as a model failure. This must never fire on a real run --
-        # raise MAX_LENGTH instead (long_context/check_lengths.py sizes it).
+        # Middle truncation can remove the needle. Increase MAX_LENGTH if this occurs
+        # (long_context/check_lengths.py gives the required value).
         print(f"WARNING: prompt of {input_ids.shape[1]} tokens truncated to max_length={max_length}")
         half = int(max_length / 2)
         input_ids = torch.cat([input_ids[:, :half], input_ids[:, -half:]], dim=1)
@@ -101,23 +103,17 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
 
 @torch.no_grad()
 def get_pred(model, tokenizer, data, max_length, out_path, mode, tmp_path=None, device="cuda:0"):
-    """Decode ``data`` row by row into ``out_path``, resuming from ``tmp_path``."""
+    """Decode ``data`` row by row into ``out_path`` and continue from ``tmp_path``."""
     tmp_path = tmp_path or f"{out_path}_tmp"
 
-    # --- Resume: reuse rows already completed by a prior interrupted run ---
-    # The _tmp file streams one JSON object per finished row (flushed each step).
-    # Count only fully-flushed (valid-JSON) lines; a truncated final line means the
-    # process died mid-write, so we stop there and regenerate that row onward.
+    # Continue an interrupted run. The _tmp file has one JSON row for each finished
+    # sample. Use only complete, valid rows. Decode again from the first incomplete row.
     preds = []
     times = []
     done = 0
     if os.path.exists(tmp_path):
-        # Read in bytes to track where the last VALID row ends, then cut the file
-        # there. Appending after a torn line is not safe: the next row lands on the
-        # same line as the fragment, that line never parses, and every later resume
-        # stops at it -- so each new allocation re-decodes the same rows forever
-        # while the file grows. A wall-clock kill usually lands mid-row, so the torn
-        # tail must be removed, not skipped.
+        # Find the end of the last valid row and cut the file there. A new row after
+        # an incomplete line would be on the same line and could not be read.
         good_end = 0
         with open(tmp_path, "rb") as f:
             for raw in f:
@@ -142,7 +138,7 @@ def get_pred(model, tokenizer, data, max_length, out_path, mode, tmp_path=None, 
         if done:
             print(f"{tmp_path}: resuming from {done}/{len(data)} completed rows")
 
-    # Append so previously-completed rows are preserved (do NOT truncate).
+    # Append, so that the finished rows stay in the file.
     with open(tmp_path, "a", encoding="utf-8") as f:
         for json_obj in tqdm(data[done:]):
             input_ids, attention_mask = build_ruler_input(
@@ -200,17 +196,15 @@ def get_pred(model, tokenizer, data, max_length, out_path, mode, tmp_path=None, 
 
 
 # -----------------------------------------------------------------------------
-# Row sharding: run ONE experiment on several GPUs / memory slots at once.
+# Row sharding: run one experiment on several GPUs at the same time.
 #
-# `--shard k/K --shard_base B` decodes rows B+k, B+k+K, B+k+2K, ..., i.e. every row i >= B with
-# (i - B) % K == k, into pred/<run>/<len>.shard{k}of{K}.jsonl_part (resuming from its
-# own _tmp, torn-tail safe like the unsharded path). Rows < B are the ones the
-# unsharded run already finished in <len>.jsonl_tmp, so sharding an in-flight run
-# never redoes work. Whichever shard finishes last merges everything into the
-# normal <len>.jsonl (same fields as an unsharded run), which is all eval.py reads.
-# The .jsonl_part suffix keeps eval.py's `*.jsonl` scan from reading shards.
+# `--shard k/K --shard_base B` decodes each row i >= B with (i - B) % K == k into
+# pred/<run>/<len>.shard{k}of{K}.jsonl_part. Rows < B are the rows that the unsharded
+# run finished in <len>.jsonl_tmp. The last shard to finish merges all rows into
+# <len>.jsonl, which eval.py reads. eval.py does not read the .jsonl_part files.
 # -----------------------------------------------------------------------------
 def _read_rows(path, limit=None):
+    """Read the complete rows of a jsonl file. Stop at the first incomplete line."""
     rows = []
     if os.path.exists(path):
         with open(path, "rb") as f:
@@ -225,7 +219,11 @@ def _read_rows(path, limit=None):
 
 
 def merge_shards(run_dir, length, K, base, n_rows):
-    """Write <len>.jsonl once the unsharded prefix and all K shard parts exist."""
+    """Write ``<length>.jsonl`` when the unsharded prefix and all K shard files exist.
+
+    Returns:
+        True if the file was written, False if shards are missing.
+    """
     out_path = os.path.join(run_dir, f"{length}.jsonl")
     parts = [os.path.join(run_dir, f"{length}.shard{k}of{K}.jsonl_part") for k in range(K)]
     missing = [p for p in parts if not os.path.exists(p)]
@@ -252,6 +250,7 @@ def merge_shards(run_dir, length, K, base, n_rows):
     return True
 
 def main():
+    """Parse the arguments, install the method, load the model and decode each length."""
     seed_everything(42)
     args = parse_args()
     lengths = args.dataset_name_list or ["4096", "8192", "16384"]

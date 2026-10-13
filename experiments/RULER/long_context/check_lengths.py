@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Report the prompt length pred.py will actually feed the model, per config.
+"""Report the prompt lengths that pred.py gives to the model, for each config.
 
-pred.py wraps context + question in the chat template and appends the answer
-prefix, then middle-truncates anything longer than --max_length. RULER sizes
-each sample against the RAW template (no chat wrapper), so the real prompt is
-a few dozen tokens longer than RULER's own `length`. This prints the
-distribution so MAX_LENGTH can be checked against it: a truncated RULER prompt
-can cut the needle out, which scores as a model failure.
+pred.py applies the chat template to context + question and adds the answer
+prefix. RULER sets the length of each sample without the chat template, so the
+real prompt is longer by some tokens. Use this report to make sure that
+MAX_LENGTH is larger than each prompt. A truncated prompt can lose the needle.
+
+Usage::
 
     python check_lengths.py --data_dir <dir> --lengths 65536 131072 --tokenizer <path>
 """

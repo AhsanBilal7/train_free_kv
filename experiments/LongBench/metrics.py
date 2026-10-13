@@ -1,9 +1,8 @@
-"""LongBench task metrics: QA F1, ROUGE-L, classification / retrieval / count
-accuracy and code edit similarity.
+"""LongBench task metrics: QA F1, ROUGE-L, classification, retrieval and count
+accuracy, and code edit similarity.
 
-Taken from the official LongBench evaluator (Bai et al., ACL 2024;
-https://github.com/THUDM/LongBench, MIT), which adapts the SQuAD answer
-normalization.
+From the LongBench evaluator (Bai et al., ACL 2024;
+https://github.com/THUDM/LongBench, MIT). The answer normalization comes from SQuAD.
 """
 import re
 import string
@@ -15,7 +14,7 @@ from collections import Counter
 from rouge import Rouge
 
 def normalize_answer(s):
-    """Lower text and remove punctuation, articles and extra whitespace."""
+    """Convert to lowercase and remove punctuation, articles and extra whitespace."""
 
     def remove_articles(text):
         return re.sub(r"\b(a|an|the)\b", " ", text)
@@ -34,7 +33,7 @@ def normalize_answer(s):
 
 
 def normalize_zh_answer(s):
-    """Lower text and remove punctuation, extra whitespace."""
+    """Convert to lowercase and remove punctuation and extra whitespace."""
 
     def white_space_fix(text):
         return "".join(text.split())

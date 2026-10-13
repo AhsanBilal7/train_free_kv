@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""RULER string-match metrics, from NVIDIA RULER (https://github.com/NVIDIA/RULER, Apache-2.0)
-as redistributed with kvpress."""
+"""RULER string-match metrics from NVIDIA RULER (https://github.com/NVIDIA/RULER,
+Apache-2.0), as distributed with kvpress.
+"""
 
 
 import re

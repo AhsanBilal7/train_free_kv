@@ -1,30 +1,29 @@
-r"""Needle-In-A-Haystack (NIAH) prediction driver (paper Sec. 4.2, Figure 8).
+r"""Needle-in-a-Haystack (NIAH) prediction driver (paper Sec. 4.2, Figure 8).
 
-A port of the test popularized by Greg Kamradt
-(https://github.com/gkamradt/LLMTest_NeedleInAHaystack, MIT). Short "needle"
-facts are hidden at controlled depths inside a haystack built from the Paul
-Graham essays, the context is grown to a series of target token lengths, and the
-model is asked one retrieval question. ``eval.py`` reads the results as a
-(length x depth) grid.
+The driver implements the test of Greg Kamradt
+(https://github.com/gkamradt/LLMTest_NeedleInAHaystack, MIT). It puts short facts
+("needles") at specified depths in a haystack made from the Paul Graham essays.
+It makes the context for each target length and asks one retrieval question.
+``eval.py`` scores the results as a grid of length and depth.
 
-Two tasks, matching ``needlehaystack/tasks/`` in the reference repository:
+Tasks (as in ``needlehaystack/tasks/`` of the reference):
 
-* ``single`` (SingleNeedleTask + SingleDepthInserter): one fact at one depth.
-* ``multi`` (MultiNeedleTask + EvenSpreadInserter): N facts spread evenly from the
-  depth to 100%, scored as the fraction of expected fragments found.
+* ``single`` (SingleNeedleTask, SingleDepthInserter): one fact at one depth.
+* ``multi`` (MultiNeedleTask, EvenSpreadInserter): N facts between the depth and
+  100%. The score is the fraction of expected fragments in the answer.
 
-Each target length (``--dataset_name_list``) is one output file
-``pred/<out_name>/<length>.jsonl`` with one row per depth. Every ``--mode`` of
-:mod:`lorekv.harness` runs here unchanged.
+Each target length (``--dataset_name_list``) gives one file
+``pred/<out_name>/<length>.jsonl`` with one row for each depth. All modes of
+:mod:`lorekv.harness` are supported.
 
-Deliberate deviations from the reference (recorded in each output row):
+Differences from the reference (each output row records them):
 
-1. Tokenization. The reference measures lengths with tiktoken ``cl100k_base``;
-   this driver uses the model's own tokenizer, so the reported length is what the
-   KV cache holds.
-2. Length accounting. The reference inserts the needles on top of a haystack of
-   exactly ``length`` tokens; here haystack = length - buffer - needle tokens, so
-   the total prompt lands at ``length``.
+1. Tokenization. The reference measures lengths with tiktoken ``cl100k_base``.
+   This driver uses the tokenizer of the model, so the length is the number of
+   tokens in the KV cache.
+2. Length. The reference adds the needles to a haystack of ``length`` tokens.
+   This driver uses haystack = length - buffer - needle tokens, so the full
+   prompt has ``length`` tokens.
 """
 import argparse
 import gc
@@ -43,7 +42,7 @@ from lorekv.harness import (add_method_args, configure_model, install_method,  #
 from lorekv.monkeypatch.lookahead_runner import generate_with_lookahead  # noqa: E402
 
 
-# Classic gkamradt single-needle defaults (needlehaystack/tasks/single_needle.py).
+# Single-needle defaults of the reference (needlehaystack/tasks/single_needle.py).
 DEFAULT_NEEDLE = (
     "The best thing to do in San Francisco is eat a sandwich and sit in "
     "Dolores Park on a sunny day."
@@ -51,8 +50,8 @@ DEFAULT_NEEDLE = (
 DEFAULT_ANSWER = "eat a sandwich and sit in Dolores Park"
 DEFAULT_QUESTION = "What is the best thing to do in San Francisco?"
 
-# Multi-needle defaults (needlehaystack/tasks/multi_needle.py): the pizza trio.
-# `DEFAULT_FRAGMENTS` are what the scorer looks for, one per needle.
+# Multi-needle defaults of the reference (needlehaystack/tasks/multi_needle.py).
+# The scorer looks for one fragment for each needle.
 DEFAULT_NEEDLES_MULTI = [
     "Figs are one of the secret ingredients needed to build the perfect pizza.",
     "Prosciutto is one of the secret ingredients needed to build the perfect pizza.",
@@ -61,22 +60,16 @@ DEFAULT_NEEDLES_MULTI = [
 DEFAULT_FRAGMENTS_MULTI = ["figs", "prosciutto", "goat cheese"]
 DEFAULT_QUESTION_MULTI = "What are the secret ingredients needed to build the perfect pizza?"
 
-# Bounded backward walk when snapping the insertion point to a sentence
-# boundary (mirrors inserters/base.MAX_PERIOD_SNAP in the gkamradt repo).
+# Maximum number of tokens to move back to a sentence end
+# (inserters/base.MAX_PERIOD_SNAP of the reference).
 MAX_PERIOD_SNAP = 100
 
-# NOTE ON THE PROMPT: the reference runner (core/runner.py) builds exactly
-#     user_prompt = f"{context}\n\n{question}"
-# and sends system="". Older (v1) versions of the repo appended
-#     "Don't give information outside the document or repeat your findings"
-# to the question. That string is NOT in the reference implementation this
-# harness targets, and on Mistral-7B-Instruct-v0.2 it is actively harmful: the
-# model frequently *echoes it as the answer* ("The best thing to do in San
-# Francisco is to not give information outside the document..."), which scores
-# as a retrieval failure that has nothing to do with the KV cache. It also eats
-# ~13 of the 32 observation-window tokens that every SnapKV-family method scores
-# the prefix against. Default is therefore "" (reference behaviour); pass
-# --retrieval_guidance to opt back into the v1 string.
+# The reference runner (core/runner.py) uses user_prompt = f"{context}\n\n{question}"
+# and an empty system message. Older versions added "Don't give information outside
+# the document or repeat your findings" to the question. Mistral-7B often repeats that
+# sentence as its answer, and the sentence uses about 13 of the 32 observation-window
+# tokens. The default is thus "" (as in the reference). Use --retrieval_guidance to
+# add the sentence.
 DEFAULT_RETRIEVAL_GUIDANCE = ""
 
 
@@ -88,7 +81,7 @@ def parse_args(args=None):
     parser.add_argument("--out_name", type=str, required=True)
     parser.add_argument('--dataset_name_list', default=None, type=str, nargs='+', help="NIAH target CONTEXT LENGTHS in tokens to evaluate, e.g. 4096 8192 16384")
 
-    # --- NIAH-specific knobs (the needles, the question, the haystack, the sweep) ---
+    # NIAH settings: needles, question, haystack and depths.
     parser.add_argument('--task', default='single', choices=['single', 'multi'],
                         help="'single' = one needle at one depth (SingleDepthInserter); "
                              "'multi' = N needles spread evenly from depth to 100%% (EvenSpreadInserter)")
@@ -116,17 +109,14 @@ def parse_args(args=None):
 # -----------------------------------------------------------------------------
 # Haystack + needle construction (token space, model tokenizer).
 #
-# NOTE ON TOKENIZATION: the gkamradt repo does all length math with a single
-# generic tiktoken encoding (cl100k_base) and lets each provider re-tokenize the
-# decoded text. Here we instead use the *model's own* tokenizer for every
-# length/insertion computation, exactly as LongBench/RULER pred.py measure
-# `context_length` from the model's input_ids. This keeps the reported target
-# length faithful to what the KV cache actually holds. The construction logic
-# (cycle essays -> trim to length -> snap needle to a sentence boundary ->
-# decode -> re-tokenize through the chat template) is otherwise identical.
+# The reference computes all lengths with tiktoken (cl100k_base). This driver uses the
+# tokenizer of the model, so the target length is the number of tokens in the KV cache.
+# The other steps are the same: repeat the essays, cut to the length, move the needle to
+# a sentence end, decode, and tokenize again with the chat template.
 # -----------------------------------------------------------------------------
 
 def read_haystack_texts(haystack_dir):
+    """Read the text of each ``.txt`` file in ``haystack_dir``, in sorted order."""
     files = sorted(glob.glob(os.path.join(haystack_dir, "*.txt")))
     if not files:
         raise FileNotFoundError(f"No .txt haystack files found under {haystack_dir!r}")
@@ -138,7 +128,7 @@ def read_haystack_texts(haystack_dir):
 
 
 def build_context_tokens(essay_token_lists, target_length):
-    """Cycle through the pre-tokenized essays until >= target_length, then trim."""
+    """Repeat the tokenized essays until there are ``target_length`` tokens, then cut."""
     toks = []
     i = 0
     n = len(essay_token_lists)
@@ -149,13 +139,13 @@ def build_context_tokens(essay_token_lists, target_length):
 
 
 def build_period_token_ids(tokenizer, max_scan=None):
-    """Token ids whose decoded piece contains a period.
+    """Return the IDs of the tokens whose text contains a period.
 
-    The reference walks back to a token in `set(tiktoken.encode("."))`. With a
-    SentencePiece/BPE vocab a sentence end is spelled by many different ids
-    ('.', '.\\n', '.)', '."', ...), so we build the equivalent set once per run
-    instead of calling tokenizer.decode() up to MAX_PERIOD_SNAP times per cell.
-    Falls back to a decode-based probe if the vocab cannot be enumerated."""
+    The reference uses ``set(tiktoken.encode("."))``. A SentencePiece or BPE
+    vocabulary has many tokens that end a sentence ('.', '.\\n', '.)', ...), so the
+    function finds them one time for each run. If the vocabulary is not available,
+    it uses ``tokenizer.decode`` on each token.
+    """
     try:
         vocab = tokenizer.get_vocab()
     except Exception:
@@ -168,11 +158,12 @@ def build_period_token_ids(tokenizer, max_scan=None):
 
 
 def snap_to_period(context_tokens, insertion_point, period_ids, max_snap=MAX_PERIOD_SNAP):
-    """Walk backward to the nearest preceding sentence boundary, bounded by
-    max_snap. `insertion_point` means "insert BEFORE the token at this index",
-    so we test the token immediately preceding it -- identical semantics to
-    inserters/base.snap_to_period. Returns the original point if no period is
-    found inside the window (the reference's v1 code looped unbounded)."""
+    """Move the insertion point back to the nearest sentence end, by at most ``max_snap`` tokens.
+
+    ``insertion_point`` means "insert before this index", so the function tests the
+    token before it, as in ``inserters/base.snap_to_period``. If no period is found,
+    the function returns the original point.
+    """
     if insertion_point <= 0:
         return 0
     lower_bound = max(0, insertion_point - max_snap)
@@ -184,9 +175,13 @@ def snap_to_period(context_tokens, insertion_point, period_ids, max_snap=MAX_PER
 
 
 def insert_needle_single(context_tokens, needle_token_lists, depth_percent, period_ids):
-    """SingleDepthInserter: splice ONE needle at depth_percent, snapping to a
-    sentence boundary for interior depths. Returns
-    (new_tokens, [insertion_index], [actual_depth_percent])."""
+    """Insert one needle at ``depth_percent`` (SingleDepthInserter).
+
+    For a depth between 0% and 100%, the insertion point moves to a sentence end.
+
+    Returns:
+        A tuple ``(new_tokens, [insertion_index], [actual_depth_percent])``.
+    """
     if len(needle_token_lists) != 1:
         raise ValueError(f"task='single' takes exactly 1 needle; got {len(needle_token_lists)}")
     needle_tokens = needle_token_lists[0]
@@ -199,24 +194,21 @@ def insert_needle_single(context_tokens, needle_token_lists, depth_percent, peri
         insertion_point = int(pre_len * (depth_percent / 100.0))
         insertion_point = snap_to_period(context_tokens, insertion_point, period_ids)
     new_tokens = context_tokens[:insertion_point] + needle_tokens + context_tokens[insertion_point:]
-    # Depth is measured against the PRE-insertion length so it stays comparable
-    # across needles and runs (inserters/single_depth.py).
+    # Measure the depth against the length before insertion (inserters/single_depth.py).
     actual_depth = (insertion_point / pre_len * 100.0) if pre_len > 0 else 0.0
     return new_tokens, [insertion_point], [actual_depth]
 
 
 def insert_needles_even_spread(context_tokens, needle_token_lists, depth_percent, period_ids):
-    """EvenSpreadInserter: place needle 0 at depth_percent and distribute the
-    rest evenly through the remaining context, stopping short of 100% (the
-    interval spans n slots, not n-1, so the last needle is not pinned to the very
-    end). Line-for-line port of inserters/even_spread.py, including its two fixes
-    over the v1 multi-needle code:
+    """Insert needle 0 at ``depth_percent`` and the other needles at equal intervals after it.
 
-      * every target index and reported depth is computed against the
-        PRE-insertion length, so earlier needles do not inflate later depths;
-      * the depth>=100 branch still records a placement.
+    This follows ``inserters/even_spread.py`` of the reference. The interval uses n
+    slots, so the last needle is not at the end of the context. The target indices
+    and depths use the length before insertion.
 
-    Returns (new_tokens, insertion_indices, actual_depth_percents)."""
+    Returns:
+        A tuple ``(new_tokens, insertion_indices, actual_depth_percents)``.
+    """
     if not needle_token_lists:
         raise ValueError("task='multi' needs at least one needle")
     pre_len = len(context_tokens)
@@ -235,9 +227,8 @@ def insert_needles_even_spread(context_tokens, needle_token_lists, depth_percent
         actual_depth = (raw_index / pre_len * 100.0) if pre_len > 0 else 0.0
         planned.append((toks, raw_index, actual_depth))
 
-    # target_depths is monotonically non-decreasing, so `planned` is already in
-    # ascending pre-insertion index order; splice in that order and carry the
-    # accumulated shift so later indices stay valid.
+    # `planned` is in ascending index order. Insert in this order and add the shift
+    # of the earlier needles to each later index.
     new_tokens = list(context_tokens)
     indices, depths = [], []
     accumulated_shift = 0
@@ -251,18 +242,16 @@ def insert_needles_even_spread(context_tokens, needle_token_lists, depth_percent
 
 
 def build_niah_input(tokenizer, context_text, question, guidance, max_length, device, on_overflow):
-    """Assemble the retrieval prompt.
+    """Make the token IDs of the retrieval prompt.
 
-    The reference runner builds `f"{context}\\n\\n{question}"` with an empty
-    system message; `guidance` (default "") appends the optional v1 sentence.
-    When the tokenizer exposes a chat template (Mistral/Llama-Instruct) we apply
-    it so the format matches the instruct model; otherwise we fall back to raw
-    concatenation.
+    The reference uses ``f"{context}\\n\\n{question}"`` and an empty system message.
+    ``guidance`` (default "") adds an optional sentence. If the tokenizer has a chat
+    template, the function applies it.
 
-    Overflow is NOT a benign safety net here. Middle-truncation drops the centre
-    of the document, which is precisely where the needle sits for every interior
-    depth -- the cell then measures nothing and still gets recorded under its
-    nominal target length. So we abort by default."""
+    If the prompt is longer than ``max_length``, the function raises an error by
+    default. Middle truncation removes the center of the context, which contains
+    the needle at most depths.
+    """
     tail = f"{question} {guidance}".strip() if guidance else question
     user_content = f"{context_text}\n\n{tail}"
     if getattr(tokenizer, "chat_template", None):
@@ -297,13 +286,13 @@ def get_pred(model, tokenizer, essay_token_lists, needle_token_lists, target_len
              question, guidance, needle_texts, expected_fragments, task, period_ids,
              max_length, max_gen, final_context_buffer, device, out_path, mode=None, seed=42,
              on_overflow="error"):
+    """Decode each depth of one target length and write the rows to ``out_path``."""
     device = "cuda:0"
     inserter = insert_needle_single if task == "single" else insert_needles_even_spread
     inserter_name = "single_depth" if task == "single" else "even_spread"
 
-    # Build the base haystack once per length (needles are spliced in per depth).
-    # Budget so the TOTAL prompt lands at ~target_length: the buffer covers the
-    # question + chat-template wrapper that get_pred appends afterwards.
+    # Make the haystack one time for each length. The buffer leaves space for the
+    # question and the chat template, so the full prompt has about target_length tokens.
     needle_budget = sum(len(t) for t in needle_token_lists)
     haystack_len = target_length - final_context_buffer - needle_budget
     if haystack_len <= 0:
@@ -315,16 +304,9 @@ def get_pred(model, tokenizer, essay_token_lists, needle_token_lists, target_len
 
     tmp_path = f"{out_path}_tmp"
 
-    # --- Resume: reuse cells already completed by a prior interrupted run ---
-    # (same contract as RULER's pred.py). Count only fully-flushed, valid-JSON
-    # lines; a truncated final line means the process died mid-write, so we stop
-    # there and regenerate that cell onward.
-    #
-    # A _tmp file left by a run with a DIFFERENT prompt/needle/depth grid must
-    # not be resumed into this one -- that would silently mix cells generated
-    # under two different conditions in a single output file. Each candidate row
-    # is therefore checked against the current configuration, and everything
-    # from the first mismatch onward is regenerated.
+    # Continue an interrupted run, as in RULER pred.py. Use only complete, valid rows.
+    # Each row must also have the current prompt, needles and depth. Decode again from
+    # the first row that does not agree.
     def _row_matches(row, cell_idx):
         if cell_idx >= len(depth_percents):
             return False
@@ -359,13 +341,13 @@ def get_pred(model, tokenizer, essay_token_lists, needle_token_lists, target_len
                   f"discarding {'all' if not rows else f'from cell {len(rows)}'} and regenerating")
         if rows:
             print(f"{tmp_path}: resuming from {len(rows)}/{len(depth_percents)} completed cells")
-        # Truncate whatever we refused to reuse so the append below stays consistent.
+        # Remove the rows that are not used, so that the appended rows follow the valid ones.
         with open(tmp_path, "w", encoding="utf-8") as f:
             for row in rows:
                 json.dump(row, f, ensure_ascii=False)
                 f.write('\n')
 
-    # Append so previously-completed cells are preserved (do NOT truncate).
+    # Append, so that the finished cells stay in the file.
     with open(tmp_path, "a", encoding="utf-8") as f:
         for cell_idx, depth in enumerate(tqdm(depth_percents, desc=f"len={target_length}")):
             if cell_idx < len(rows):
@@ -460,12 +442,12 @@ if __name__ == '__main__':
     model_name_or_path = args.model_name_or_path
     max_length = args.max_length
 
-    # The swept "subsets" are target context lengths in tokens.
+    # The target context lengths in tokens.
     length_configs = [int(x) for x in args.dataset_name_list] if args.dataset_name_list else [4096, 8192, 16384]
     depth_percents = args.depth_percents if args.depth_percents else [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
     haystack_dir = args.haystack_dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "PaulGrahamEssays")
 
-    # --- Resolve the task (mirrors needlehaystack/tasks/{single,multi}_needle.py) ---
+    # Resolve the task (as in needlehaystack/tasks/{single,multi}_needle.py).
     if args.task == "single":
         needle_texts = [args.needle if args.needle is not None else DEFAULT_NEEDLE]
         expected_fragments = [args.needle_answer if args.needle_answer is not None else DEFAULT_ANSWER]
@@ -496,8 +478,7 @@ if __name__ == '__main__':
     model, tokenizer = load_model_and_tokenizer(model_name_or_path)
     configure_model(model, args)
 
-    # Pre-tokenize the haystack essays and the needles once (model tokenizer, no
-    # special tokens). Reused across every length x depth cell.
+    # Tokenize the essays and the needles one time, without special tokens.
     essay_texts = read_haystack_texts(haystack_dir)
     essay_token_lists = [tokenizer.encode(t, add_special_tokens=False) for t in essay_texts]
     needle_token_lists = [tokenizer.encode(t, add_special_tokens=False) for t in needle_texts]
@@ -509,10 +490,9 @@ if __name__ == '__main__':
           f"needles={[len(t) for t in needle_token_lists]} tokens, "
           f"{len(period_ids)} period-bearing token ids")
 
-    # --- Guard the two ways a swept length silently stops measuring retrieval ---
-    # (a) prompt > --max_length  -> middle-truncation deletes the needle;
-    # (b) prompt > the model's positional range -> RoPE extrapolates and the
-    #     whole grid row degrades for reasons unrelated to KV eviction.
+    # Check two conditions that make a length invalid:
+    # (a) prompt > --max_length: middle truncation removes the needle.
+    # (b) prompt > the position range of the model: RoPE extrapolates.
     max_pos = getattr(model.config, "max_position_embeddings", None)
     over_cap = [L for L in length_configs if L > max_length]
     if over_cap:

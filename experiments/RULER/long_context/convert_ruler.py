@@ -1,31 +1,29 @@
 #!/usr/bin/env python
-"""Convert NVIDIA RULER generator output into the simonjegou/ruler schema.
+"""Convert the output of the NVIDIA RULER generator to the schema of simonjegou/ruler.
 
-simonjegou/ruler (the Hub dataset pred.py reads) only ships the 4096 / 8192 /
-16384 configs. Longer configs are produced locally by NVIDIA's own generator
-(see make_data.sh) and converted here into the SAME columns, so pred.py,
-eval.py and calculate_metrics.py treat them exactly like a Hub config:
+simonjegou/ruler contains only the 4096, 8192 and 16384 configs. make_data.sh runs
+the NVIDIA generator for longer configs, and this script converts its output to
+the same columns::
 
     context, question, answer_prefix, answer (list[str]), task, max_new_tokens
 
-RULER's `prepare.py --model_template_type base` writes one jsonl per task whose
-`input` is  <context><question><answer_prefix>  as a single string. The Hub
-export splits that string at two fixed markers, and this reproduces the split
-exactly (validate.py checks it row-for-row against the Hub 4096 config):
+``prepare.py --model_template_type base`` writes one jsonl file per task. Its
+``input`` field is <context><question><answer_prefix> as one string. The Hub
+export divides this string at fixed markers, and this script does the same
+(validate.py compares the rows with the Hub 4096 config):
 
-    niah_*     question starts at the last "\\nWhat " (context keeps the "\\n");
-               answer_prefix starts at the last " The special magic"
-    vt/cwe/fwe question starts at the last "Question: "
-    qa_*       question starts at the last "Answer the question based on the
-               given documents." (the instruction is repeated before the query)
-    others     answer_prefix starts at the last " Answer:"
+    niah_*      The question starts at the last "\nWhat ". The answer prefix
+                starts at the last " The special magic".
+    vt/cwe/fwe  The question starts at the last "Question: ".
+    qa_*        The question starts at the last "Answer the question based on
+                the given documents."
+    others      The answer prefix starts at the last " Answer:".
 
-The single space that separates question and answer_prefix stays on the
-question, which is how the Hub rows are stored.
+The space between the question and the answer prefix stays with the question, as
+in the Hub rows.
 
-Output: <out_dir>/<length>/test-00000-of-00001.parquet, a local dataset that
-`load_dataset(<out_dir>, "<length>")` resolves through the README config list
-written next to it.
+Output: ``<out_dir>/<length>/test-00000-of-00001.parquet`` and a README with the
+config list, so that ``load_dataset(<out_dir>, "<length>")`` finds each length.
 """
 import argparse
 import json
@@ -86,14 +84,11 @@ def load_task(raw_dir, task):
 
 
 def interleave(per_task):
-    """Round-robin rows across tasks: row 0 of every task, then row 1, ...
+    """Order the rows round-robin across the tasks: row 0 of each task, then row 1, ...
 
-    The Hub configs are stored task by task, so a partially finished run there
-    has covered only the first few tasks. A 128k config takes days to decode,
-    and pred.py resumes by row position, so ordering it round-robin makes every
-    prefix of a run a task-balanced subsample: its interim score (progress.py)
-    is an unbiased preview of the final one. Scoring groups by `task`, so the
-    final numbers do not depend on row order.
+    pred.py continues a run by row position. With this order each prefix of a run
+    contains the same number of rows from each task, so an interim score
+    (progress.py) is a balanced preview. The final scores do not depend on the order.
     """
     out = []
     for i in range(max((len(r) for r in per_task), default=0)):
@@ -102,7 +97,7 @@ def interleave(per_task):
 
 
 def write_readme(out_dir):
-    """A configs list so load_dataset(out_dir, "<length>") finds each length."""
+    """Write a README with the config list, so that ``load_dataset(out_dir, "<length>")`` finds each length."""
     lengths = sorted((d for d in os.listdir(out_dir)
                       if d.isdigit() and os.path.isdir(os.path.join(out_dir, d))), key=int)
     lines = ["---", "configs:"]

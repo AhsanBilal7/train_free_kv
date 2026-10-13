@@ -1,15 +1,14 @@
 """Score Needle-in-a-Haystack predictions (paper Sec. 4.2, Figure 8).
 
-Each (length, depth) cell is scored with the reference ExactMatchScorer of
-https://github.com/gkamradt/LLMTest_NeedleInAHaystack (MIT): the fraction of the
-expected fragments that appear (case-insensitive) in the response, i.e. 1/0 for a
-single needle and graded for several. A word-level recall is recorded as well
-(``NIAH_METRIC=recall`` makes it the headline metric).
+Each cell (length, depth) gets the score of the reference ExactMatchScorer
+(https://github.com/gkamradt/LLMTest_NeedleInAHaystack, MIT): the fraction of the
+expected fragments that the answer contains (case-insensitive). The score is 1 or
+0 for one needle. The script also records a word recall
+(``NIAH_METRIC=recall`` uses it as the main metric).
 
-For each run it writes ``result.json`` (the score grid, per-length means and the
-overall mean) and ``heatmap.png``, then prints a cross-run summary in which a
-length that was never run is shown as ``--`` and one that stopped mid-way as
-``tmp``, so runs are not compared over different grids.
+For each run the script writes ``result.json`` (score grid, mean of each length,
+overall mean) and ``heatmap.png``. It then prints a summary of all runs. ``--``
+shows a length that was not run, and ``tmp`` shows a length that did not finish.
 """
 import os
 import sys
@@ -37,21 +36,17 @@ def parse_args(args=None):
 
 
 def _normalize(s):
-    """needlehaystack/scorers/exact_match.py::_normalize"""
+    """Normalize a string as ``needlehaystack/scorers/exact_match.py`` does."""
     return s.strip().lower()
 
 
 def exact_match(pred, fragments):
-    """Reference ExactMatchScorer: the FRACTION of expected fragments that appear
-    as (case-insensitive, whitespace-trimmed) substrings of the response.
+    """Return the fraction of expected fragments that the answer contains (ExactMatchScorer).
 
-        fragments = needle.metadata["expected_fragments"] or [expected_answer]
-        value     = matches / len(fragments)
-
-    For a single-needle cell `fragments` has one entry, so this reduces exactly
-    to the classic 1.0 / 0.0 exact match. For a multi-needle cell it is graded:
-    2 of 3 pizza ingredients recalled scores 0.667, matching the reference
-    rather than an all-or-nothing (or any-of) rule."""
+    The comparison is case-insensitive and ignores leading and trailing whitespace.
+    For one needle the result is 1.0 or 0.0. For several needles it is the fraction,
+    for example 0.667 for 2 of 3 fragments.
+    """
     if not fragments:
         # Defensive: nothing to score against -> treat as miss (reference does the same).
         return 0.0
@@ -61,9 +56,11 @@ def exact_match(pred, fragments):
 
 
 def word_recall(pred, fragments):
-    """Fraction of the (best) gold fragment's words present in the prediction —
-    a graded fallback that produces a smoother heatmap than substring match.
-    NOT part of the reference implementation; opt in with NIAH_METRIC=recall."""
+    """Return the fraction of the words of the best reference fragment in the answer.
+
+    This metric is not part of the reference implementation. Set
+    ``NIAH_METRIC=recall`` to use it.
+    """
     p = set(_normalize(pred).split())
     best = 0.0
     for a in fragments:
@@ -76,12 +73,11 @@ def word_recall(pred, fragments):
 
 
 def row_fragments(obj):
-    """Gold fragments for one prediction row.
+    """Return the reference fragments of one prediction row.
 
-    `expected_fragments` is what pred.py writes now. `answer` (a list, mirroring
-    RULER) and the older scalar `needle_answer` are accepted so jsonl files
-    produced before the multi-needle rewrite still score identically — for a
-    single needle all three carry the same one-element list."""
+    The function reads ``expected_fragments``. It also reads the older fields
+    ``answer`` and ``needle_answer``, so that older files give the same scores.
+    """
     frags = obj.get("expected_fragments") or obj.get("answer")
     if not frags:
         single = obj.get("needle_answer")
@@ -90,7 +86,7 @@ def row_fragments(obj):
 
 
 def score_length_file(path):
-    """Load one <length>.jsonl -> list of {depth, exact_match, recall} dicts."""
+    """Read one ``<length>.jsonl`` and return a list of ``{depth, exact_match, recall}``."""
     cells = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
@@ -114,7 +110,7 @@ def mean(values):
 
 
 def save_heatmap(grid, lengths, depths, out_path, metric, run_name):
-    """grid[d_idx][l_idx] in [0,1]; rows=depths (0% at top), cols=lengths."""
+    """Save the score grid as a heatmap. Rows are depths (0% at the top); columns are lengths."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -155,11 +151,10 @@ from run_naming import parse_run_name  # noqa: E402
 
 
 def split_run_name(run):
-    """-> (label, model_tag, budget). Falls back to ('?', '?', None) if unparsed.
+    """Return ``(label, model_tag, budget)`` for a run folder, or ``("?", "?", None)``.
 
-    `label` is the run's identity: the config-style `lorekv-<cell>-<brule>-<sel>`
-    for lookahead runs (readable, and the same string as its .conf file), or the
-    plain mode name for a baseline.
+    The label is ``lorekv-<cell>-<brule>-<sel>`` for a LORE-KV run and the mode name
+    for a baseline.
     """
     p = parse_run_name(run)
     if not p or p.get("budget") is None:
@@ -176,16 +171,13 @@ def split_run_name(run):
 
 
 def print_summary_table(summary, metric, csv_path=None):
-    """Cross-run table: rows = runs, cols = target context lengths.
+    """Print one row for each run and one column for each target length.
 
-    Each cell is that run's mean over the depths at that length; '--' means the
-    length was never run and 'tmp' means it crashed mid-way (only a _tmp file
-    exists, so it contributes nothing to the mean). OVERALL is the mean over
-    every scored cell and N is how many cells that was — runs with different N
-    average over different denominators and are NOT comparable.
-
-    Rows are grouped by model, since the reference grid ("how many lengths did
-    this sweep actually cover") is only meaningful within one model."""
+    Each cell is the mean over the depths of that length. ``--`` shows a length that
+    was not run, and ``tmp`` shows a length that did not finish. OVERALL is the mean
+    over all scored cells and N is the number of cells. Runs with a different N are
+    not comparable. The rows are grouped by model.
+    """
     if not summary:
         return
 

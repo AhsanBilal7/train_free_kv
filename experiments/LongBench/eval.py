@@ -1,14 +1,16 @@
-"""Score LongBench predictions (paper Table 5 metrics).
+"""Score LongBench predictions with the metrics of paper Table 5.
 
-Adapted from the official evaluator of LongBench (Bai et al., ACL 2024;
-https://github.com/THUDM/LongBench, MIT). For every run folder under ``pred/``
-it scores each ``<task>.jsonl`` with the task's metric (F1, ROUGE-L, accuracy or
-edit similarity, see ``metrics.py``), taking the maximum over reference answers,
-and writes ``result.json`` (one score per task, 0-100) and ``list_result.json``
-(per-sample scores). A task whose file does not hold the full number of samples
-is skipped, so an unfinished run is never averaged over a subset.
+Adapted from the LongBench evaluator (Bai et al., ACL 2024;
+https://github.com/THUDM/LongBench, MIT). For each run folder in ``pred/`` the
+script scores each ``<task>.jsonl`` with the metric of the task (F1, ROUGE-L,
+accuracy or edit similarity; see ``metrics.py``). Each prediction gets the
+maximum score over its reference answers. The script writes ``result.json``
+(one score per task, 0-100) and ``list_result.json`` (scores per sample). It
+skips a task that does not have all samples.
 
-    python eval.py                   # every run under pred/
+Usage::
+
+    python eval.py                   # all runs in pred/
     python eval.py --run <folder>    # one run
 """
 import argparse
@@ -79,6 +81,7 @@ def parse_args(args=None):
 
 
 def scorer(dataset, predictions, answers, all_classes):
+    """Return the mean score of a task (0-100) and the list of per-sample scores."""
     score_list = []
     total_score = 0.
     for (prediction, ground_truths) in zip(predictions, answers):
@@ -92,7 +95,11 @@ def scorer(dataset, predictions, answers, all_classes):
     return round(100 * total_score / len(predictions), 2),score_list
 
 def score_run(path):
-    """Score every complete task of one run folder; returns ({task: score}, {task: [scores]})."""
+    """Score each complete task of one run folder.
+
+    Returns:
+        A tuple ``({task: score}, {task: [per-sample scores]})``.
+    """
     scores, per_sample = {}, {}
     for filename in sorted(os.listdir(path)):
         if not filename.endswith(".jsonl"):
@@ -114,6 +121,7 @@ def score_run(path):
 
 
 def main():
+    """Score each run folder and write its result files."""
     args = parse_args()
     runs = [args.run] if args.run else sorted(os.listdir(args.pred_dir))
     for run in runs:

@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""Progress and interim scores for in-flight long-context RULER runs.
+"""Show the progress and interim scores of long-context RULER runs.
 
-pred.py streams every finished row into pred/<run>/<length>.jsonl_tmp and only
-writes <length>.jsonl (the file eval.py scores) once all 6500 rows are done --
-days away at 128k. The long configs are stored round-robin across tasks (see
-convert_ruler.py), so any prefix of the _tmp file is a task-balanced
-subsample and its score previews the final one. This prints, per run and
-length: rows done, rows per task, mean seconds per row, and the interim
-13-task average with its per-task scores.
+pred.py writes each finished row to ``pred/<run>/<length>.jsonl_tmp``. It writes
+``<length>.jsonl`` only after all 6500 rows. The long configs are ordered
+round-robin across tasks (see convert_ruler.py), so each prefix of the ``_tmp``
+file is a balanced sample. For each run and length the script prints the number
+of rows, the rows of each task, the mean time per row and the interim 13-task
+average.
+
+Usage::
 
     cd experiments/RULER && python long_context/progress.py [--lengths 65536 131072] [--filter Llama]
 """

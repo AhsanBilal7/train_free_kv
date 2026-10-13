@@ -1,22 +1,21 @@
 r"""LongBench prediction driver (paper Sec. 4.1, Tables 1, 2, 6, 8, 9, 11-14).
 
-Decodes every sample of the requested LongBench sub-tasks with one KV-eviction
-method and writes ``pred/<out_name>/<task>.jsonl`` (one ``{"pred", "answers",
-"all_classes", "length", "time"}`` row per sample); ``eval.py`` scores them.
+The driver decodes each sample of the selected LongBench tasks with one eviction
+method. It writes ``pred/<out_name>/<task>.jsonl`` with one row
+``{"pred", "answers", "all_classes", "length", "time"}`` for each sample.
+``eval.py`` scores the rows.
 
-Prompting, middle truncation and the per-task generation lengths follow the
-official LongBench ``pred.py`` (https://github.com/THUDM/LongBench, MIT) and the
-AnDPro evaluation protocol (Geng et al., NeurIPS 2025), so baseline numbers are
-comparable with those papers. Generation is greedy for every method; LORE-KV
-(``--mode causal_lookahead``) replaces ``model.generate`` with
-:func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead`, which samples
-the lookahead trajectories, evicts once, and then decodes greedily from the
-compressed cache.
+The prompts, the middle truncation and the generation length of each task follow
+the official LongBench ``pred.py`` (https://github.com/THUDM/LongBench, MIT) and
+the AnDPro evaluation protocol (Geng et al., NeurIPS 2025). All methods decode
+greedily. For LORE-KV (``--mode causal_lookahead``) the driver calls
+:func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead` in place of
+``model.generate``.
 
-A task whose output file already exists is skipped, so an interrupted run resumes
-where it stopped.
+The driver skips each task whose output file exists. An interrupted run thus
+continues from the last finished task.
 
-Usage (from this directory; see ``run.sh`` for the sweep wrapper)::
+Usage (from this directory; ``scripts/sweep.py`` runs it for each setting)::
 
     python pred.py -m mistralai/Mistral-7B-Instruct-v0.2 --max_length 64000 \
         -d THUDM/LongBench --mode causal_lookahead --budget 128 \
@@ -55,20 +54,20 @@ def parse_args(args=None):
 
 
 def build_chat(tokenizer, prompt, model_name):
-    """Wrap a LongBench prompt in the backbone's instruction format (App. E.1).
+    """Apply the instruction format of the backbone to a LongBench prompt (App. E.1).
 
-    Mistral-7B-Instruct-v0.2 takes the raw prompt, matching Geng et al. (2025).
-    Llama-3.1 and Qwen use their chat templates. Ministral-3 uses Mistral's
-    ``[INST]...[/INST]`` format rather than its packaged template, which would
-    prepend a several-hundred-token system prompt to every long-context input.
+    Mistral-7B-Instruct-v0.2 gets the raw prompt, as in Geng et al. (2025). Llama-3.1
+    and Qwen use their chat templates. Ministral-3 uses the Mistral format
+    ``[INST]...[/INST]``. Its packaged template adds a system prompt of several
+    hundred tokens to each input, so the driver does not use it.
     """
     name = model_name.lower()
     if "llama-3" in name and "instruct" in name:
         return tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
     if "qwen" in name:
-        # enable_thinking=False is inert for Qwen2.5 and keeps a hybrid-reasoning
-        # Qwen checkpoint from spending the short LongBench budget in a <think> block.
+        # enable_thinking=False has no effect on Qwen2.5. It stops a reasoning Qwen
+        # model from using the generation budget in a <think> block.
         return tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}], tokenize=False,
             add_generation_prompt=True, enable_thinking=False)
@@ -78,8 +77,9 @@ def build_chat(tokenizer, prompt, model_name):
 
 
 def post_process(response, model_name):
+    """Remove a reasoning block from a Qwen answer."""
     if "qwen" in model_name.lower():
-        # A stray reasoning block would otherwise count as part of the answer.
+        # Remove a reasoning block, because the metrics count it as answer text.
         if "</think>" in response:
             response = response.split("</think>")[-1]
         response = response.strip()
@@ -89,10 +89,10 @@ def post_process(response, model_name):
 @torch.no_grad()
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset,
              model_name_or_path, out_path, mode, device="cuda:0"):
-    """Decode every row of one sub-task and write ``out_path`` (jsonl)."""
+    """Decode each row of one task and write the results to ``out_path`` (jsonl)."""
     eos_ids = [tokenizer.eos_token_id]
     if dataset == "samsum":
-        # Stop at the first newline: the model otherwise keeps writing "\nDialogue".
+        # Stop at the first newline. Otherwise the model continues with "\nDialogue".
         eos_ids.append(tokenizer.encode("\n", add_special_tokens=False)[-1])
 
     rows = []
@@ -142,6 +142,7 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
 
 
 def main():
+    """Parse the arguments, install the method, load the model and decode each task."""
     seed_everything(42)
     args = parse_args()
     here = os.path.dirname(os.path.abspath(__file__))

@@ -1,11 +1,11 @@
 """Score RULER predictions (paper Sec. 4.3, Tables 7 and 10).
 
-For every run folder under ``pred/`` it scores each ``<length>.jsonl`` with
-RULER's string-match metrics (``calculate_metrics.py``): ``string_match_part``
-for the two QA tasks and ``string_match_all`` (fractional credit over reference
-answers) for the other eleven, as in the official RULER protocol (Hsieh et al.,
-2024; App. E.4). It writes ``result.json`` with per-task scores, the 13-task mean
-at each length and the mean over lengths.
+For each run folder in ``pred/`` the script scores each ``<length>.jsonl`` with
+the string-match metrics of RULER (``calculate_metrics.py``). The two QA tasks use
+``string_match_part``. The other eleven tasks use ``string_match_all``, which
+gives partial credit over the reference answers (Hsieh et al., 2024; App. E.4).
+The script writes ``result.json`` with the score of each task, the 13-task mean
+of each length and the mean over the lengths.
 """
 import os
 import json
@@ -22,7 +22,7 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 def score_length_file(path):
-    """Load one <length>.jsonl and return {task: string_match_score_or_None}."""
+    """Read one ``<length>.jsonl`` and return ``{task: score or None}``."""
     rows = []
     with open(path, "r", encoding="utf-8") as f:
         for line in f:

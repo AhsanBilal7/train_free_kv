@@ -1,11 +1,12 @@
 #!/usr/bin/env python
-"""Check the local generator + converter against the Hub's own configs.
+"""Compare the local generator and converter with the configs of the Hub.
 
-Generate a few samples per task at a length the Hub already has (4096), convert
-them with convert_ruler.py, and require every converted row to be IDENTICAL,
-column for column, to a row of the Hub config. If this passes, the 64k/128k
-configs built by the same pipeline follow the same protocol as 4k-16k: same
-RULER revision, tokenizer, seed, prompt wording and context/question split.
+The script makes some samples of each task at a length that the Hub contains
+(4096) and converts them with convert_ruler.py. Each converted row must be equal
+to a row of the Hub config in all columns. If the check passes, the 64K and 128K
+configs use the same protocol as the 4K-16K configs.
+
+Usage::
 
     python validate.py --local <out_dir> --hub <path to simonjegou/ruler snapshot> --length 4096
 """
