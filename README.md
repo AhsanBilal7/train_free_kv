@@ -1,676 +1,314 @@
-# AnDPro: Accurate KV Cache Eviction via Anchor Direction Projection for Efficient LLM Inference
+<div align="center">
 
-This repository contains the code for our paper **"Accurate KV Cache Eviction via Anchor Direction Projection for Efficient LLM Inference"**, which has been accepted by NeurIPS 2025.
+# LORE-KV: Monte Carlo Estimation for KV-Cache Eviction
 
-Paper: [https://openreview.net/pdf?id=Tdl89SZItB](https://openreview.net/pdf?id=Tdl89SZItB)
+**L**ookahead **O**utput-perturbation with **R**eliability-weighted **E**nsembles for **K**ey-**V**alue caches
 
+*Most KV-cache eviction methods ask which memory looked important while reading the prompt.
+LORE-KV asks which memory will matter while answering.*
 
-## Usage of this Repo
+[Method](#method) · [Results](#results) · [Installation](#installation) · [Quick start](#quick-start) · [Reproducing the paper](#reproducing-the-paper) · [Layout](#repository-layout) · [Citation](#citation)
 
-### Requirements
-The requirements are the same as [AdaKV](https://github.com/FFY0/AdaKV).
+</div>
 
-```
-transformers==4.44.2
-uv pip install flash-attn --no-build-isolation
+<p align="center">
+  <img src="assets/lorekv_pipeline.png" width="100%" alt="LORE-KV pipeline: prefill, Monte Carlo lookahead, reliability weights, projected deletion score, eviction">
+</p>
 
-datasets
-tiktoken
-jieba
-rouge_score
-pandas          # RULER scorer (experiments/RULER/eval.py)
-```
+LORE-KV is a **training-free** KV-cache eviction method for long-context LLM inference. Before the
+prompt's cache is compressed to a fixed budget, it samples a few short continuations from the frozen
+model itself, uses their query states as Monte Carlo samples of the queries the model will issue while
+answering, and keeps the tokens whose deletion would most change the attention output under those
+queries. The continuations are then discarded; decoding runs on the compressed cache only.
 
-### Installation
+## Highlights
 
-```
-git clone git@github.com:MIRALab-USTC/LLM-AnDPro.git
-cd LLM-AnDPro
-make i
-```
+- **Future-query reference.** Prompt-side methods (SnapKV, Ada-KV, CriticalKV, AnDPro) rank tokens with the
+  queries of the last prompt tokens, which can differ from the queries used during generation. LORE-KV
+  scores against sampled answer-time queries.
+- **No auxiliary model, no training.** The lookahead uses the target model; its weights are untouched.
+- **Output-aware scoring.** Tokens are ranked by the projected leave-one-out change of the attention
+  output, not by attention mass alone.
+- **Matched evaluation.** All methods share budgets, observation window, chunk size and selector, on six
+  dense and hybrid-attention backbones.
 
-### Quick Start
+At $B=128$, LORE-KV raises the LongBench average on Qwen2.5-14B from 45.49 to 48.24 and the 16K RULER
+average on Mistral-7B from 45.20 to 51.05, at 1.46-2.77x AnDPro's per-sample time. Gains are largest under
+tight budgets and shrink as the budget grows.
 
-Two benchmarks are supported, selected with the `EXPERIMENT` variable:
+## Method
 
-| `EXPERIMENT` | Benchmark | Dataset (`DATASET_PATH`) | Subsets (`DATASET_NAME_LIST`) |
+<p align="center">
+  <img src="assets/lorekv_mechanism.gif" width="92%" alt="Animated walk-through of LORE-KV on a toy prompt">
+</p>
+
+**The problem.** Eviction happens once, after prefill, before any answer token exists. Prompt-side methods
+therefore score tokens with the queries of the prompt's last $w$ tokens, $Q_W$. When these differ from the
+queries the model issues while answering, tokens that will be needed are evicted. The gain of LORE-KV
+grows with this prompt-to-future mismatch (paper Sec. 4.5).
+
+**The estimator.** Given a prompt $X$ and a frozen model $f_\theta$, LORE-KV (Algorithm 1):
+
+1. **Prefills** the prompt, keeping the full cache $K, V$ and the window queries $Q_W$.
+2. **Samples** $M$ continuations of $T$ tokens, $Y^{(m)} \sim f_\theta(\cdot\mid X)$ (Eq. 1), and records
+   their query states $Q^{(m)}_{look}$: a Monte Carlo sample of answer-time queries.
+3. **Weights** each trajectory by its reliability (Eqs. 2-4). With the centered score
+   $c_u = \log q(y_u\mid h_u) + H(q(\cdot\mid h_u))$, whose conditional mean is zero,
+
+   $$R_m = \beta\,\bar c_m - \gamma\,\bar H_m - \lambda_D\,\hat D_m, \qquad \omega = \mathrm{softmax}(R),$$
+
+   where $\hat D_m$ is the standardized query-space disagreement with the other trajectories (Eq. 10).
+4. **Scores** every candidate token $i$ under every scoring query $q$ by its projected deletion effect
+   (Eqs. 5-6),
+
+   $$\Delta o_{q,i} = \frac{a_{q,i}}{1-a_{q,i}+\epsilon}\,(v_i - o_q), \qquad e_{q,i} = \lVert W_O\,\Delta o_{q,i} \rVert,$$
+
+   and combines the prompt window with the weighted trajectories (Eq. 7):
+
+   $$S_i = \psi(E_{i,W}) + \lambda_L \sum_{m=1}^{M} \omega_m\, \psi(E_{i,m}).$$
+
+5. **Evicts.** Each head keeps the attention sink, the window and its top-$B$ tokens (Eq. 8); the answer is
+   decoded greedily from the compressed cache.
+
+Two variants share the same trajectories and differ only in the reliability coefficients (Table 4):
+**LORE-KV /E** with $(\beta,\gamma,\lambda_D)=(1, 1.3, 0)$ and **LORE-KV /D** with $(1, 1, 0.3)$. On
+hybrid-attention backbones (Qwen3.5, Gemma 4) only the full-attention layers are compressed; they hold most
+of the cache at long context (App. E.2).
+
+| Symbol | Meaning | Default | Config key |
 |---|---|---|---|
-| `LongBench` *(default)* | [LongBench](experiments/LongBench/) | `THUDM/LongBench` | 16 sub-tasks (qasper, hotpotqa, …) |
-| `RULER` | [RULER](experiments/RULER/) | `simonjegou/ruler` | sequence-length configs: `4096 8192 16384` |
+| $w$ | observation window | 32 | fixed |
+| $M$ | lookahead trajectories | 4 | `NUM_PARTICLES` |
+| $T$ | tokens per trajectory | 8 | `LOOKAHEAD_LEN` |
+| $\lambda_L$ | lookahead weight in Eq. 7 | 1.0 | `LAMBDA_LOOKAHEAD` |
+| $(\beta,\gamma,\lambda_D)$ | reliability coefficients | (1, 1.3, 0) | `BETA`, `GAMMA`, `LAMBDA_D` |
+| $\epsilon$ | renormalization guard | $10^{-6}$ | fixed |
+| chunk | adjacent-token grouping | 4 | `CHUNK_SIZE` |
+| $\alpha,\kappa$ | robust aggregation (plug-in) | 0, 1 | `ROBUST_ALPHA`, `ROBUST_TOPK_BETA` |
+| $\tau$ | adaptive head budgets (plug-in) | 0 | `BUDGET_TAU` |
+| $\lambda_k,\lambda_v$ | diversity-aware selection (plug-in) | 0, 0 | `LAMBDA_K`, `LAMBDA_V` |
 
-Run the full pipeline (prediction + evaluation) from the repo root, switching
-benchmarks with a single variable:
+## Results
+
+<p align="center">
+  <img src="assets/results_budget.png" width="96%" alt="LongBench and RULER-16K average scores versus cache budget">
+</p>
+
+<p align="center">
+  <img src="assets/ablation_lookahead.png" width="52%" alt="LongBench average versus number of lookahead trajectories">
+</p>
+
+A single sampled future recovers about 89% of the gain over the prompt-window control; more trajectories
+add smaller improvements. Full tables for every backbone, benchmark and budget are in the paper.
+
+## Installation
+
+Two environments are used: transformers 4.44 for the dense backbones and transformers 5.x for the
+hybrid-attention ones. Both need an NVIDIA GPU with compute capability 8.0 or 9.0 (A100, H100) and CUDA 12.
 
 ```bash
-# LongBench (default)
-bash scripts/run_h100.sh
+git clone https://github.com/AhsanBilal7/train_free_kv.git lorekv && cd lorekv
 
-# RULER — just change the experiment
-EXPERIMENT=RULER bash scripts/run_h100.sh
+# Dense backbones: Mistral-7B, Llama-3.1-8B, Qwen2.5-14B, Ministral-3-8B
+uv venv --python 3.11 .venv && source .venv/bin/activate
+uv sync                       # or: uv pip install -e . --no-build-isolation
+make install                  # builds the varlen KV-cache CUDA kernel in csrc/
+make test                     # CPU unit tests of the estimator and scoring
+
+# Hybrid backbones: Qwen3.5-9B, Gemma-4-12B-it (separate environment)
+uv venv --python 3.11 .venv-hybrid && source .venv-hybrid/bin/activate
+uv pip install -r requirements-hybrid.txt && make install
 ```
 
-### Analysis / paper figures
+Machine-specific paths (Hugging Face cache, a virtual environment to activate in batch jobs, environment
+modules) go in `.env`; copy `.env.example`. Llama-3.1 is gated on the Hub: run `huggingface-cli login`.
 
-The mechanism figures live in `experiments/<BENCHMARK>/figure_making_script/`
-(each figure is a `compute_*.py` that saves a `.npz` + a `plot_*.py` that draws the
-`.png`). One driver runs them all with the same scratch/HF/GPU exports as
-`run_h100.sh`:
+**Local checkpoints.** The Qwen2.5-14B, Ministral-3-8B, Qwen3.5-9B and Gemma-4-12B configs read
+`models/<name>`:
 
 ```bash
-sbatch scripts/run_figures.sh                        # all 9, LongBench single-doc QA, B=128
-bash   scripts/run_figures.sh                        # same, interactive
-FIGURES="1 2 6" bash scripts/run_figures.sh          # subset
-BENCHMARK=ruler DATASET=8192 bash scripts/run_figures.sh
-BUDGET=256 SAMPLES=5 CONFIG_FILE=config/lorekv-ent-unif-topk.conf bash scripts/run_figures.sh
-PLOT_ONLY=1 bash scripts/run_figures.sh              # re-draw from saved .npz (no GPU)
+python scripts/prepare_local_checkpoint.py --src Qwen/Qwen2.5-14B-Instruct --out models/Qwen2.5-14B-Instruct
+python scripts/convert_ministral3.py --src mistralai/Ministral-3-8B-Instruct-2512 \
+    --out models/Ministral-3-8B-Instruct-2512      # text tower of the vision-language release
 ```
 
-See `experiments/LongBench/figure_making_script/README.md` for what each figure shows.
+For the hybrid backbones, download the checkpoints into `models/Qwen3.5-9B` and `models/gemma-4-12B-it`.
 
-**Figures inside a real run.** Add `MAKE_FIGURES=1` to any `run_h100.sh`
-`causal_lookahead` run to also drop every figure's `.npz` + `.png` into that run's
-own output folder (`experiments/<EXP>/pred/<out_name>/`) — one artifact **per
-dataset** plus one **combined** across all datasets in the run, computed with the
-run's exact hyper-parameters:
+## Quick start
 
-```bash
-MAKE_FIGURES=1 FIG_SAMPLES=2 FIG_LIST="1 2 6" \
-  CONFIG_FILE=config/lorekv-ent-adap-topk.conf bash scripts/run_h100.sh
-```
-
-This is opt-in (default off) and heavy — each (figure × dataset) reloads the model,
-so scope it with `FIG_SAMPLES`, `FIG_LIST`, and the run's `DATASET_NAME_LIST`. The
-standalone `scripts/run_figures.sh` (writes into the `figure_making_script/` folders
-instead) remains available for iterating on figures outside a run.
-
-The dataset and its subset list are defined in each benchmark's own `run.sh`
-(`experiments/<EXPERIMENT>/run.sh`), so switching benchmarks only requires changing
-`EXPERIMENT`. You can still run a benchmark directly (set the GPU yourself):
+Every experiment is one config on one benchmark. The sweep driver expands the config's value lists, calls
+the benchmark's `pred.py` once per setting and scores the results:
 
 ```bash
-cd experiments/RULER   # or experiments/LongBench
-bash run.sh
-```
+# LORE-KV /E on LongBench with Mistral-7B, budgets 128-1024
+python scripts/sweep.py --benchmark LongBench --config config/lorekv-ent-unif-topk.conf
 
-### SLURM Submission (H100)
-
-Use [scripts/submit.sh](scripts/submit.sh) to submit any named config as a SLURM job. It automatically sets the job name and config file — just pass the config name (without the path or `.conf` extension):
-
-```bash
-bash scripts/submit.sh <config-name>
-```
-
-This defaults to LongBench. To run the **same config on RULER**, set `EXPERIMENT` — it is forwarded to the job via `--export=ALL`:
-
-```bash
-EXPERIMENT=RULER bash scripts/submit.sh <config-name>
-```
-
-#### All configs — copy-paste commands
-
-> **Current family first.** The `lorekv-*` configs below are the reparametrized
-> `(BETA, GAMMA, LAMBDA_D)` grid and are what new experiments should use; see
-> [Running the reparametrized experiments](#running-the-reparametrized-experiments).
-> The `tlckv-*` groups after them are the legacy family, kept reproducible — a config
-> that sets `LAMBDA_H`/`PARTICLE_ETA` is auto-mapped to `(BETA, GAMMA, LAMBDA_D)` by
-> `run_h100.sh`, which prints the mapping to the log.
-
-Configs are named `lorekv-<cell>-<budget>-<selection>[-llama]`; `unif-topk` is the
-core configuration. See [The config matrix](#the-config-matrix).
-
-```bash
-# Reliability sweep — Stage 1, the (BETA, GAMMA) plane at LAMBDA_D = 0.
-# Budget/selection held at the core unif-topk, so this varies ONE axis.
-BUDGET=128 bash scripts/submit.sh lorekv-uniform-unif-topk   # (0, 0, 0)   uniform control
-BUDGET=128 bash scripts/submit.sh lorekv-typ-unif-topk       # (1, 0, 0)   no-entropy control
-BUDGET=128 bash scripts/submit.sh lorekv-logp-unif-topk      # (1, 1, 0)   = old "log-prob only"
-BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-topk       # (1, 1.3, 0) = old LORE-KV /E
-BUDGET=128 bash scripts/submit.sh lorekv-ent-only-unif-topk  # (0, 1, 0)   only if D1 warrants it
-
-# Stage 2 — the LAMBDA_D probe, gated on test S4
-BUDGET=128 bash scripts/submit.sh lorekv-dis-unif-topk       # (1, 1, 0.3) = old LORE-KV /D
-BUDGET=128 bash scripts/submit.sh lorekv-typ-dis-unif-topk   # (1, 0, 0.3) disagreement, no entropy
-
-# Allocation/selection sweep — reliability held fixed, the other two axes vary
-BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-topk
-BUDGET=128 bash scripts/submit.sh lorekv-ent-adap-topk
-BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-div
-BUDGET=128 bash scripts/submit.sh lorekv-ent-adap-div
-
-# Lookahead-budget sweep — no dedicated configs; NUM_PARTICLES is an override
-NUM_PARTICLES=1       BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-topk
-NUM_PARTICLES="2 4 8" BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-topk
-
-# RULER / Llama: prepend EXPERIMENT=RULER, or append -llama to the config name
-EXPERIMENT=RULER BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-topk
-BUDGET=128 bash scripts/submit.sh lorekv-ent-unif-topk-llama
-```
-
-### For LongBench (legacy family)
-```bash
-# Group A — Adaptive budget, Top-K selection
-bash scripts/submit.sh lorekv-ent-adap-topk
-bash scripts/submit.sh lorekv-logp-adap-topk
-bash scripts/submit.sh lorekv-ent-adap-topk
-
-# Group B — Uniform budget, Top-K selection
+# Same, as a SLURM job (extra sbatch options via SBATCH_ARGS)
 bash scripts/submit.sh lorekv-ent-unif-topk
-bash scripts/submit.sh lorekv-logp-unif-topk
-bash scripts/submit.sh lorekv-ent-unif-topk
-
-# Group C — Adaptive budget, Diversity-aware selection
-bash scripts/submit.sh lorekv-ent-adap-div
-bash scripts/submit.sh lorekv-logp-adap-div
-bash scripts/submit.sh lorekv-ent-adap-div
-```
-
-### For RULER (legacy family)
-```bash
-# Group A — Adaptive budget, Top-K selection
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-adap-topk
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-logp-adap-topk
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-adap-topk
-
-# Group B — Uniform budget, Top-K selection
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-unif-topk
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-logp-unif-topk
 EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-unif-topk
 
-# Group C — Adaptive budget, Diversity-aware selection
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-adap-div
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-logp-adap-div
-EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-adap-div
+# Any config key can be overridden from the environment
+BUDGET=128 NUM_PARTICLES="1 2 4 8" python scripts/sweep.py --benchmark LongBench \
+    --config config/lorekv-ent-unif-topk.conf
+
+# Print the commands without running them
+python scripts/sweep.py --benchmark NIAH --config config/andpro-llama.conf --dry-run
 ```
 
-Each call expands to the equivalent of:
-```bash
-sbatch --job-name=<EXPERIMENT>-<config-name> \
-    --export=ALL,EXPERIMENT=<EXPERIMENT>,CONFIG_FILE=config/<config-name>.conf scripts/run_h100.sh
-```
-(`EXPERIMENT` defaults to `LongBench`; the job name is prefixed with it so LongBench and RULER runs of the same config are easy to tell apart.)
+Predictions go to `experiments/<benchmark>/pred/<run>/` and scores to `result.json` in the same folder. An
+interrupted run resumes: finished datasets are skipped, and RULER resumes row by row.
 
-Logs are written to `/home/ahsan/LLM-AnDPro/logs/out_andpro_h100_<jobid>.log` and `err_andpro_h100_<jobid>.log`.
+**Using LORE-KV in your own code.**
 
----
+```python
+import argparse
 
-## TLC-KV Configuration Reference
+from lorekv.harness import add_method_args, configure_model, install_method, load_model_and_tokenizer
+from lorekv.monkeypatch.lookahead_runner import generate_with_lookahead
 
-`causal_lookahead` implements the full TLC-KV method (Algorithm 1). The named configurations below isolate specific design choices as controlled ablations. Every config uses `MODE=causal_lookahead` with **plain mean score aggregation** (`ROBUST_ALPHA=0.0`, `ROBUST_TOPK_BETA=1.0`) fixed throughout — the three axes that vary are the **particle confidence signal**, the **head-wise budget allocation**, and the **chunk selection rule**.
+args = add_method_args(argparse.ArgumentParser()).parse_args(["--budget", "128"])  # LORE-KV /E defaults
+install_method(args.mode)                        # patch before the model is built
+model, tok = load_model_and_tokenizer("mistralai/Mistral-7B-Instruct-v0.2")
+configure_model(model, args)
 
-Each config has a matching `.conf` file in [`config/`](config/) that can be passed directly. These files set only the **method** hyperparameters (mode, budget, particles, aggregation, selection) and are **dataset-agnostic** — the dataset lives in each benchmark's `run.sh` — so the same config runs on either benchmark. Prepend `EXPERIMENT=RULER` to evaluate any of them on RULER:
-```bash
-CONFIG_FILE=config/<name>.conf bash scripts/run_h100.sh                    # LongBench (default)
-EXPERIMENT=RULER CONFIG_FILE=config/<name>.conf bash scripts/run_h100.sh   # RULER
-```
-
-> The inline `... bash scripts/run_h100.sh` commands in each config block below run on LongBench by default; prepend `EXPERIMENT=RULER` (and optionally `DATASET_NAME_LIST="4096 8192 16384"`) to run them on RULER instead.
-
-> **`LAMBDA_H` / `PARTICLE_ETA` in the Group A/B/C blocks are legacy names.** They still
-> work — `run_h100.sh` maps them to `(BETA, GAMMA, LAMBDA_D) = (eta, eta*(1+LAMBDA_H),
-> eta*LAMBDA_D)` and logs the result — but new commands should set `BETA`/`GAMMA`
-> directly. Passing both means the explicit `BETA`/`GAMMA` win and the legacy values are
-> ignored (with a warning).
-
-### Naming key
-
-| Token | Parameter(s) | Value | Meaning |
-|---|---|:---:|---|
-| `<cell>` | `BETA`,`GAMMA`,`LAMBDA_D` | — | the reliability weighting; one of `uniform` `typ` `logp` `ent` `ent-only` `dis` `typ-dis`. See [Reliability weighting](#reliability-weighting-beta-gamma-lambda_d). |
-| **Adap** | `BUDGET_TAU` | 1.0 | **Adaptive** head-wise budget: each head's KV budget is proportional to its total future-query perturbation mass. Heads where deletions matter most get more tokens. |
-| **Unif** | `BUDGET_TAU` | 0.0 | **Uniform** budget: every head receives an equal share of the layer budget, disabling adaptive allocation. This is the core method's setting. |
-| **TopK** | `LAMBDA_K`, `LAMBDA_V` | 0.0 | **Plain top-K** selection: candidates ranked by score alone, no diversity penalty. |
-| **Div** | `LAMBDA_K`, `LAMBDA_V` | 0.1 | **Diversity-aware** greedy selection: penalises candidates whose keys/values are already well represented by earlier picks. Useful for tasks with near-duplicate passages; keep values small so it only breaks ties. |
-
-The full matrix is in [The config matrix](#the-config-matrix) below.
-
-All configs also share: `NUM_PARTICLES=4` (except M1), `LOOKAHEAD_LEN=8`, `LAMBDA_LOOKAHEAD=1.0`, `LOOKAHEAD_TEMPERATURE=1.0`, `ROBUST_ALPHA=0.0`, `ROBUST_TOPK_BETA=1.0`.
-
-<a id="reliability-weighting-beta-gamma-lambda_d"></a>
-### Reliability weighting: `BETA`, `GAMMA`, `LAMBDA_D`
-
-**The problem the old score had.** The particles are drawn from `p_theta` itself, so
-for every sampled token
-
-```
-E[ log p(y_u | h_u) | h_u ]  =  -H( p(.|h_u) ).
+inputs = tok(long_prompt, return_tensors="pt").to("cuda:0")
+answer_ids = generate_with_lookahead(model, tok, inputs.input_ids, inputs.attention_mask,
+                                     max_gen=128, eos_token_ids=[tok.eos_token_id])
+print(tok.decode(answer_ids, skip_special_tokens=True))
 ```
 
-The log-probability of a sampled token **already contains** the entropy of the
-distribution it was drawn from. Subtracting `LAMBDA_H * mean_u H_u` on top of it did
-not add a second signal — it rescaled the one already present. That is why
-`LAMBDA_H = 0` vs `0.3` moved LongBench by 0.01 points.
+`--mode` also accepts the baselines: `andpro`, `critical`, `ada` (Ada-KV), `fix` (SnapKV; add `--pyram` for
+PyramidKV), `slm` (StreamingLLM) and `full` (uncompressed).
 
-**The fix.** Add the entropy back at the level of a single step, giving the *centered*
-score
+## Reproducing the paper
 
-```
-c_u = log q(y_u | h_u) + H( q(.|h_u) ),        E[c_u | h_u] = 0
-```
+### Benchmarks
 
-which measures **only** how improbable the branch actually taken was, *relative to the
-uncertainty at that context*. A trajectory is then scored with three independent
-coefficients:
-
-```
-R_m      = BETA * cbar_m  -  GAMMA * Hbar_m  -  LAMBDA_D * zscore_m(D)
-omega_m  = softmax(R)_m
-cbar_m   = (1/T) sum_u c_u        Hbar_m = (1/T) sum_u H_u
-```
-
-| Coefficient | Prices | Notes |
+| Benchmark | Data | Metric |
 |---|---|---|
-| `BETA` | **branch atypicality** — did the particle take steps the model itself deemed improbable at the contexts it visited? | `E[cbar_m] = 0`, so this channel contributes no zeroth-order shift to the estimator's target. |
-| `GAMMA` | **context uncertainty** — an explicit, deliberate preference for low-entropy histories, matching the near-greedy operating point the deployed system decodes from. | `GAMMA = 0` turns the entropy channel off entirely. |
-| `LAMBDA_D` | **ensemble disagreement** — how far the particle's future-query trajectory sits from the rest of the ensemble. | Off by default. Identically 0 for `M <= 2`. |
+| LongBench, 16 English tasks | `THUDM/LongBench` from the Hub | task metrics of Table 5 |
+| RULER 4K / 8K / 16K, 13 tasks | `simonjegou/ruler` from the Hub | `string_match_all` / `string_match_part` |
+| RULER 64K / 128K | generated by `bash experiments/RULER/long_context/make_data.sh` | as above |
+| Needle-in-a-Haystack | Paul Graham essays in `experiments/NIAH/PaulGrahamEssays` | exact match, word recall |
 
-There is **no `PARTICLE_ETA`**: `softmax(eta*(b*c - g*H - lD*D))` equals
-`softmax((eta*b)*c - (eta*g)*H - (eta*lD)*D)`, so four symbols carried three degrees of
-freedom. It has been absorbed into the three coefficients.
+### Main results
 
-#### Nesting: reproducing any older run
+Each table is the listed configs on the listed benchmark (`EXPERIMENT=LongBench | RULER | NIAH`).
 
-Because `(1/T) sum_u log q(y_u|h_u) = cbar_m - Hbar_m`, the old score is exactly
-
-```
-R_old = cbar_m - (1 + LAMBDA_H) * Hbar_m - LAMBDA_D * Dhat_m
-```
-
-so `(BETA, GAMMA, LAMBDA_D) = (eta, eta*(1 + LAMBDA_H_old), eta*LAMBDA_D_old)`
-reproduces any published run bit-for-bit:
-
-| Old configuration | `(BETA, GAMMA, LAMBDA_D)` | Config file |
-|---|:---:|---|
-| uniform weights | `(0, 0, 0)` | `lorekv-uniform-unif-topk` |
-| "log-probability only" (`LAMBDA_H=LAMBDA_D=0`) | `(1, **1**, 0)` | `lorekv-logp-unif-topk` |
-| LORE-KV /E (`LAMBDA_H=0.3`) | `(1, 1.3, 0)` | `lorekv-ent-unif-topk` |
-| LORE-KV /D (`LAMBDA_D=0.3`) | `(1, **1**, 0.3)` | `lorekv-dis-unif-topk` |
-| — *(unreachable before)* pure typicality | `(1, 0, 0)` | `lorekv-typ-unif-topk` |
-| — *(unreachable before)* disagreement **instead of** entropy | `(1, 0, 0.3)` | `lorekv-typ-dis-unif-topk` |
-
-**`scripts/run_h100.sh` applies this map automatically**: a legacy `config/tlckv-*.conf`
-that sets `LAMBDA_H` / `PARTICLE_ETA` and no `BETA`/`GAMMA` is translated on the fly and
-the mapping is printed to the log, so every existing config keeps working and keeps
-producing the same numbers.
-
-Two things this makes visible, both of which were misread before:
-
-* `LAMBDA_H = LAMBDA_D = 0` is `GAMMA = 1` — a **full unit** of entropy penalty. The
-  `tlckv-p-*` "log-probability only" configs are *not* a no-penalty control.
-* `PE` and `PD` do **not** "differ only in which penalty is active": `(1, 1.3, 0)` vs
-  `(1, 1, 0.3)` differ in **both** `GAMMA` and `LAMBDA_D`. The single-factor test of the
-  disagreement hypothesis is `lorekv-typ-dis-*` = `(1, 0, 0.3)` against `lorekv-typ-*` = `(1, 0, 0)`.
-
-#### `NORMALIZE_TYPICALITY` (ablated switch, default `0`)
-
-The `c_u` are a martingale difference sequence, so `Var(cbar_m) = (1/T^2) sum_u E[V_u]`
-where `V_u = Var_{y~q}[log q(y)]` is the varentropy. The across-particle spread of
-`cbar_m` therefore scales with the prompt's varentropy, and one global softmax scale is
-not calibrated across prompts. Setting `NORMALIZE_TYPICALITY=1` uses
-`ctilde_m = cbar_m / sqrt(Vbar_m / T)` instead, which has unit scale by construction.
-Report it as a switch, not a default — test **V5** below decides whether it earns a place.
-
-#### Sampling law == centering law
-
-`E[c_u | h_u] = 0` holds **only** when the particles are drawn from the same law `c_u`
-is centered against. We sample at `LOOKAHEAD_TEMPERATURE=1.0` with no truncation, so
-`q = p_theta` and the identity is exact. If you add top-k / top-p / a different
-temperature, the statistics must be computed from the **same shaped logits the sampler
-consumed** — which is what `scoring.step_stats()` does. Centering a truncated
-sample against the untruncated `p_theta` makes `E[c_u] > 0`: a silent positive bias with
-no other visible symptom. Test **V1** catches it.
-
----
-
-### The config matrix
-
-Every config is `lorekv-<cell>-<budget>-<selection>[-llama].conf`. The three name
-components are the three axes, and each is independent of the other two:
-
-| Component | Values | Parameter(s) | Meaning |
-|---|---|---|---|
-| `<cell>` | `uniform` `typ` `logp` `ent` `ent-only` `dis` `typ-dis` | `BETA`, `GAMMA`, `LAMBDA_D` | the reliability weighting — the axis this grid is about |
-| `<budget>` | `unif` `adap` | `BUDGET_TAU` = `0.0` / `1.0` | uniform vs. perturbation-proportional head-wise budgets |
-| `<selection>` | `topk` `div` | `LAMBDA_K`,`LAMBDA_V` = `0.0` / `0.1` | plain top-K vs. diversity-aware greedy selection |
-
-7 × 2 × 2 × 2 models = **56 configs**. `unif-topk` is the paper's core configuration;
-all main-text results use it.
-
-#### The reliability cells
-
-| `<cell>` | `(BETA, GAMMA, LAMBDA_D)` | Stage | Role |
-|---|:---:|:---:|---|
-| `uniform` | `(0, 0, 0)` | 1 | uniform `omega_m = 1/M` — **the missing control** |
-| `typ` | `(1, 0, 0)` | 1 | pure typicality, entropy channel **off** — the real no-entropy control |
-| `logp` | `(1, 1, 0)` | 1 | relabels the published "log-probability only" row exactly |
-| `ent` | `(1, 1.3, 0)` | 1 | relabels the published LORE-KV /E core exactly |
-| `ent-only` | `(0, 1, 0)` | 1 | pure entropy — run only if D1 shows `Var(Hbar)` dominating |
-| `dis` | `(1, 1, 0.3)` | 2 | relabels the published LORE-KV /D core exactly |
-| `typ-dis` | `(1, 0, 0.3)` | 2 | disagreement **instead of** entropy — what /D was meant to be |
-
-`uniform`, `typ` and `typ-dis` were **unreachable** in the old `(LAMBDA_H, eta)`
-parametrization, where `LAMBDA_H = 0` already meant `GAMMA = 1`.
-
-#### Output-folder naming
-
-A run writes to `experiments/<BENCHMARK>/pred/<name>`, where `<name>` mirrors the
-config name so a folder is identifiable at a glance:
-
-```
-lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_M_<M>_T_<T>_lL_<lL>_lT_<lT>_nrm_<0|1>_alpha_<alpha>_kappa_<kappa>
-└────────── identity: same string as its .conf ──────────┘└──── everything the config name does not pin ────┘
-```
-
-for example
-
-```
-lorekv-ent-unif-topk_B_128_chunk_4_M_4_T_8_lL_1.0_lT_1.0_nrm_0_alpha_0.0_kappa_1.0
-lorekv-typ-dis-adap-div-llama_B_512_chunk_4_M_8_T_8_lL_1.0_lT_1.0_nrm_0_alpha_0.0_kappa_1.0
-```
-
-Baselines (`andpro`, `critical`, `causal_forward_only`) keep
-`<mode>_<MODEL_TAG>_<B>_chunk_<cs>_red_<red>`.
-
-Two properties worth knowing:
-
-* **`<cell>`, `<brule>` and `<sel>` come from the numbers actually used, not from the
-  config filename.** A CLI sweep such as
-  `LAMBDA_D="0.0 0.3" CONFIG_FILE=config/lorekv-typ-dis-unif-topk.conf` writes one
-  `lorekv-typ-...` folder and one `lorekv-typ-dis-...` folder, so a folder name can
-  never disagree with what was run. Coefficients matching no named cell fall back to
-  `b<beta>g<gamma>lD<lambdaD>` (e.g. `lorekv-b1g0lD0.1-unif-topk_...`).
-* **One module generates and parses these names**: [`scripts/run_naming.py`](scripts/run_naming.py).
-  `run.sh` calls it as a CLI; `collect_results.py`, `eval.py` and
-  `report_length_time.py` import `parse_run_name` from it. It also reads the two
-  pre-reparametrization schemes and translates them through Proposition 1, so tables
-  can mix old and new folders.
-
-**Renaming folders written before this change:**
-
-```bash
-python scripts/rename_pred_runs.py            # dry run — prints the plan
-python scripts/rename_pred_runs.py --apply    # rename
-```
-
-It is idempotent, refuses to run if any two folders would collide, leaves baselines
-alone, and renames symlinked (archived) runs in place without touching their targets.
-Note that it relabels an old `lH_0.0` run as `logp` — `(1, 1, 0)`, a full unit of
-entropy penalty — not as a no-penalty control, per Proposition 1.
-
-#### The two sweeps
-
-Hold `<budget>-<selection>` fixed and vary `<cell>` — that is the single-factor
-**reliability** comparison, and it is the one the reparametrization makes well-posed:
-
-```bash
-for cell in uniform typ logp ent ent-only; do
-  EXPERIMENT=LongBench BUDGET=128 \
-    CONFIG_FILE="config/lorekv-$cell-unif-topk.conf" bash scripts/run_h100.sh
-done
-```
-
-Hold `<cell>` fixed and vary `<budget>-<selection>` — that prices **allocation and
-selection** at a fixed reliability rule (the old Group A/B/C axes):
-
-```bash
-for v in unif-topk adap-topk unif-div adap-div; do
-  EXPERIMENT=LongBench BUDGET=128 \
-    CONFIG_FILE="config/lorekv-ent-$v.conf" bash scripts/run_h100.sh
-done
-```
-
-#### The lookahead-budget axis has no configs of its own
-
-`NUM_PARTICLES` is sweepable from the environment and CLI beats the config file, so
-the `M` ablation is an override rather than a separate family:
-
-```bash
-NUM_PARTICLES=1       CONFIG_FILE=config/lorekv-ent-unif-topk.conf bash scripts/run_h100.sh
-NUM_PARTICLES="2 4 8" CONFIG_FILE=config/lorekv-ent-unif-topk.conf bash scripts/run_h100.sh
-```
-
-Reliability weighting is **vacuous at `M = 1`** (a single `R_m` is normalized away by
-the softmax) and `LAMBDA_D` is **identically 0 at `M <= 2`**, so those rows are
-insensitive to `<cell>`.
-
-#### Retired: the `tlckv-*` family
-
-The `tlckv-{pe,p,pd,m1}-*` configs have been removed from `config/` — every one of them
-is a point of the matrix above:
-
-| Retired | Equivalent |
-|---|---|
-| `tlckv-pe-m4-<b>-<s>` | `lorekv-ent-<b>-<s>` — `(1, 1.3, 0)` |
-| `tlckv-p-m4-<b>-<s>` | `lorekv-logp-<b>-<s>` — `(1, 1, 0)`, **not** a no-penalty control |
-| `tlckv-pd-m4-<b>-<s>` | `lorekv-dis-<b>-<s>` — `(1, 1, 0.3)`, disagreement *on top of* entropy |
-| `tlckv-m1-<b>-<s>` | `NUM_PARTICLES=1` on any cell |
-| `tlckv-*-mx-<b>-<s>` | `NUM_PARTICLES="2 4 8"` on any cell |
-
-Note that `tlckv-pd-*` vs `tlckv-pe-*` was never a single-factor comparison of the
-reliability term: `(1, 1, 0.3)` and `(1, 1.3, 0)` differ in **two** coefficients. The
-single-factor test is `lorekv-typ-<b>-<s>` vs `lorekv-typ-dis-<b>-<s>`.
-
-The retired files were moved (not deleted) to
-`$SCRATCH/train_free_kv_archive/config-legacy/`. The `(LAMBDA_H, eta) -> (BETA, GAMMA,
-LAMBDA_D)` shim in `run_h100.sh` is unchanged, so if you restore one it still runs and
-still reproduces its published numbers.
-
----
-
-## Running the reparametrized experiments
-
-Everything below assumes the repo root and a live venv (`scripts/run_h100.sh` sources
-`.env` and activates `$VENV_PATH` itself).
-
-### 0. One-time setup on ACES
-
-```bash
-module purge && module load WebProxy GCC/11.3.0 CUDA/12.1.1
-export REPO_ROOT="$PWD" SCRATCH="${SCRATCH:-/scratch/user/$USER}"
-```
-
-### 1. Stage 1 — the `(BETA, GAMMA)` plane at `LAMBDA_D = 0`
-
-The five Stage-1 cells, LongBench, Mistral, `B=128` (the budget with resolving power):
-
-```bash
-for cell in uniform typ logp ent ent-only; do
-  cfg="lorekv-$cell-unif-topk"; echo "===== $cfg ====="
-  EXPERIMENT=LongBench CONFIG_FILE="$REPO_ROOT/config/$cfg.conf" BUDGET=128 \
-    bash "$REPO_ROOT/scripts/run_h100.sh"
-done
-```
-
-Same on RULER, and on Llama:
-
-```bash
-for cell in uniform typ logp ent ent-only; do
-  EXPERIMENT=RULER CONFIG_FILE="$REPO_ROOT/config/lorekv-$cell-unif-topk.conf" BUDGET=128 \
-    bash "$REPO_ROOT/scripts/run_h100.sh"
-done
-
-for cell in uniform typ logp ent ent-only; do
-  EXPERIMENT=LongBench CONFIG_FILE="$REPO_ROOT/config/lorekv-$cell-unif-topk-llama.conf" \
-    BUDGET=128 bash "$REPO_ROOT/scripts/run_h100.sh"
-done
-```
-
-As a **SLURM batch job** instead (one submission per benchmark):
-
-```bash
-EXPERIMENT=LongBench BUDGET=128 sbatch scripts/run_h100_aces.sh
-EXPERIMENT=RULER     BUDGET=128 sbatch scripts/run_h100_aces.sh
-```
-
-`scripts/run_h100_aces.sh` has **two modes, selected by whether `CONFIG_FILE` is set**:
-
-*No `CONFIG_FILE`* — sweep `CELLS x VARIANTS x MODELS`, each overridable at submit
-time (defaults: the five Stage-1 cells, `unif-topk` only, both models = 10 runs):
-
-```bash
-# the default sweep
-EXPERIMENT=LongBench BUDGET=128 sbatch scripts/run_h100_aces.sh
-
-# the full budget x selection cross at every Stage-1 cell (40 runs)
-sbatch --export=ALL,VARIANTS="unif-topk adap-topk unif-div adap-div" scripts/run_h100_aces.sh
-
-# Stage 2, Mistral only
-sbatch --export=ALL,CELLS="dis typ-dis",MODELS=mistral scripts/run_h100_aces.sh
-```
-
-*With `CONFIG_FILE`* — run exactly that one config and **skip the sweep**. A bare
-config name works as well as a path:
-
-```bash
-sbatch --export=ALL,CONFIG_FILE=lorekv-typ-unif-topk scripts/run_h100_aces.sh
-sbatch --export=ALL,CONFIG_FILE=config/lorekv-typ-unif-topk.conf scripts/run_h100_aces.sh
-
-# a single config across the whole budget grid
-sbatch --export=ALL,CONFIG_FILE=lorekv-ent-unif-topk,BUDGET="128 256 512 1024" \
-       scripts/run_h100_aces.sh
-```
-
-A `CONFIG_FILE` that does not exist is a hard error rather than a fallback:
-`run_h100.sh` only tests `-f "$CONFIG_FILE"` and otherwise warns and silently uses its
-inline defaults, so a typo would quietly run the wrong configuration. An empty
-`CONFIG_FILE=` counts as unset and sweeps.
-
-The two published cells `lorekv-logp-unif-topk` and `lorekv-ent-unif-topk` should reproduce
-`40.29 / 41.39 / 41.30 / 41.40` and `40.28 / 41.38 / 41.84 / 42.21` exactly; if they do
-not, the `(BETA, GAMMA)` mapping is wrong before anything else is read.
-
-**Three seeds.** The gaps being resolved are 0.01–0.04, below any plausible noise floor
-estimate. Run each cell three times and report the spread:
-
-```bash
-for seed in 0 1 2; do
-  for cell in uniform typ logp ent; do
-    EXPERIMENT=LongBench CONFIG_FILE="$REPO_ROOT/config/lorekv-$cell-unif-topk.conf" BUDGET=128 \
-      PYTHONHASHSEED=$seed SEED=$seed MODEL_TAG="Mistral-7B-Instruct-v0.2-s$seed" \
-      bash "$REPO_ROOT/scripts/run_h100.sh"
-  done
-done
-```
-
-### 2. Stage 2 — the `LAMBDA_D` probe (gated on test S4)
-
-Run **only after** S4 shows a non-zero, sign-consistent semipartial correlation *per
-benchmark*. At the best `(BETA*, GAMMA*)` from Stage 1:
-
-```bash
-for cell in dis typ-dis; do
-  EXPERIMENT=LongBench CONFIG_FILE="$REPO_ROOT/config/lorekv-$cell-unif-topk.conf" BUDGET=128 \
-    bash "$REPO_ROOT/scripts/run_h100.sh"
-done
-```
-
-`LAMBDA_D` sweeps work the same way (`out_name` carries `_lD_<value>`, so runs never
-collide):
-
-```bash
-EXPERIMENT=LongBench CONFIG_FILE="$REPO_ROOT/config/lorekv-typ-dis-unif-topk.conf" \
-  LAMBDA_D="0.0 0.1 0.3 1.0" BUDGET=128 bash "$REPO_ROOT/scripts/run_h100.sh"
-```
-
-Calibrate `LAMBDA_D` so that `sd_m(LAMBDA_D * Dhat_m)` matches `sd_m(GAMMA * Hbar_m)`
-before comparing the two channels — `Hbar` spans ~0–4 nats while `Dhat` is bounded by
-`sqrt(M-1) ≈ 1.73` at `M=4`, so equal coefficients are **not** equal tilts.
-
-### 3. Validation — run this before reading any reliability number
-
-```bash
-cd experiments/LongBench/figure_making_script/reparam_validation
-
-# capture (one GPU pass; --utility adds the true-future-query decode for S3/S4)
-python compute_validation.py \
-  --config ../../../../config/lorekv-ent-unif-topk.conf \
-  --benchmark longbench --dataset single --samples-per-dataset 8 \
-  --num-particles 8 --budget 128 --utility
-
-# report (no GPU)
-python report_validation.py --data validation_data_<tag>.npz
-```
-
-RULER counterpart — run it separately, **never pooled**, since figure 10 already shows
-`-Dhat_m` at `rho = -0.26` on LongBench and `+0.03` on RULER:
-
-```bash
-python compute_validation.py --config ../../../../config/lorekv-ent-unif-topk.conf \
-  --benchmark ruler --dataset 4096 --samples-per-dataset 8 \
-  --num-particles 8 --budget 128 --utility
-```
-
-| Test | What it checks | Failure means |
+| Paper | Backbone | Configs |
 |---|---|---|
-| **V1** | bootstrap CI of `mean(cbar_m)` contains 0 | positive ⇒ sampling law ≠ centering law (truncation/temperature). **Fix and re-capture before anything else.** |
-| **V2** | logged `R_m` matches `BETA*cbar - GAMMA*Hbar - LAMBDA_D*Dhat` | an exact `T`-fold gap ⇒ the code used the sequence *total* where Eq. 3 uses the *mean* |
-| **V3** | lag-`k` autocorrelation of `{c_u}` ≈ 0 | truncation leaked in, or a repetition regime; V4 no longer applies |
-| **V4** | OLS slope of empirical `Var_m(cbar)` on `(1/T^2) sum_u V_u` ≈ 1 | Prop. 3 miscalibrated ⇒ report unnormalized `cbar` only |
-| **V5** | across-prompt ratio `q95/q05` of `sqrt(Vbar/T)` | `< 1.3` keep `NORMALIZE_TYPICALITY=0`; `> 2` promote it |
-| **D1** | share of `Var_m(cbar - Hbar)` carried by `Var(Hbar)` | if it dominates, the old "log-probability weighting" *was* an entropy penalty |
-| **D2** | within-prompt Spearman(`cbar_m`, `Hbar_m`) | reports the confound directly |
-| **S3** | Spearman of each signal vs per-particle oracle utility | the reading: does `cbar_m` outrank raw `log p`? |
-| **S4** | semipartial Spearman(`D_m`, utility \| `cbar`, `Hbar`), ΔR², permutation null | **the gate for `LAMBDA_D > 0`.** Near-zero is a reportable negative control, not a failure. |
+| Table 1, Fig. 2 | Mistral-7B-Instruct-v0.2 | `lorekv-ent-unif-topk`, `lorekv-dis-unif-topk`, `andpro`, `critical`, `fullcache` |
+| Table 6 | Llama-3.1-8B-Instruct | the same configs with `-llama` |
+| Table 11 | Qwen2.5-14B-Instruct | the same configs with `-qwen2` |
+| Table 12 | Ministral-3-8B-Instruct-2512 | the same configs with `-ministral3` |
+| Tables 2, 8, 9 | Qwen3.5-9B, Gemma-4-12B-it | the same configs with `-qwen35`, `-gemma4` (hybrid environment) |
+| Fig. 3, Tables 7, 10 | Mistral, Llama | the Mistral and Llama configs with `EXPERIMENT=RULER` |
+| RULER 64K / 128K | Llama-3.1-8B | the `-llama` configs with `DATASET_NAME_LIST="65536 131072"` |
+| Fig. 8 | Llama-3.1-8B | the `-llama` configs with `EXPERIMENT=NIAH BUDGET=1024` |
 
-V1, V2, D1, D2 and S4 need only the trajectory means, which every existing capture
-already stores (`cbar_m = logp_mean + H_mean`). V3, V4 and V5 need the per-step `c_u`
-and the varentropy `V_u`, which is what the re-capture pass above adds — same `M*T`
-decode, roughly one GPU-hour over 550 + 6,500 prompts.
+### Ablations (Mistral-7B, Tables 13-15)
 
-### 4. Figures
-
-The score-level figures now sweep the full `(BETA, GAMMA, LAMBDA_D)` grid on captured
-particles (no re-decoding), so figures 1 and 10 answer S1/S3/S5 directly:
-
-```bash
-FIGURES="1 10" CONFIG_FILE=config/lorekv-ent-unif-topk.conf BUDGET=128 \
-  BENCHMARK=longbench bash scripts/run_figures_aces.sh
-```
-
-### 5. Archiving finished runs to scratch
-
-`pred/` folders are immutable once a run has finished and home is inode-limited, so
-completed runs belong on `/scratch`. The helper moves them and leaves a symlink, so
-`eval.py`, `collect_results.py` and the figure scripts need no change:
-
-```bash
-# dry run first — prints the plan, moves nothing
-bash scripts/archive_runs_to_scratch.sh --pattern 'lorekv-ent-*'
-
-# then apply
-bash scripts/archive_runs_to_scratch.sh --pattern 'lorekv-ent-*' --apply
-```
-
-Because the folder name now leads with the run's identity, patterns read directly:
-
-| Pattern | Selects |
+| Ablation | How to run |
 |---|---|
-| `'lorekv-ent-*'` | every entropy-weighted run, any budget rule / selection |
-| `'lorekv-*-unif-topk_*'` | every core-configuration run, any reliability cell |
-| `'lorekv-dis-*-llama_*'` | the Llama disagreement family |
-| `'lorekv-*_B_1024_*'` | every `B=1024` run |
+| Lookahead budget $M$ (Table 14) | `NUM_PARTICLES="0 1 2 4 8"` with `lorekv-ent-unif-topk` |
+| Geometry $M\times T$ (Table 13a) | `NUM_PARTICLES="1 2 4 8" LOOKAHEAD_LEN="2 4 8 16 32" BUDGET=128` |
+| Matched lookahead-token budget (Table 13b) | `andpro-compute-eq` with the same sweep |
+| Reliability weighting | `lorekv-logp-unif-topk`, `lorekv-ent-dis-unif-topk` |
+| Deletion objective | `lorekv-obj-attn`, `lorekv-obj-unproj`, `andpro-compute-eq` |
+| Adaptive budgets / diversity | `lorekv-{ent,dis,logp}-adap-topk`, `lorekv-{ent,dis,logp}-adap-div` |
+| Robust aggregation | `ROBUST_ALPHA=0.5 ROBUST_TOPK_BETA=0.5` with `lorekv-ent-unif-topk` |
 
-The entropy-weighted family (64 folders, ~77 MB across LongBench/RULER/NIAH) is
-already archived to `$SCRATCH/train_free_kv_archive/<benchmark>/pred/`, symlinked back
-under its current name.
+### Tables, latency and figures
 
-Re-running is idempotent (an already-archived folder is a symlink, and the script
-matches directories only). To undo one:
-`rm <link> && mv $SCRATCH/train_free_kv_archive/<exp>/pred/<name> <link>`.
+```bash
+python scripts/collect_results.py --benchmark LongBench --plot    # every run -> CSV (+ PNG)
+python scripts/longbench_table.py --backbone qwen2                 # LaTeX rows of Table 11
+python scripts/longbench_ablations.py                              # Tables 13a and 14
+python scripts/report_length_time.py                               # per-sample latency, Table 3
+cd experiments/LongBench && python ../../scripts/profile_latency_breakdown.py   # stage latency, Fig. 7
+```
 
----
+The mechanism analyses (App. F) capture the prompt-window, lookahead and true answer-time queries with the
+deployed code and compare criteria under one shared selector. Each needs one GPU:
 
-## Acknowledgement
+```bash
+CONFIG_FILE=config/lorekv-ent-unif-topk.conf bash scripts/run_figures.sh   # LongBench single-doc QA
+BENCHMARK=ruler DATASET=4096 bash scripts/run_figures.sh                   # RULER 4K
+bash scripts/run_demo_token_ranking.sh && python scripts/plot_token_ranking_demo.py
+python scripts/demo_montecarlo_queries.py --benchmark ruler --dataset 4096 && python scripts/plot_montecarlo_demo.py
+```
 
-We extend our gratitude to [AdaKV](https://github.com/FFY0/AdaKV) for their contributions of open-source code. This repository is built upon their latest code framework, with only minor modifications to the token score calculation.
+| Paper figure | Code |
+|---|---|
+| Fig. 1, Monte Carlo future-query estimation | `scripts/demo_montecarlo_queries.py`, `scripts/plot_montecarlo_demo.py`; coverage curves in `fig1_future_query_alignment` |
+| Fig. 5, attention-output fidelity | `fig3_cache_distribution` |
+| Fig. 6, gain vs. query mismatch | `fig6_mismatch_vs_gain` |
+| Fig. 7, latency-quality trade-off | `scripts/profile_latency_breakdown.py`, `scripts/report_length_time.py` |
+| Fig. 9, retention-order shift | `fig2_score_comparison` |
+| Fig. 10, criterion comparison | `scripts/demo_token_ranking.py`, `scripts/plot_token_ranking_demo.py` |
+| Fig. 11, retention by token class | `fig7_retained_token_composition` |
+| Fig. 12, layer and head structure | `fig8_layer_head_analysis` |
+| Fig. 13, budget equivalence | `fig9_budget_equivalence` |
+| App. F.4, reliability signals | `fig4_entropy_trajectory`, `fig5_confidence_calibration`, `fig10_particle_divergence` |
+
+Figure folders live in `experiments/LongBench/figure_making_script/`; the RULER folders are thin wrappers
+around the same code. Each has a `compute_*.py` (GPU, writes a `.npz`) and a `plot_*.py` (CPU, draws the
+`.png`); `PLOT_ONLY=1 bash scripts/run_figures.sh` redraws from saved data.
+
+## Repository layout
+
+```
+lorekv/                       the method
+  harness.py                  method selection, configuration, model loading (shared by all drivers)
+  data.py                     LongBench and RULER loaders
+  monkeypatch/
+    scoring.py                reliability weights, deletion scores, selection, per-head cache
+    lookahead_runner.py       generation for one prompt (Algorithm 1)
+    causal_*_hijack.py        phase-aware attention and model forwards per backbone
+    *hybrid*.py               Qwen3.5 / Gemma 4 support
+andpro_snapkv/                AnDPro baseline
+adaptive_snapkv/              SnapKV, PyramidKV, Ada-KV, StreamingLLM baselines (also `critical`)
+models_ext/                   Ministral-3 for transformers 4.44
+csrc/                         CUDA kernel for the ragged per-head cache
+experiments/
+  LongBench/ RULER/ NIAH/     pred.py (decode) and eval.py (score) per benchmark
+  */figure_making_script/     mechanism-analysis figures (App. F)
+config/                       one .conf per configuration in the paper
+scripts/                      sweep driver, launchers, tables, latency, analyses, checks
+tests/                        CPU unit tests
+assets/                       README figures (scripts/make_readme_assets.py)
+```
+
+## Limitations
+
+LORE-KV adds a one-time lookahead and scoring overhead to every request (Table 3), makes irreversible
+eviction decisions, and does not model cross-head or cross-layer interactions. Its gains shrink at large
+budgets and coexist with task-level regressions. On hybrid backbones the per-trajectory cache copy can
+exceed device memory at very long context.
 
 ## Citation
-If you find this project helpful to your research, please consider citing our paper using the following BibTeX:
-```
-@inproceedings{
-    geng2025accurate,
-    title={Accurate {KV} Cache Eviction via Anchor Direction Projection for Efficient {LLM} Inference},
-    author={Geng, Zijie and Wang, Jie and Liu, Ziqi and Ju, Feng and Li, Yiming and Li, Xing and Yuan, Mingxuan and Hao, Jianye and Lian, Defu and Chen, Enhong and Wu, Feng},
-    booktitle={The Thirty-ninth Annual Conference on Neural Information Processing Systems},
-    year={2025},
+
+```bibtex
+@inproceedings{lorekv2027,
+  title     = {Monte Carlo Estimation for {KV} Cache Eviction},
+  author    = {Anonymous},
+  booktitle = {Under review at the International Conference on Learning Representations},
+  year      = {2027}
 }
 ```
+
+## Acknowledgements
+
+This code builds on [LLM-AnDPro](https://github.com/MIRALab-USTC/LLM-AnDPro) (Geng et al., NeurIPS 2025)
+and [AdaKV](https://github.com/FFY0/AdaKV) (Feng et al.), which include code from
+[SnapKV](https://github.com/FasterDecoding/SnapKV) and [PyramidKV](https://github.com/Zefan-Cai/PyramidKV).
+Evaluation code is adapted from [LongBench](https://github.com/THUDM/LongBench),
+[RULER](https://github.com/NVIDIA/RULER) and
+[LLMTest_NeedleInAHaystack](https://github.com/gkamradt/LLMTest_NeedleInAHaystack); model code adapts
+[Hugging Face Transformers](https://github.com/huggingface/transformers). We thank the authors for
+releasing their work.
+
+## License
+
+MIT; see [LICENSE](LICENSE). Adapted components keep their original licenses (MIT, or Apache-2.0 for code
+derived from Transformers and RULER).
