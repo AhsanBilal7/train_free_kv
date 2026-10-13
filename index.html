@@ -8,6 +8,7 @@
 <meta property="og:title" content="LORE-KV: Monte Carlo Estimation for KV-Cache Eviction">
 <meta property="og:description" content="Training-free, future-query-aware KV-cache eviction for long-context LLM inference.">
 <meta property="og:image" content="assets/lorekv_architecture.png">
+<meta name="author" content="Ahsan Bilal, Muhammad Ahmed Mohsin, Muhammad Umer, Wajih Hassan Raza, Atta Ul Asad, Young D. Kwon, Michal Valko, Dean F. Hougen">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -75,6 +76,13 @@
   h1 .acr { color: var(--blue); }
   .expand { color: var(--ink-2); font-size: 18px; margin: 0 auto 6px; max-width: 760px; }
   .expand b { color: var(--ink); }
+  .authors { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 18px; max-width: 820px;
+             margin: 18px auto 6px; font-size: 18px; }
+  .authors a, .authors span { color: var(--ink); }
+  .authors sup { color: var(--blue); font-weight: 600; margin-left: 1px; }
+  .affils { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 16px; color: var(--ink-2);
+            font-size: 15px; max-width: 820px; margin: 0 auto 4px; }
+  .affils sup { color: var(--blue); font-weight: 600; margin-right: 2px; }
   .tagline { font-size: 21px; color: var(--ink); max-width: 760px; margin: 18px auto 26px; }
   .tagline em { color: var(--blue); font-style: normal; font-weight: 600; }
   .buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
@@ -191,10 +199,22 @@
   <span class="eyebrow"><span class="dot"></span>Training-free · KV-cache eviction · long-context LLMs</span>
   <h1><span class="acr">LORE-KV</span>: Monte Carlo Estimation<br>for KV-Cache Eviction</h1>
   <p class="expand"><b>L</b>ookahead <b>O</b>utput-perturbation with <b>R</b>eliability-weighted <b>E</b>nsembles for <b>K</b>ey-<b>V</b>alue caches</p>
+  <div class="authors">
+    <span>Ahsan Bilal<sup>1</sup></span><span>Muhammad Ahmed Mohsin<sup>2</sup></span>
+    <span>Muhammad Umer<sup>2</sup></span><span>Wajih Hassan Raza<sup>3</sup></span>
+    <span>Atta Ul Asad<sup>4</sup></span><span>Young D. Kwon<sup>5</sup></span>
+    <span>Michal Valko<sup>6</sup></span><span>Dean F. Hougen<sup>1</sup></span>
+  </div>
+  <div class="affils">
+    <span><sup>1</sup>University of Oklahoma</span><span><sup>2</sup>Stanford University</span>
+    <span><sup>3</sup>University of Houston</span><span><sup>4</sup>Lahore University of Management Sciences</span>
+    <span><sup>5</sup>University of Cambridge</span><span><sup>6</sup>Isara Labs</span>
+  </div>
   <p class="tagline">Most eviction methods ask which memory looked important while <em>reading</em> the prompt.<br>LORE-KV asks which memory will matter while <em>answering</em>.</p>
   <div class="buttons">
-    <a class="btn primary" href="https://github.com/AhsanBilal7/train_free_kv"><svg><use href="#i-github"/></svg>Code</a>
-    <a class="btn" href="#citation"><svg><use href="#i-paper"/></svg>Paper (under review, ICLR 2027)</a>
+    <a class="btn primary" href="https://arxiv.org/abs/2610.07643"><svg><use href="#i-paper"/></svg>arXiv 2610.07643</a>
+    <a class="btn" href="https://arxiv.org/pdf/2610.07643"><svg><use href="#i-paper"/></svg>PDF</a>
+    <a class="btn" href="https://github.com/AhsanBilal7/train_free_kv"><svg><use href="#i-github"/></svg>Code</a>
     <a class="btn" href="#citation"><svg><use href="#i-quote"/></svg>BibTeX</a>
   </div>
 </header>
@@ -396,11 +416,12 @@ python scripts/sweep.py --benchmark LongBench --config config/lorekv-ent-unif-to
 
 <section class="wrap" id="citation">
   <h2><span class="ic"><svg><use href="#i-quote"/></svg></span>Citation</h2>
-  <pre class="code"><button class="copy" id="copy">Copy</button><code id="bib">@inproceedings{lorekv2027,
-  title     = {Monte Carlo Estimation for {KV} Cache Eviction},
-  author    = {Anonymous},
-  booktitle = {Under review at the International Conference on Learning Representations},
-  year      = {2027}
+  <pre class="code"><button class="copy" id="copy">Copy</button><code id="bib">@article{bilal2026lorekv,
+  title   = {Monte Carlo Estimation for {KV} Cache Eviction},
+  author  = {Bilal, Ahsan and Mohsin, Muhammad Ahmed and Umer, Muhammad and Raza, Wajih Hassan
+             and Asad, Atta Ul and Kwon, Young D. and Valko, Michal and Hougen, Dean F.},
+  journal = {arXiv preprint arXiv:2610.07643},
+  year    = {2026}
 }</code></pre>
 </section>
 </main>
