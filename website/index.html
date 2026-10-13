@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LORE-KV: Monte Carlo Estimation for KV-Cache Eviction</title>
+<meta name="description" content="LORE-KV is a training-free KV-cache eviction method that scores the prompt cache with Monte Carlo samples of the queries the model will issue while answering.">
+<meta property="og:title" content="LORE-KV: Monte Carlo Estimation for KV-Cache Eviction">
+<meta property="og:description" content="Training-free, future-query-aware KV-cache eviction for long-context LLM inference.">
+<meta property="og:image" content="assets/lorekv_architecture.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+        onload="renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]});"></script>
+<style>
+  :root {
+    color-scheme: light;
+    --surface: #f7f7f4; --card: #ffffff; --rule: #e2e1dc; --rule-strong: #cfcec7;
+    --ink: #14161a; --ink-2: #52514e; --muted: #8a8983;
+    --blue: #2a78d6; --blue-bg: #e8f1fc; --orange: #eb6834; --orange-bg: #fdeee7;
+    --aqua: #1baf7a; --aqua-bg: #e3f6ee; --violet: #6250d6;
+    --code-bg: #f1f0ec; --shadow: 0 1px 2px rgba(20,22,26,.04), 0 4px 16px rgba(20,22,26,.04);
+    --figure-bg: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface: #141518; --card: #1c1d21; --rule: #2c2d32; --rule-strong: #3a3b41;
+      --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8e8d87;
+      --blue: #4b93ea; --blue-bg: #17283f; --orange: #f07b4d; --orange-bg: #3a2018;
+      --aqua: #2cc28b; --aqua-bg: #12302a; --violet: #9085e9;
+      --code-bg: #232428; --shadow: none; --figure-bg: #fbfbf9;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface: #141518; --card: #1c1d21; --rule: #2c2d32; --rule-strong: #3a3b41;
+    --ink: #f0efec; --ink-2: #c3c2b7; --muted: #8e8d87;
+    --blue: #4b93ea; --blue-bg: #17283f; --orange: #f07b4d; --orange-bg: #3a2018;
+    --aqua: #2cc28b; --aqua-bg: #12302a; --violet: #9085e9;
+    --code-bg: #232428; --shadow: none; --figure-bg: #fbfbf9;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--surface); color: var(--ink);
+    font: 17px/1.6 "Source Sans 3", system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+
+  /* nav */
+  nav.top { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--surface) 88%, transparent);
+            backdrop-filter: blur(8px); border-bottom: 1px solid var(--rule); }
+  nav.top .wrap { display: flex; align-items: center; gap: 22px; height: 54px; }
+  nav.top .brand { font-weight: 700; color: var(--ink); letter-spacing: .2px; display: flex; align-items: center; gap: 8px; }
+  nav.top .links { display: flex; gap: 18px; margin-left: auto; font-size: 15px; }
+  nav.top .links a { color: var(--ink-2); }
+  nav.top .links a:hover { color: var(--ink); text-decoration: none; }
+  #theme { margin-left: 6px; border: 1px solid var(--rule); background: var(--card); color: var(--ink-2);
+           border-radius: 8px; width: 34px; height: 30px; cursor: pointer; display: grid; place-items: center; }
+  @media (max-width: 760px) { nav.top .links { display: none; } #theme { margin-left: auto; } }
+
+  /* hero */
+  header.hero { padding: 64px 0 28px; text-align: center; }
+  .eyebrow { display: inline-flex; gap: 8px; align-items: center; font-size: 14px; color: var(--ink-2);
+             border: 1px solid var(--rule); background: var(--card); padding: 4px 12px; border-radius: 999px; }
+  .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--aqua); }
+  h1 { font-size: clamp(32px, 5vw, 50px); line-height: 1.1; margin: 18px 0 10px; letter-spacing: -.5px; }
+  h1 .acr { color: var(--blue); }
+  .expand { color: var(--ink-2); font-size: 18px; margin: 0 auto 6px; max-width: 760px; }
+  .expand b { color: var(--ink); }
+  .tagline { font-size: 21px; color: var(--ink); max-width: 760px; margin: 18px auto 26px; }
+  .tagline em { color: var(--blue); font-style: normal; font-weight: 600; }
+  .buttons { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 10px;
+         border: 1px solid var(--rule-strong); background: var(--card); color: var(--ink); font-weight: 600; font-size: 15px; }
+  .btn:hover { text-decoration: none; border-color: var(--blue); }
+  .btn.primary { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+  .btn svg { width: 17px; height: 17px; }
+
+  /* sections */
+  section { padding: 40px 0; }
+  h2 { font-size: 27px; margin: 0 0 6px; display: flex; align-items: center; gap: 10px; letter-spacing: -.2px; }
+  h2 .ic { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-bg); color: var(--blue);
+           display: grid; place-items: center; flex: none; }
+  h2 .ic svg { width: 18px; height: 18px; }
+  .lead { color: var(--ink-2); max-width: 820px; margin: 0 0 22px; }
+  h3 { font-size: 19px; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+
+  .card { background: var(--card); border: 1px solid var(--rule); border-radius: 14px; box-shadow: var(--shadow); }
+  figure { margin: 0; }
+  figure.panel { padding: 18px; }
+  figure img { display: block; width: 100%; height: auto; border-radius: 8px; background: var(--figure-bg); }
+  figcaption { color: var(--ink-2); font-size: 15px; margin-top: 12px; }
+  figcaption b { color: var(--ink); }
+
+  /* tldr */
+  .tldr { padding: 22px 26px; border-left: 4px solid var(--blue); }
+  .tldr p { margin: 0; font-size: 18px; }
+
+  /* stats */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 24px; }
+  @media (max-width: 860px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { padding: 18px 18px 16px; }
+  .stat .num { font-size: 32px; font-weight: 700; color: var(--blue); line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .stat .lbl { color: var(--ink-2); font-size: 14.5px; margin-top: 6px; line-height: 1.4; }
+
+  /* problem vs ours */
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .duo { grid-template-columns: 1fr; } }
+  .duo .card { padding: 20px 22px; }
+  .tag { display: inline-block; font-size: 12.5px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+         padding: 2px 8px; border-radius: 6px; margin-bottom: 8px; }
+  .tag.o { color: var(--orange); background: var(--orange-bg); }
+  .tag.b { color: var(--blue); background: var(--blue-bg); }
+
+  /* steps */
+  .steps { display: grid; gap: 12px; }
+  .step { display: grid; grid-template-columns: 44px 1fr; gap: 14px; padding: 18px 20px; align-items: start; }
+  .step .n { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-weight: 700;
+             color: #fff; background: var(--ink-2); }
+  .step.lk .n { background: var(--blue); }
+  .step p { margin: 0 0 6px; color: var(--ink-2); }
+  .step .math { overflow-x: auto; color: var(--ink); }
+  .eqref { color: var(--muted); font-size: 14px; }
+
+  /* params */
+  table { width: 100%; border-collapse: collapse; font-size: 15.5px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 9px 12px; border-bottom: 1px solid var(--rule); text-align: left; }
+  th { color: var(--ink-2); font-weight: 600; font-size: 14px; }
+  td.r, th.r { text-align: right; }
+  tr:last-child td { border-bottom: none; }
+  td .best { font-weight: 700; color: var(--blue); }
+  .tablecard { padding: 6px 8px; overflow-x: auto; }
+  code, pre { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 14px; }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 5px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 860px) { .grid2 { grid-template-columns: 1fr; } }
+
+  details.more { margin-top: 14px; }
+  details.more summary { cursor: pointer; color: var(--blue); font-weight: 600; padding: 8px 0; }
+  details.more .grid2 { margin-top: 10px; }
+
+  pre.code { margin: 0; padding: 18px 20px; overflow-x: auto; background: var(--code-bg); border-radius: 12px;
+             border: 1px solid var(--rule); line-height: 1.55; }
+  .copy { float: right; border: 1px solid var(--rule-strong); background: var(--card); color: var(--ink-2); border-radius: 8px;
+          padding: 4px 10px; font: 600 13px "Source Sans 3", sans-serif; cursor: pointer; }
+  ul.lim { margin: 0; padding-left: 20px; color: var(--ink-2); }
+  ul.lim li { margin-bottom: 6px; }
+  footer { border-top: 1px solid var(--rule); padding: 28px 0 40px; color: var(--muted); font-size: 14.5px; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-github" viewBox="0 0 24 24"><path fill="currentColor" d="M12 .5a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.71 1.26 3.37.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.69 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.17 1.18a11 11 0 0 1 5.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.59.23 2.76.11 3.05.74.81 1.19 1.84 1.19 3.1 0 4.42-2.7 5.39-5.26 5.68.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .5Z"/></symbol>
+  <symbol id="i-paper" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></g></symbol>
+  <symbol id="i-quote" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M7 7h4v4c0 3-2 5-4 6M15 7h4v4c0 3-2 5-4 6"/></g></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/></g></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="4.5" cy="12" r="1.8" fill="currentColor"/><path d="M6 12c4 0 4-6 9-6h5M6 12h14M6 12c4 0 4 6 9 6h5"/></g></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3 2.5 8 12 13l9.5-5z"/><path d="m2.5 12 9.5 5 9.5-5M2.5 16l9.5 5 9.5-5"/></g></symbol>
+  <symbol id="i-chart" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></g></symbol>
+  <symbol id="i-gauge" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 18a9 9 0 1 1 16 0"/><path d="m12 14 4-5"/><circle cx="12" cy="14" r="1.3" fill="currentColor"/></g></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m10 9 5 3-5 3z" fill="currentColor"/></g></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3 2 20h20z" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01"/></g></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 9 3 3-3 3M13 15h4"/></g></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+</svg>
+
+<nav class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><svg width="20" height="20"><use href="#i-layers"/></svg>LORE-KV</a>
+    <div class="links">
+      <a href="#method">Method</a><a href="#results">Results</a><a href="#analysis">Analysis</a>
+      <a href="#cost">Cost</a><a href="#code">Code</a><a href="#citation">Citation</a>
+    </div>
+    <button id="theme" title="Toggle theme" aria-label="Toggle light or dark theme"><svg width="16" height="16"><use href="#i-moon"/></svg></button>
+  </div>
+</nav>
+
+<main id="top">
+<header class="hero wrap">
+  <span class="eyebrow"><span class="dot"></span>Training-free · KV-cache eviction · long-context LLMs</span>
+  <h1><span class="acr">LORE-KV</span>: Monte Carlo Estimation<br>for KV-Cache Eviction</h1>
+  <p class="expand"><b>L</b>ookahead <b>O</b>utput-perturbation with <b>R</b>eliability-weighted <b>E</b>nsembles for <b>K</b>ey-<b>V</b>alue caches</p>
+  <p class="tagline">Most eviction methods ask which memory looked important while <em>reading</em> the prompt.<br>LORE-KV asks which memory will matter while <em>answering</em>.</p>
+  <div class="buttons">
+    <a class="btn primary" href="https://github.com/AhsanBilal7/train_free_kv"><svg><use href="#i-github"/></svg>Code</a>
+    <a class="btn" href="#citation"><svg><use href="#i-paper"/></svg>Paper (under review, ICLR 2027)</a>
+    <a class="btn" href="#citation"><svg><use href="#i-quote"/></svg>BibTeX</a>
+  </div>
+</header>
+
+<section class="wrap" style="padding-top:8px">
+  <figure class="card panel">
+    <img src="assets/lorekv_architecture.svg" alt="LORE-KV pipeline: prefill, Monte Carlo lookahead, reliability weights, projected deletion score, eviction and decoding">
+  </figure>
+  <div class="card tldr" style="margin-top:14px">
+    <p><b>TL;DR.</b> Before evicting, LORE-KV samples a few short continuations from the frozen model, treats their
+    query states as Monte Carlo samples of the queries it will issue while answering, and keeps the tokens whose deletion
+    would most change the attention output under those queries. The continuations are discarded; nothing is trained.</p>
+  </div>
+  <div class="stats">
+    <div class="card stat"><div class="num">+2.75</div><div class="lbl">LongBench points on Qwen2.5-14B at <i>B</i>&nbsp;=&nbsp;128 (45.49 → 48.24)</div></div>
+    <div class="card stat"><div class="num">+5.85</div><div class="lbl">RULER-16K points on Mistral-7B at <i>B</i>&nbsp;=&nbsp;128 (45.20 → 51.05)</div></div>
+    <div class="card stat"><div class="num">+11.65</div><div class="lbl">RULER-128K points over AnDPro on Llama-3.1-8B at <i>B</i>&nbsp;=&nbsp;128</div></div>
+    <div class="card stat"><div class="num">1.5–1.6×</div><div class="lbl">less KV cache than AnDPro at equal LongBench accuracy (Mistral-7B)</div></div>
+  </div>
+</section>
+
+<section class="wrap" id="problem">
+  <h2><span class="ic"><svg><use href="#i-target"/></svg></span>The query-reference mismatch</h2>
+  <p class="lead">Eviction happens once, after prefill and before any answer token exists, so the queries that will
+  read the cache are unknown. What should a token's importance be measured against?</p>
+  <div class="duo">
+    <div class="card">
+      <span class="tag o">Prompt-side eviction</span>
+      <h3>Score with the last prompt queries $Q_W$</h3>
+      <p style="color:var(--ink-2)">SnapKV, Ada-KV, CriticalKV and AnDPro rank tokens by how the last $w$ prompt tokens
+      attend to them. When answer-time queries differ, tokens the answer needs are evicted, and the loss grows with the
+      mismatch.</p>
+    </div>
+    <div class="card">
+      <span class="tag b">LORE-KV</span>
+      <h3>Score with sampled answer-time queries</h3>
+      <p style="color:var(--ink-2)">Short continuations sampled from the model itself give a Monte Carlo estimate of the
+      queries it will issue. Tokens are ranked by the projected change of the attention output their deletion would
+      cause under those queries.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap" id="method">
+  <h2><span class="ic"><svg><use href="#i-branch"/></svg></span>Method</h2>
+  <p class="lead">Algorithm 1 of the paper. Steps 2-4 are a one-time test-time computation of $M\times T$ sampled
+  tokens and $w+MT$ scoring queries; decoding then runs on the compressed cache at the same cost as any method at
+  budget $B$.</p>
+  <div class="steps">
+    <div class="card step"><div class="n">1</div><div>
+      <h3>Prefill</h3>
+      <p>Run the prompt $X=(x_1,\dots,x_n)$ once, keeping the full cache $K,V$ and the window queries $Q_W$ of the
+      last $w=32$ tokens. The attention sink and the window form the protected set.</p></div></div>
+    <div class="card step lk"><div class="n">2</div><div>
+      <h3>Monte Carlo lookahead <span class="eqref">Eq. 1</span></h3>
+      <p>Sample $M$ continuations of $T$ tokens from the frozen model and record their query states:</p>
+      <div class="math">$$Y^{(m)}\sim f_\theta(\cdot\mid X),\qquad Q^{(m)}_{\mathrm{look}}=\{q^{(m)}_1,\dots,q^{(m)}_T\},\qquad m=1,\dots,M.$$</div></div></div>
+    <div class="card step lk"><div class="n">3</div><div>
+      <h3>Reliability weights <span class="eqref">Eqs. 2-4, 10</span></h3>
+      <p>The centered score separates how atypical a sampled token was from how uncertain its context was, and has zero
+      conditional mean. Trajectories are weighted softly:</p>
+      <div class="math">$$c_u=\log q(y_u\mid h_u)+H\big(q(\cdot\mid h_u)\big),\qquad R_m=\beta\,\bar c_m-\gamma\,\bar H_m-\lambda_D\,\hat D_m,\qquad \omega=\operatorname{softmax}(R),$$</div>
+      <p>where $\hat D_m$ is the standardized cosine disagreement of trajectory $m$'s queries with the others.
+      <b>LORE-KV /E</b> uses $(\beta,\gamma,\lambda_D)=(1,1.3,0)$, <b>LORE-KV /D</b> uses $(1,1,0.3)$.</p></div></div>
+    <div class="card step lk"><div class="n">4</div><div>
+      <h3>Projected deletion score <span class="eqref">Eqs. 5-7</span></h3>
+      <p>Removing token $i$ and renormalizing changes the attention output in closed form. Its impact is measured in the
+      residual stream through the head's output projection, then aggregated over the window and the weighted
+      trajectories:</p>
+      <div class="math">$$\Delta o_{q,i}=\frac{a_{q,i}}{1-a_{q,i}+\epsilon}\,(v_i-o_q),\qquad e_{q,i}=\big\|W_O\,\Delta o_{q,i}\big\|,\qquad S_i=\psi(E_{i,W})+\lambda_L\sum_{m=1}^{M}\omega_m\,\psi(E_{i,m}).$$</div></div></div>
+    <div class="card step"><div class="n">5</div><div>
+      <h3>Evict and decode <span class="eqref">Eq. 8</span></h3>
+      <p>Each KV head keeps the protected set and its top-$B$ tokens by $S_i$. The continuations are discarded, and the
+      answer is decoded greedily from the compressed cache.</p></div></div>
+  </div>
+
+  <h3 style="margin-top:30px">Walk-through</h3>
+  <figure class="card panel">
+    <img src="assets/lorekv_mechanism.gif" alt="Animated walk-through of LORE-KV on a toy prompt">
+    <figcaption>Schematic on a toy prompt (synthetic values): the window queries sit apart from the answer-time
+    queries, the sampled trajectories cover them, and the evidence tokens survive eviction.</figcaption>
+  </figure>
+
+  <h3 style="margin-top:30px">Hyperparameters</h3>
+  <div class="card tablecard">
+    <table>
+      <tr><th>Symbol</th><th>Meaning</th><th class="r">Default</th></tr>
+      <tr><td>$w$</td><td>prompt observation window</td><td class="r">32</td></tr>
+      <tr><td>$M,\,T$</td><td>lookahead trajectories, tokens per trajectory</td><td class="r">4, 8</td></tr>
+      <tr><td>$\lambda_L$</td><td>weight of the lookahead term in $S_i$</td><td class="r">1.0</td></tr>
+      <tr><td>$(\beta,\gamma,\lambda_D)$</td><td>reliability coefficients (/E; /D uses (1, 1, 0.3))</td><td class="r">(1, 1.3, 0)</td></tr>
+      <tr><td>$\epsilon$, chunk</td><td>renormalization guard, adjacent-token grouping</td><td class="r">$10^{-6}$, 4</td></tr>
+      <tr><td>$\alpha,\kappa,\tau,\lambda_k,\lambda_v$</td><td>plug-ins: robust aggregation, adaptive budgets, diversity selection</td><td class="r">off</td></tr>
+    </table>
+  </div>
+</section>
+
+<section class="wrap" id="results">
+  <h2><span class="ic"><svg><use href="#i-chart"/></svg></span>Results</h2>
+  <p class="lead">All methods share budgets, observation window, chunk size and selector, on four dense and two
+  hybrid-attention backbones. Gains are largest under tight budgets and shrink as the budget grows.</p>
+
+  <div class="card tablecard">
+    <table>
+      <tr><th>LongBench average, <i>B</i> = 128</th><th class="r">Full cache</th><th class="r">CriticalKV</th><th class="r">AnDPro</th><th class="r">LORE-KV /E</th><th class="r">LORE-KV /D</th></tr>
+      <tr><td>Mistral-7B-Instruct-v0.2</td><td class="r">42.51</td><td class="r">38.42</td><td class="r">38.96</td><td class="r"><span class="best">40.28</span></td><td class="r">40.21</td></tr>
+      <tr><td>Llama-3.1-8B-Instruct</td><td class="r">49.29</td><td class="r">44.62</td><td class="r">46.06</td><td class="r">46.11</td><td class="r"><span class="best">46.27</span></td></tr>
+      <tr><td>Qwen2.5-14B-Instruct</td><td class="r">49.37</td><td class="r">43.47</td><td class="r">45.49</td><td class="r">48.16</td><td class="r"><span class="best">48.24</span></td></tr>
+      <tr><td>Ministral-3-8B-Instruct-2512</td><td class="r">49.67</td><td class="r">44.79</td><td class="r">46.74</td><td class="r"><span class="best">47.30</span></td><td class="r">47.24</td></tr>
+      <tr><td>Qwen3.5-9B (hybrid)</td><td class="r">52.97</td><td class="r">46.30</td><td class="r">46.89</td><td class="r">48.49</td><td class="r"><span class="best">48.57</span></td></tr>
+      <tr><td>Gemma-4-12B-it (hybrid)</td><td class="r">27.27</td><td class="r">19.74</td><td class="r">20.21</td><td class="r">20.85</td><td class="r"><span class="best">20.93</span></td></tr>
+    </table>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <figure class="card panel"><img src="assets/paper/fig3_ruler.png" alt="RULER accuracy versus KV budget">
+      <figcaption><b>RULER, 4K-16K.</b> 13-task average versus budget for Mistral-7B (top) and Llama-3.1-8B (bottom).</figcaption></figure>
+    <figure class="card panel"><img src="assets/paper/fig2_kv_efficiency.png" alt="KV-cache efficiency at equal accuracy">
+      <figcaption><b>Equal-accuracy efficiency.</b> LORE-KV matches AnDPro's LongBench accuracy with 1.50-1.63× less cache.</figcaption></figure>
+  </div>
+
+  <h3 style="margin-top:30px">Long context: RULER at 64K and 128K</h3>
+  <div class="grid2">
+    <div class="card tablecard" style="align-self:start">
+      <table>
+        <tr><th>Llama-3.1-8B, <i>B</i> = 128</th><th class="r">64K</th><th class="r">128K</th></tr>
+        <tr><td>CriticalKV</td><td class="r">34.82</td><td class="r">30.28</td></tr>
+        <tr><td>AnDPro</td><td class="r">49.62</td><td class="r">39.40</td></tr>
+        <tr><td>LORE-KV /E</td><td class="r"><span class="best">57.75</span></td><td class="r"><span class="best">51.05</span></td></tr>
+        <tr><td>LORE-KV /D</td><td class="r">57.29</td><td class="r">51.04</td></tr>
+      </table>
+    </div>
+    <figure class="card panel"><img src="assets/paper/ruler_64k_128k.png" alt="RULER average versus context length up to 128K">
+      <figcaption>The margin over AnDPro grows with context length, from +4.21 at 4K to +11.65 at 128K.</figcaption></figure>
+  </div>
+</section>
+
+<section class="wrap" id="analysis">
+  <h2><span class="ic"><svg><use href="#i-layers"/></svg></span>Why it works</h2>
+  <p class="lead">Mechanism analyses use the deployed scoring code and, retrospectively, the queries the model really
+  issued while answering with the full cache.</p>
+  <figure class="card panel"><img src="assets/paper/fig1_montecarlo_queries.png" alt="Query states and coverage versus M">
+    <figcaption><b>Monte Carlo future-query estimation.</b> Sampled lookahead queries move toward the true answer-time
+    queries; coverage of those queries rises from 0.785 (prompt window) to 0.811 and saturates near <i>M</i> = 4.</figcaption></figure>
+  <div class="grid2" style="margin-top:14px">
+    <figure class="card panel"><img src="assets/paper/fig6_gain_vs_mismatch.png" alt="Gain versus mismatch">
+      <figcaption><b>Gain grows with mismatch.</b> Per-example gains in oracle recall and output fidelity increase with the prompt-to-future query mismatch.</figcaption></figure>
+    <figure class="card panel"><img src="assets/paper/fig5_output_fidelity.png" alt="Attention-output fidelity">
+      <figcaption><b>Output fidelity.</b> The retained cache reproduces full-cache attention outputs more closely (0.873 → 0.905 on LongBench).</figcaption></figure>
+  </div>
+  <details class="more">
+    <summary>More analyses</summary>
+    <div class="grid2">
+      <figure class="card panel"><img src="assets/paper/fig10_criterion_comparison.png" alt="Criterion comparison"><figcaption><b>Criterion comparison</b> against the future-query oracle.</figcaption></figure>
+      <figure class="card panel"><img src="assets/paper/fig9_retention_shift.png" alt="Retention-order shift"><figcaption><b>Retention-order shift</b>: about 20% of retained tokens change at <i>B</i> = 128.</figcaption></figure>
+      <figure class="card panel"><img src="assets/paper/fig11_token_classes.png" alt="Retention by token class"><figcaption><b>Token classes</b>: answer-bearing evidence is enriched.</figcaption></figure>
+      <figure class="card panel"><img src="assets/paper/fig12_layer_head.png" alt="Layer and head structure"><figcaption><b>Layers and heads</b>: the signal is spread across the network.</figcaption></figure>
+      <figure class="card panel"><img src="assets/paper/fig13_budget_equivalence.png" alt="Budget equivalence"><figcaption><b>Budget equivalence</b> under behavioral fidelity.</figcaption></figure>
+      <figure class="card panel"><img src="assets/paper/fig8_niah.png" alt="Needle in a haystack"><figcaption><b>Needle-in-a-haystack</b>, Llama-3.1-8B, <i>B</i> = 1024.</figcaption></figure>
+      <figure class="card panel"><img src="assets/paper/fig4_accuracy_memory.png" alt="Accuracy-memory trade-off"><figcaption><b>Accuracy-memory trade-off</b> against OBCache, CAOTE and Expected Attention.</figcaption></figure>
+    </div>
+  </details>
+</section>
+
+<section class="wrap" id="cost">
+  <h2><span class="ic"><svg><use href="#i-gauge"/></svg></span>Cost</h2>
+  <p class="lead">At a fixed budget every method has the same decoding memory and per-token cost. LORE-KV adds a one-time
+  lookahead and scoring step, 1.46-2.77× AnDPro's per-sample time; it stays ahead of AnDPro scoring the same
+  continuations at every matched lookahead-token budget.</p>
+  <div class="grid2">
+    <figure class="card panel"><img src="assets/paper/fig7_latency_quality.png" alt="Latency breakdown and quality versus latency">
+      <figcaption><b>Latency.</b> Stage-wise time per sample and quality versus total latency (Mistral-7B).</figcaption></figure>
+    <figure class="card panel"><img src="assets/paper/table13b_compute_pareto.png" alt="Matched lookahead-token budget">
+      <figcaption><b>Matched compute.</b> LongBench average versus lookahead tokens <i>M</i>×<i>T</i> at <i>B</i> = 128.</figcaption></figure>
+  </div>
+</section>
+
+<section class="wrap" id="code">
+  <h2><span class="ic"><svg><use href="#i-terminal"/></svg></span>Run it</h2>
+  <p class="lead">Every experiment is one config on one benchmark. See the repository README for installation and the
+  map from each table and figure to its config.</p>
+  <pre class="code"><code>git clone https://github.com/AhsanBilal7/train_free_kv.git lorekv &amp;&amp; cd lorekv
+uv venv --python 3.11 .venv &amp;&amp; source .venv/bin/activate
+uv sync &amp;&amp; make install
+
+# LORE-KV /E on LongBench with Mistral-7B, budgets 128-1024
+python scripts/sweep.py --benchmark LongBench --config config/lorekv-ent-unif-topk.conf</code></pre>
+</section>
+
+<section class="wrap" id="limitations">
+  <h2><span class="ic"><svg><use href="#i-alert"/></svg></span>Limitations</h2>
+  <ul class="lim">
+    <li>Every request pays a one-time lookahead and scoring overhead.</li>
+    <li>Eviction is irreversible, and cross-head and cross-layer interactions are not modeled.</li>
+    <li>Gains shrink at large budgets and coexist with task-level regressions.</li>
+    <li>On hybrid backbones the per-trajectory cache copy can exceed device memory at very long context.</li>
+  </ul>
+</section>
+
+<section class="wrap" id="citation">
+  <h2><span class="ic"><svg><use href="#i-quote"/></svg></span>Citation</h2>
+  <pre class="code"><button class="copy" id="copy">Copy</button><code id="bib">@inproceedings{lorekv2027,
+  title     = {Monte Carlo Estimation for {KV} Cache Eviction},
+  author    = {Anonymous},
+  booktitle = {Under review at the International Conference on Learning Representations},
+  year      = {2027}
+}</code></pre>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">LORE-KV builds on LLM-AnDPro and AdaKV; evaluation follows LongBench, RULER and Needle-in-a-Haystack.
+  Code released under the MIT license.</div>
+</footer>
+
+<script>
+  (function () {
+    var root = document.documentElement, key = "lorekv-theme";
+    try { var saved = localStorage.getItem(key); if (saved) root.setAttribute("data-theme", saved); } catch (e) {}
+    document.getElementById("theme").addEventListener("click", function () {
+      var dark = root.getAttribute("data-theme") === "dark" ||
+        (!root.getAttribute("data-theme") && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      var next = dark ? "light" : "dark";
+      root.setAttribute("data-theme", next);
+      try { localStorage.setItem(key, next); } catch (e) {}
+    });
+    document.getElementById("copy").addEventListener("click", function () {
+      var b = this;
+      navigator.clipboard.writeText(document.getElementById("bib").textContent).then(function () {
+        b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1500);
+      });
+    });
+  })();
+</script>
+</body>
+</html>
