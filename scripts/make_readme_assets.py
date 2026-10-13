@@ -149,15 +149,33 @@ def _card(fig, rect, title=None):
     return ax
 
 
-def mechanism_gif():
-    """Make the animation of Algorithm 1 on a toy prompt."""
+def _ease(p):
+    """Return the smoothstep of ``p`` in [0, 1]."""
+    p = min(max(p, 0.0), 1.0)
+    return p * p * (3 - 2 * p)
+
+
+def _mix(c0, c1, p):
+    """Mix two hex colors."""
+    a = np.array(matplotlib.colors.to_rgb(c0))
+    b = np.array(matplotlib.colors.to_rgb(c1))
+    return tuple(a + (b - a) * p)
+
+
+def mechanism_gif(frames_per_step=12, hold_frames=15, frame_ms=45):
+    """Make the animation of Algorithm 1 on a toy prompt.
+
+    Each of the seven steps has an eased transition of ``frames_per_step`` frames
+    and a hold of ``hold_frames`` frames.
+    """
     rng = np.random.default_rng(3)
     n, M, B = 40, 4, 12
     window = list(range(n - 4, n))
-    evidence = [9, 10, 22, 23]                       # tokens the answer will need
-    prompt_q = rng.normal([-1.6, -0.6], 0.25, (8, 2))
-    future_q = rng.normal([1.0, 0.7], 0.35, (10, 2))
-    trajs = [rng.normal([0.9 + 0.25 * np.cos(k), 0.6 + 0.25 * np.sin(k)], 0.33, (6, 2))
+    evidence = [9, 10, 22, 23]
+    prompt_q = rng.normal([-1.6, -0.6], 0.22, (8, 2))
+    future_q = rng.normal([1.0, 0.7], 0.32, (10, 2))
+    origin = prompt_q.mean(0)
+    trajs = [rng.normal([0.9 + 0.25 * np.cos(k), 0.6 + 0.25 * np.sin(k)], 0.3, (6, 2))
              for k in range(M)]
     weights = np.array([0.31, 0.27, 0.24, 0.18])
     s_prompt = rng.uniform(0.05, 0.35, n)
@@ -165,143 +183,167 @@ def mechanism_gif():
     s_look = rng.uniform(0.05, 0.3, n)
     s_look[evidence] = [0.9, 0.85, 0.95, 0.8]
     s_total = s_prompt + s_look
-
-    def keep_set(score):
-        cand = [i for i in range(1, n) if i not in window]
-        top = sorted(cand, key=lambda i: -score[i])[: B - 1 - len(window)]
-        return set([0] + window + top)
-
-    keep_prompt, keep_lorekv = keep_set(s_prompt), keep_set(s_total)
+    cand = [i for i in range(1, n) if i not in window]
+    top = sorted(cand, key=lambda i: -s_total[i])[: B - 1 - len(window)]
+    keep = set([0] + window + top)
+    keep_w = set([0] + window + sorted(cand, key=lambda i: -s_prompt[i])[: B - 1 - len(window)])
+    thr = min(s_total[i] for i in top) - 0.02
     steps = [
-        ("Prefill", "keep the full KV cache and the last-window queries $Q_W$"),
+        ("Prefill", "keep the full KV cache and the window queries $Q_W$"),
         ("Monte Carlo lookahead", "sample $M$ short continuations from the frozen model"),
-        ("Coverage", "their queries land where the answer-time queries live; $Q_W$ does not"),
-        ("Reliability weights", "weight each trajectory by $\\omega_m=\\mathrm{softmax}(R)_m$"),
-        ("Projected deletion score", "score each token under the window and all trajectories"),
-        ("Select", "keep the top-$B$ tokens per head; the evidence survives"),
-        ("Evict and decode", "discard the continuations and decode from the compressed cache"),
+        ("Coverage", "the sampled queries cover the answer-time queries"),
+        ("Reliability weights", r"$\omega=\mathrm{softmax}(\beta\bar c-\gamma\bar H-\lambda_D\hat D)$"),
+        ("Projected deletion score", r"$S_i=\psi(E_{i,W})+\lambda_L\sum_m\omega_m\psi(E_{i,m})$"),
+        ("Select", "keep the top-$B$ tokens of each head"),
+        ("Evict and decode", "discard the continuations; decode from the compressed cache"),
     ]
+    n_steps = len(steps)
 
-    def frame(step):
+    def draw(step, p):
+        e = _ease(p)
         fig = plt.figure(figsize=(9.6, 5.0))
         fig.patch.set_facecolor(SURFACE)
-        # header: numbered badge, title, subtitle, progress dots
-        badge = BLUE if 1 <= step <= 4 else INK_2
-        fig.text(0.035, 0.915, str(step + 1), fontsize=12, color="white", weight="bold",
-                 ha="center", va="center",
-                 bbox=dict(boxstyle="circle,pad=0.32", fc=badge, ec=badge))
-        fig.text(0.065, 0.915, steps[step][0], fontsize=16, color=INK, weight="bold", va="center")
-        fig.text(0.065, 0.858, steps[step][1], fontsize=11.5, color=INK_2, va="center")
-        for k in range(len(steps)):
-            fig.patches.append(FancyBboxPatch((0.78 + k * 0.03, 0.905), 0.02, 0.02,
-                                              boxstyle="round,pad=0,rounding_size=0.01",
-                                              transform=fig.transFigure, lw=0,
-                                              fc=badge if k == step else RULE))
-        fig.text(0.97, 0.035, "schematic: toy prompt, synthetic values", fontsize=8.5,
-                 color=MUTED, ha="right")
-        fig.text(0.03, 0.035, "LORE-KV", fontsize=9, color=MUTED, weight="bold")
+        accent = BLUE if 1 <= step <= 4 else INK_2
+        # progress bar
+        prog = (step + p) / n_steps
+        fig.patches.append(FancyBboxPatch((0.03, 0.965), 0.94, 0.006, boxstyle="square,pad=0",
+                                          transform=fig.transFigure, fc=RULE, lw=0))
+        fig.patches.append(FancyBboxPatch((0.03, 0.965), 0.94 * prog, 0.006, boxstyle="square,pad=0",
+                                          transform=fig.transFigure, fc=BLUE, lw=0))
+        fig.text(0.035, 0.895, str(step + 1), fontsize=12, color="white", weight="bold",
+                 ha="center", va="center", bbox=dict(boxstyle="circle,pad=0.32", fc=accent, ec=accent))
+        fig.text(0.065, 0.895, steps[step][0], fontsize=16, color=INK, weight="bold", va="center")
+        fig.text(0.065, 0.84, steps[step][1], fontsize=11.5, color=INK_2, va="center")
+        fig.text(0.97, 0.895, "LORE-KV", fontsize=11, color=MUTED, weight="bold", ha="right", va="center")
+        fig.text(0.97, 0.035, "schematic, synthetic values", fontsize=8.5, color=MUTED, ha="right")
 
-        # token strip card
-        ax = _card(fig, (0.03, 0.6, 0.94, 0.2), "prompt KV cache")
+        # token strip
+        ax = _card(fig, (0.03, 0.585, 0.94, 0.2), "prompt KV cache")
         ax.set_xlim(-0.6, n - 0.4)
         ax.set_ylim(0, 1.5)
         ax.axis("off")
         for i in range(n):
-            fc, ec = "#ecebe6", "#ecebe6"
-            if i in window or i == 0:
-                fc = ec = "#ffd9c9" if step < 5 else fc
+            base = "#ecebe6"
+            win = "#ffd9c9" if (i in window or i == 0) else base
+            fc = _mix(base, win, e if step == 0 else 1.0)
+            ec = fc
             if step >= 5:
-                if i in keep_lorekv:
-                    fc = ec = BLUE if i not in window and i != 0 else "#a9c9f1"
+                q = e if step == 5 else 1.0
+                if i in keep:
+                    target = BLUE if (i not in window and i != 0) else "#a9c9f1"
+                    fc = ec = _mix(fc, target, q)
                 else:
-                    fc, ec = CARD, RULE
+                    fc = _mix(fc, CARD, q)
+                    ec = _mix(fc, RULE, q)
             ax.add_patch(FancyBboxPatch((i - 0.4, 0.15), 0.8, 0.75,
                                         boxstyle="round,pad=0,rounding_size=0.14", fc=fc, ec=ec, lw=1))
             if i in evidence:
                 ax.plot(i, 1.12, marker="v", ms=6, color=AQUA)
         ax.text(evidence[0] - 0.8, 1.12, "evidence", fontsize=9, color=AQUA, ha="right", va="center")
-        ax.text(n - 4.4, 1.32, "window $W$", fontsize=9, color=ORANGE if step < 5 else INK_2)
+        ax.text(n - 2.5, 1.12, "window $W$", fontsize=9, color=ORANGE if step < 5 else INK_2,
+                ha="center", va="center")
 
-        # query-space card
+        # query space
         ax2 = _card(fig, (0.03, 0.08, 0.44, 0.48), "query space (2-D projection)")
         ax2.set_xlim(-2.6, 2.4)
         ax2.set_ylim(-1.5, 1.7)
         ax2.axis("off")
-        ax2.scatter(*prompt_q.T, s=34, color=ORANGE, label="prompt window $Q_W$", zorder=3,
-                    edgecolor=CARD, lw=0.8)
+        a0 = e if step == 0 else 1.0
+        ax2.scatter(*prompt_q.T, s=34, color=ORANGE, alpha=a0, edgecolor=CARD, lw=0.8, zorder=3,
+                    label="window $Q_W$")
         if step >= 2:
-            ax2.scatter(*future_q.T, s=95, marker="*", color=AQUA, label="answer-time queries",
-                        zorder=4, edgecolor=CARD, lw=0.5)
+            ax2.scatter(*future_q.T, s=95, marker="*", color=AQUA, alpha=e if step == 2 else 1.0,
+                        edgecolor=CARD, lw=0.5, zorder=4, label="answer-time queries")
         if step >= 1:
+            move = e if step == 1 else 1.0
             for m, t in enumerate(trajs):
-                size = 30 if step < 3 else 30 + 140 * weights[m]
-                ax2.scatter(*t.T, s=size, color=BLUE, alpha=0.4 + 0.12 * (m == 0), edgecolor=CARD,
-                            lw=0.6, label="lookahead $Q_{\\mathrm{look}}$" if m == 0 else None, zorder=2)
+                pts = origin + (t - origin) * move
+                w_scale = (e if step == 3 else (1.0 if step > 3 else 0.0))
+                size = 30 + 140 * weights[m] * w_scale
+                ax2.scatter(*pts.T, s=size, color=BLUE, alpha=0.45, edgecolor=CARD, lw=0.6, zorder=2,
+                            label="lookahead $Q_{\\mathrm{look}}$" if m == 0 else None)
         ax2.legend(loc="lower right", fontsize=9, frameon=False, labelcolor=INK_2)
 
-        # right card: trajectories / weights / scores / outcome
-        title = {0: "decoding has not started", 1: "trajectories", 2: "trajectories",
-                 3: "reliability weights", 4: "token scores $S_i$", 5: "token scores $S_i$",
-                 6: "outcome"}[step]
+        # right panel
+        title = ["decoding has not started", "continuations", "continuations", "trajectory weights",
+                 "token scores", "token scores", "outcome"][step]
         ax3 = _card(fig, (0.5, 0.08, 0.47, 0.48), title)
         for s_ in ("top", "right"):
             ax3.spines[s_].set_visible(False)
-        if step <= 2:
+        if step == 0:
             ax3.axis("off")
-            if step == 0:
-                ax3.text(0.5, 0.5, "the future queries are unknown\nat eviction time", ha="center",
-                         va="center", fontsize=12, color=MUTED, transform=ax3.transAxes)
+            ax3.text(0.5, 0.5, "answer-time queries are\nunknown at eviction time", ha="center",
+                     va="center", fontsize=12.5, color=MUTED, transform=ax3.transAxes, alpha=e)
+        elif step in (1, 2):
+            ax3.axis("off")
             ys = np.linspace(0.82, 0.18, M)
-            for m in range(M if step >= 1 else 0):
+            shown = 6 * M * (e if step == 1 else 1.0)
+            for m in range(M):
                 ax3.text(0.0, ys[m], f"$y^{{({m + 1})}}$", fontsize=13, color=BLUE, va="center",
                          transform=ax3.transAxes)
                 for t in range(6):
+                    k = t * M + m
+                    if k >= shown:
+                        continue
                     ax3.add_patch(FancyBboxPatch((0.12 + t * 0.14, ys[m] - 0.055), 0.115, 0.11,
                                                  boxstyle="round,pad=0,rounding_size=0.025",
                                                  fc=BLUE_BG, ec=BLUE, lw=0.8, transform=ax3.transAxes))
         elif step == 3:
-            ax3.barh(np.arange(M)[::-1], weights, color=BLUE, height=0.5)
+            ax3.barh(np.arange(M)[::-1], weights * e, color=BLUE, height=0.5)
             ax3.set_yticks(np.arange(M)[::-1], [f"$y^{{({m + 1})}}$" for m in range(M)])
             for m, w in enumerate(weights):
-                ax3.text(w + 0.006, M - 1 - m, f"{w:.2f}", va="center", fontsize=10, color=INK_2)
-            ax3.set_xlabel(r"$\omega_m$")
+                ax3.text(w * e + 0.006, M - 1 - m, f"{w * e:.2f}", va="center", fontsize=10, color=INK_2)
             ax3.set_xlim(0, 0.4)
+            ax3.set_xlabel(r"$\omega_m$")
         elif step in (4, 5):
             x = np.arange(n)
-            ax3.bar(x, s_prompt, color=ORANGE, width=0.78, label=r"$\psi(E_{i,W})$")
-            ax3.bar(x, s_look, bottom=s_prompt, color=BLUE, width=0.78,
+            g = e if step == 4 else 1.0
+            ax3.bar(x, s_prompt * g, color=ORANGE, width=0.78, label=r"$\psi(E_{i,W})$")
+            ax3.bar(x, s_look * g, bottom=s_prompt * g, color=BLUE, width=0.78,
                     label=r"$\lambda_L\sum_m\omega_m\psi(E_{i,m})$")
             if step == 5:
-                thr = min(s_total[i] for i in keep_lorekv if i not in window and i != 0)
-                ax3.axhline(thr - 0.02, color=INK_2, lw=1, ls="--")
-                ax3.text(n - 1, thr + 0.03, "top-$B$", ha="right", fontsize=9.5, color=INK_2)
+                y = 1.25 + (thr - 1.25) * e
+                ax3.axhline(y, color=INK_2, lw=1, ls="--")
+                ax3.text(n - 1, y + 0.03, "top-$B$", ha="right", fontsize=9.5, color=INK_2)
             ax3.set_xlim(-1, n)
             ax3.set_ylim(0, 1.3)
             ax3.set_xticks([])
             ax3.legend(loc="upper left", ncol=2, fontsize=9, frameon=False, labelcolor=INK_2)
         else:
             ax3.axis("off")
-            kept = len([e for e in evidence if e in keep_lorekv])
-            kept_w = len([e for e in evidence if e in keep_prompt])
-            rows = [("compressed cache", "$B$ tokens per head"),
-                    ("continuations", "discarded"),
-                    ("evidence kept, LORE-KV", f"{kept} / 4"),
-                    ("evidence kept, prompt window only", f"{kept_w} / 4")]
-            for k, (a, b) in enumerate(rows):
+            rows = [("compressed cache", "$B$ tokens per head", INK),
+                    ("continuations", "discarded", INK),
+                    ("evidence kept, LORE-KV", f"{len([v for v in evidence if v in keep])} / 4", BLUE),
+                    ("evidence kept, window only", f"{len([v for v in evidence if v in keep_w])} / 4", ORANGE)]
+            for k, (a, b, col) in enumerate(rows):
+                alpha = _ease(e * 1.6 - k * 0.2)
                 y = 0.82 - 0.2 * k
-                ax3.text(0.02, y, a, fontsize=12, color=INK_2, transform=ax3.transAxes)
-                ax3.text(0.98, y, b, fontsize=12, ha="right", transform=ax3.transAxes,
-                         color=BLUE if k == 2 else (ORANGE if k == 3 else INK), weight="bold")
+                ax3.text(0.02, y, a, fontsize=12, color=INK_2, alpha=alpha, transform=ax3.transAxes)
+                ax3.text(0.98, y, b, fontsize=12, ha="right", color=col, weight="bold", alpha=alpha,
+                         transform=ax3.transAxes)
         buf = io.BytesIO()
-        fig.savefig(buf, dpi=110, format="png")
+        fig.savefig(buf, dpi=100, format="png")
         plt.close(fig)
         buf.seek(0)
-        return Image.open(buf).convert("P", palette=Image.ADAPTIVE, colors=160)
+        return Image.open(buf).convert("RGB")
 
-    frames = [frame(k) for k in range(len(steps))]
+    rgb = []
+    for step in range(n_steps):
+        for k in range(frames_per_step):
+            rgb.append(draw(step, (k + 1) / frames_per_step))
+        rgb += [rgb[-1]] * (hold_frames - 1)
+    # One shared palette keeps colors stable between frames (no flicker).
+    sample = rgb[::6]
+    sheet = Image.new("RGB", (sample[0].width, sample[0].height * len(sample)))
+    for k, im in enumerate(sample):
+        sheet.paste(im, (0, k * im.height))
+    pal = sheet.quantize(colors=160, method=Image.Quantize.MEDIANCUT)
+    frames = [im.quantize(palette=pal, dither=Image.Dither.NONE) for im in rgb]
+    durations = [frame_ms] * len(frames)
+    durations[-1] = 1500
     frames[0].save(os.path.join(OUT, "lorekv_mechanism.gif"), save_all=True,
-                   append_images=frames[1:], duration=[2200] * (len(frames) - 1) + [3600],
-                   loop=0, optimize=True)
+                   append_images=frames[1:], duration=durations, loop=0, optimize=True,
+                   disposal=1)
 
 
 def main():

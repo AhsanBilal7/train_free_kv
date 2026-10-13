@@ -8,7 +8,6 @@
 LORE-KV asks which memory will matter while answering.*
 
 <p>
-  <a href="https://ahsanbilal7.github.io/train_free_kv/"><img alt="Project page" src="https://img.shields.io/badge/%F0%9F%8C%90_project-page-2a78d6?style=flat-square"></a>
   <img alt="Training-free" src="https://img.shields.io/badge/%E2%9A%A1_training-free-1baf7a?style=flat-square">
   <img alt="Python 3.11" src="https://img.shields.io/badge/python-3.11-3776ab?style=flat-square&logo=python&logoColor=white">
   <img alt="PyTorch 2.1" src="https://img.shields.io/badge/pytorch-2.1-ee4c2c?style=flat-square&logo=pytorch&logoColor=white">
@@ -16,7 +15,7 @@ LORE-KV asks which memory will matter while answering.*
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-52514e?style=flat-square">
 </p>
 
-🌐 [Project page](https://ahsanbilal7.github.io/train_free_kv/) · 🧭 [Method](#-method) · 📊 [Results](#-results) · ⚙️ [Installation](#%EF%B8%8F-installation) · 🚀 [Quick start](#-quick-start) · 🔁 [Reproducing the paper](#-reproducing-the-paper) · 📚 [Citation](#-citation)
+🧭 [Method](#-method) · 📊 [Results](#-results) · ⚙️ [Installation](#%EF%B8%8F-installation) · 🚀 [Quick start](#-quick-start) · 🔁 [Reproducing the paper](#-reproducing-the-paper) · 📚 [Citation](#-citation)
 
 </div>
 
@@ -170,7 +169,7 @@ Two environments are used: transformers 4.44 for the dense backbones and transfo
 hybrid-attention ones. Both need an NVIDIA GPU with compute capability 8.0 or 9.0 (A100, H100) and CUDA 12.
 
 ```bash
-git clone https://github.com/AhsanBilal7/train_free_kv.git lorekv && cd lorekv
+git clone <repository-url> lorekv && cd lorekv
 
 # Dense backbones: Mistral-7B, Llama-3.1-8B, Qwen2.5-14B, Ministral-3-8B
 uv venv --python 3.11 .venv && source .venv/bin/activate
