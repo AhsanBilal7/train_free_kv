@@ -315,7 +315,7 @@ Report it as a switch, not a default — test **V5** below decides whether it ea
 is centered against. We sample at `LOOKAHEAD_TEMPERATURE=1.0` with no truncation, so
 `q = p_theta` and the identity is exact. If you add top-k / top-p / a different
 temperature, the statistics must be computed from the **same shaped logits the sampler
-consumed** — which is what `snapkv_utils.step_stats()` does. Centering a truncated
+consumed** — which is what `scoring.step_stats()` does. Centering a truncated
 sample against the untruncated `p_theta` makes `E[c_u] > 0`: a silent positive bias with
 no other visible symptom. Test **V1** catches it.
 

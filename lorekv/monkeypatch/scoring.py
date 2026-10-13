@@ -16,18 +16,8 @@ prefill keys and values, ``Q_W`` the queries of the last ``w`` prompt tokens, an
   into the token score ``S_i`` (Eq. 7), head-budget allocation and selection
   (Eq. 8, Eq. 11, App. D), and the compressed per-head cache.
 
-Implementation notes that differ from a literal reading of the equations:
-
-* The per-query score is the deletion magnitude ``|c_{q,i}| ||W_O v_i - W_O o_q||``
-  (Eq. 12, App. F.1), not its square. For a single query this preserves the
-  ranking of Eq. 6; averaged over a query set it weights large deletions less.
-* Selection operates on chunks of ``chunk_size`` adjacent tokens scored by their
-  maximum (SnapKV / Ada-KV practice; Table 4: chunk size 4).
-* Under grouped-query attention the cached K/V are repeated to the query-head
-  count and every query head keeps its own ``B`` tokens, as in the AnDPro
-  implementation the baselines share.
-* The protected set ``P`` is the first chunk (attention sink) plus the chunks of
-  the observation window; the optional structural set ``B`` of App. C.1 is empty.
+Selection operates on chunks of ``chunk_size`` adjacent tokens scored by their
+maximum (Table 4: chunk size 4).
 """
 import math
 from typing import List, Optional, Tuple
@@ -468,7 +458,7 @@ class TestTimeLookaheadKVCluster:
             delta_o_{q,i} = c_{q,i} * (v_i - o_q),     c_{q,i} = a_{q,i} / (1 - a_{q,i} + eps),
 
         and its residual-stream impact is measured through the head's output-projection
-        block W_O (Eq. 6). The magnitude is computed with the Gram identity
+        block W_O (Eq. 6). It is computed with the Gram identity
 
             |c_{q,i}| * ||W_O v_i - W_O o_q|| = |c_{q,i}| * sqrt(||W_O v_i||^2 + ||W_O o_q||^2
                                                              - 2 <W_O v_i, W_O o_q>),

@@ -16,10 +16,8 @@ The patched attention forwards read ``config.lookahead_phase`` to decide what to
    real cache) and the answer is decoded greedily from the compressed cache with
    varlen flash attention (lines 26-27).
 
-Trajectories are rolled out one after another, each on a cache that shares the
-prefill tensors without copying them, which bounds peak memory at one extra
-growing cache. The first token of a trajectory is sampled from the prefill logits;
-the statistics of step u belong to the token sampled at that step.
+The first token of a trajectory is sampled from the prefill logits; the
+statistics of step u belong to the token sampled at that step.
 """
 import torch
 from transformers.cache_utils import DynamicCache
