@@ -1,25 +1,19 @@
 #!/usr/bin/env python
-"""Emit the LaTeX for the two appendix ablations that are not in the main tables.
+"""Write the LaTeX of the appendix ablation tables.
 
-  (i)  score objective -- projected (default) vs attention vs unprojected, at each
-       budget, over all 16 datasets.
-  (ii) lookahead geometry -- particles M x lookahead length T at B=128, as a
-       compact matrix of row averages, which is the useful granularity for a 25
-       cell sweep.
-  (iii) the two new backbones -- Qwen2.5-14B and Ministral-3-8B -- as full
-       16-dataset x 4-budget tables, generated with longbench_table.emit() so they
-       agree cell-for-cell with the paper's tab:longbench_<backbone>. Labels here
-       are tab:new_backbone_* to avoid a duplicate \label if both files are
-       included in one document.
+Tables:
+    (i) Score objective: projected (default), attention and unprojected, for each
+        budget and the 16 datasets.
+    (ii) Lookahead geometry: the M x T matrix of averages at B = 128.
+    (iii) The Qwen2.5-14B and Ministral-3-8B tables, made with
+        ``longbench_table.emit()``. Their labels are ``tab:new_backbone_*``.
 
-Scoring, the \\tbd convention and the \\best/\\second markup are reused from
-scripts/longbench_table.py rather than reimplemented, so a number in an appendix
-table is produced by exactly the same code path as the same number in a main
-table. As there, scores are recomputed from the .jsonl files instead of read from
-result.json, which can be stale for a run still in flight.
+The scoring, \\tbd and the \\best / \\second marks come from
+``scripts/longbench_table.py``. The scores come from the ``.jsonl`` files.
 
-Usage:
-    python scripts/longbench_ablations.py                        # LaTeX to stdout
+Usage::
+
+    python scripts/longbench_ablations.py                  # LaTeX to stdout
     python scripts/longbench_ablations.py --out ablations.tex
 """
 
@@ -73,13 +67,10 @@ def objective_table(pred_root, model_tag, no_highlight=False):
 
 
 def geometry_table(pred_root, model_tag):
-    """M x T matrix of row averages at B=128.
+    """Return the M x T matrix of averages at B = 128.
 
-    A cell is the mean over all 16 datasets, or \\tbd when the run has not
-    finished all of them -- the same rule fmt() applies to a row average, for the
-    same reason: an average over whichever subset happens to be done is not
-    comparable with one over the full suite, and silently mixing the two is how a
-    sweep ends up telling you the wrong thing about its own trend.
+    A cell is the mean over the 16 datasets, or \\tbd if the run does not have all of
+    them.
     """
     lines = [r"\toprule",
              r"$M$ & " + " & ".join(r"$T=%d$" % t for t in LOOKAHEADS) + r" \\",

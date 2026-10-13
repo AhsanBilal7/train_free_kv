@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Average prompt length and per-sample wall-clock time over finished runs (Table 3).
+"""Mean prompt length and time per sample of finished runs (paper Table 3).
 
-For every (benchmark, config, budget) this locates the run folder that
-``scripts/sweep.py`` writes for that config (names come from ``run_naming.py``),
-reads each per-dataset ``*.jsonl`` and averages the ``length`` and ``time`` fields
-that every ``pred.py`` stores per sample. ``time`` covers prefill, the LORE-KV
-lookahead and scoring, and decoding, i.e. the per-sample latency of Table 3.
+For each benchmark, config and budget the script finds the run folder that
+``scripts/sweep.py`` writes. It reads each ``*.jsonl`` and averages the
+``length`` and ``time`` fields of the samples. ``time`` includes the prefill, the
+LORE-KV lookahead and scoring, and the decoding.
 
 Usage::
 
-    python scripts/report_length_time.py                              # defaults below
-    python scripts/report_length_time.py --benchmarks NIAH RULER \
+    python scripts/report_length_time.py
+    python scripts/report_length_time.py --benchmarks NIAH RULER \\
         --configs andpro critical --budgets 128 1024
-    python scripts/report_length_time.py --include-partial            # in-flight runs
+    python scripts/report_length_time.py --include-partial      # unfinished runs
 
-Writes ``reports/length_time_per_dataset.csv`` and ``reports/length_time_summary.csv``.
+The script writes ``reports/length_time_per_dataset.csv`` and
+``reports/length_time_summary.csv``.
 """
 
 import argparse
@@ -47,21 +47,21 @@ DEFAULTS["MODEL_PATH"] = "mistralai/Mistral-7B-Instruct-v0.2"
 
 
 def conf_get(conf, key):
+    """Return the config value of ``key`` or its default."""
     return conf.get(key) or DEFAULTS[key]
 
 
 def first(value):
-    """A sweep list ('128 256 512') collapses to its first element."""
+    """Return the first value of a sweep list ('128 256 512' -> '128')."""
     parts = str(value).split()
     return parts[0] if parts else ""
 
 
 def out_names(conf, budget, niah_multi=False, legacy=True):
-    """Candidate run-folder names for one config and budget, most preferred first.
+    """Return the possible run-folder names of one config and budget, best first.
 
-    Baseline folders written by older versions of the repository carry a
-    ``_red_0.0`` suffix; that spelling is offered as a fallback unless ``legacy``
-    is False.
+    For a baseline the second name has the older suffix ``_red_0.0``, unless
+    ``legacy`` is False.
     """
     g = lambda k: first(conf.get(k) or DEFAULTS[k])  # noqa: E731
     mode = g("MODE")
@@ -109,7 +109,7 @@ def mean(values):
 
 
 def summarize_file(path, status):
-    """Per-dataset stats for one <dataset>.jsonl."""
+    """Return the statistics of one ``<dataset>.jsonl``."""
     rows = read_jsonl(path)
     if not rows:
         return None
@@ -144,7 +144,7 @@ def summarize_file(path, status):
 
 
 def dataset_files(run_dir, include_partial):
-    """Map dataset name -> (file path, status), preferring finished .jsonl."""
+    """Return ``{dataset: (path, status)}``. A finished ``.jsonl`` has priority."""
     found = OrderedDict()
     for entry in sorted(os.listdir(run_dir)):
         if entry.endswith(".jsonl"):

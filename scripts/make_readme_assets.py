@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Build the README and project-page figures into ``assets/``.
+"""Make the README and project-page figures in ``assets/``.
+
+Usage::
 
     python scripts/make_readme_assets.py [--figures-dir figures_combined]
 
-Outputs
+Outputs:
+    lorekv_architecture.{svg,png}: The method overview, from the TikZ source
+        ``assets/src/lorekv_architecture.tex``. Requires ``tectonic`` (or
+        ``pdflatex``) and PyMuPDF. The step is skipped if one is missing.
+    lorekv_mechanism.gif: An animation of Algorithm 1 on a toy prompt. The tokens,
+        queries and scores are synthetic, and the figure shows this.
+    paper/*.png: The figures of the paper, made from the PDFs in
+        ``--figures-dir`` (``figures_combined``, which is not in the repository).
+        The step is skipped if the folder is missing.
 
-* ``lorekv_architecture.{svg,png}`` -- the method overview, drawn in TikZ from
-  ``assets/src/lorekv_architecture.tex``. Needs ``tectonic`` (or ``pdflatex``) and
-  PyMuPDF; skipped with a message if either is missing.
-* ``lorekv_mechanism.gif`` -- an animated walk-through of Algorithm 1 on a toy
-  prompt. Its tokens, queries and scores are synthetic and labelled as such.
-* ``paper/*.png`` -- figures of the paper, rasterized from the PDFs in
-  ``--figures-dir`` (the paper's ``figures_combined`` folder, which is not part of
-  the repository). Skipped if the folder is absent.
-
-Set ``FONT_DIR`` to a directory with Source Sans 3 TTF files to typeset the GIF in
-the same face as the architecture figure; otherwise matplotlib's default is used.
+Set ``FONT_DIR`` to a directory with the Source Sans 3 TTF files to use the font of
+the architecture figure in the GIF.
 """
 from __future__ import annotations
 
@@ -72,6 +73,7 @@ PAPER_FIGURES = {
 
 
 def _setup_fonts():
+    """Set the matplotlib font and colors."""
     font_dir = os.environ.get("FONT_DIR")
     family = "DejaVu Sans"
     if font_dir and glob.glob(os.path.join(font_dir, "SourceSans3-*.ttf")):
@@ -88,7 +90,7 @@ def _setup_fonts():
 
 # ------------------------------------------------------------------ architecture
 def architecture():
-    """Compile the TikZ source and export it as SVG and PNG."""
+    """Compile the TikZ source and write the figure as SVG and PNG."""
     tex = os.path.join(OUT, "src", "lorekv_architecture.tex")
     engine = shutil.which("tectonic") or os.environ.get("TECTONIC") or shutil.which("pdflatex")
     try:
@@ -112,6 +114,7 @@ def architecture():
 
 # --------------------------------------------------------------------- paper figures
 def paper_figures(figures_dir):
+    """Convert the selected paper PDFs to PNG files in ``assets/paper``."""
     try:
         import pymupdf
     except ImportError:
@@ -134,7 +137,7 @@ def paper_figures(figures_dir):
 
 # ------------------------------------------------------------------------ mechanism
 def _card(fig, rect, title=None):
-    """A white rounded card on the page surface; returns an axes inside it."""
+    """Draw a white card with rounded corners and return an axes inside it."""
     x, y, w, h = rect
     fig.patches.append(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0,rounding_size=0.012",
                                       transform=fig.transFigure, fc=CARD, ec=RULE, lw=0.8,
@@ -147,6 +150,7 @@ def _card(fig, rect, title=None):
 
 
 def mechanism_gif():
+    """Make the animation of Algorithm 1 on a toy prompt."""
     rng = np.random.default_rng(3)
     n, M, B = 40, 4, 12
     window = list(range(n - 4, n))
@@ -301,6 +305,7 @@ def mechanism_gif():
 
 
 def main():
+    """Make all figures."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--figures-dir", default=os.path.join(REPO, "figures_combined"))
     a = ap.parse_args()

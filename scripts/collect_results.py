@@ -1,16 +1,17 @@
 #!/usr/bin/env python
-"""Collect every run's ``result.json`` under ``experiments/<benchmark>/pred/`` into one table.
+"""Collect the ``result.json`` of each run in ``experiments/<benchmark>/pred/`` into one table.
 
-``eval.py`` writes a ``result.json`` into each run folder (LongBench: flat
-``{task: score}``; RULER: ``{length: {task: score, "average": s}, "average": s}``).
-This script
+``eval.py`` writes a ``result.json`` in each run folder. LongBench uses
+``{task: score}``. RULER uses ``{length: {task: score, "average": s}, "average": s}``.
+The script:
 
-1. recovers each folder's hyper-parameters with :func:`run_naming.parse_run_name`;
-2. labels it with the ``config/*.conf`` whose settings it matches (or a
-   budget-free label derived from the folder name);
-3. keeps the folders selected by ``--config`` (union) and ``--filter`` (and);
-4. prints the scores, writes one CSV row per run (plus a computed MEAN), and with
-   ``--plot`` draws accuracy-vs-budget panels, one line per technique.
+1. gets the hyperparameters of each folder with :func:`run_naming.parse_run_name`;
+2. gives each folder the name of the ``config/*.conf`` whose settings agree, or a
+   label made from the folder name;
+3. keeps the folders that ``--config`` (union) and ``--filter`` (intersection)
+   select;
+4. prints the scores, writes one CSV row for each run (with a MEAN column) and,
+   with ``--plot``, draws accuracy against budget with one line for each method.
 
 Examples::
 
@@ -63,7 +64,7 @@ from run_naming import parse_run_name  # noqa: E402
 
 
 def norm(v):
-    """Normalise a value for comparison: numbers compare numerically ("1" == "1.0")."""
+    """Normalize a value for comparison. Numbers compare as numbers ("1" == "1.0")."""
     try:
         return float(v)
     except (ValueError, TypeError):
@@ -71,12 +72,12 @@ def norm(v):
 
 
 def parse_folder(name):
-    """Folder name -> {mode, model, budget, chunk, ...}, or None if unparseable."""
+    """Return the hyperparameters of a folder name, or None."""
     return parse_run_name(name)
 
 
 def load_conf(path):
-    """Parse a KEY = VALUE .conf file -> {KEY: [values...]} (space-separated lists)."""
+    """Read a ``KEY = VALUE`` config into ``{KEY: [values]}``."""
     conf = {}
     with open(path) as f:
         for line in f:
@@ -91,10 +92,10 @@ def load_conf(path):
 
 
 def conf_to_filter(conf):
-    """A parsed .conf -> {folder_key: set(normalised allowed values)}.
+    """Convert a config to a filter ``{folder_key: set of allowed values}``.
 
-    Uses only the keys that appear in that mode's folder names, so a LORE-KV
-    setting in a config never excludes a baseline folder or vice versa.
+    The filter uses only the keys that the folder names of the mode contain. A
+    LORE-KV setting thus does not exclude a baseline folder.
     """
     mode = conf.get("MODE", ["andpro"])[0]
     # MODEL_PATH is included so a Mistral folder does not also match the -llama
@@ -128,7 +129,7 @@ def conf_to_filter(conf):
 
 
 def load_named_configs(config_dir):
-    """Every config/<name>.conf -> [(name, filter_dict), ...], the labels a folder can get."""
+    """Return ``[(name, filter)]`` for each ``config/<name>.conf``."""
     configs = []
     if not os.path.isdir(config_dir):
         return configs
@@ -143,13 +144,10 @@ def load_named_configs(config_dir):
 
 
 def budget_free_label(name):
-    """Folder name with the cache-budget token dropped -> a technique label shared
-    across a budget sweep (budget lives in its own column, so runs that differ only
-    in budget collapse onto one technique / one line in the comparison plot).
+    """Return a label for a folder without the budget, so that a budget sweep gives one line.
 
-    Under the current scheme the readable identity is already the leading
-    `lorekv-<cell>-<brule>-<sel>[-<model>]`, so the label is that plus whatever else
-    still varies (M, T, ...). Falls back to the raw name if it does not parse.
+    For a LORE-KV run the label is ``lorekv-<cell>-<brule>-<sel>_<model>`` and the
+    values of M, T and nrm. If the name cannot be read, the function returns the name.
     """
     p = parse_run_name(name)
     if not p:
@@ -165,20 +163,17 @@ def budget_free_label(name):
 
 
 def technique_name(params, folder, named_configs):
-    """Technique for a folder: the matching config name(s), else a budget-free
-    label derived from the folder name.
+    """Return the names of the configs that agree with a folder, joined with '|'.
 
-    A folder matches a config when every hyperparameter the config pins is present
-    in the folder with an allowed value. Overlapping ablations can both claim a
-    folder (e.g. a M=4 run belongs to both the fixed-M=4 and the M in {2,4,8}
-    sweeps); such names are joined with '|' rather than silently picking one.
+    A folder agrees with a config if each value that the config sets is in the
+    folder. If no config agrees, the function returns :func:`budget_free_label`.
     """
     hits = [name for name, filt in named_configs if matches(params, filt)]
     return "|".join(hits) if hits else budget_free_label(folder)
 
 
 def matches(params, filt):
-    """True iff every key in `filt` is present in params with an allowed value."""
+    """Return True if each key of ``filt`` is in ``params`` with an allowed value."""
     for key, allowed in filt.items():
         if key not in params or norm(params[key]) not in allowed:
             return False
@@ -186,7 +181,7 @@ def matches(params, filt):
 
 
 def flatten(obj, prefix=""):
-    """Nested result.json -> {dataset_path: numeric_score}. Non-numeric leaves skipped."""
+    """Convert a nested ``result.json`` to ``{path: score}``. Values that are not numbers are ignored."""
     out = {}
     for k, v in obj.items():
         key = k if not prefix else f"{prefix}/{k}"
@@ -198,20 +193,21 @@ def flatten(obj, prefix=""):
 
 
 def is_average_col(name):
+    """Return True for a column that is an average."""
     return name == "average" or name.endswith("/average") or name.endswith("/mean")
 
 
 def order_datasets(datasets):
-    """Real datasets first (sorted), then the average/mean roll-up columns."""
+    """Return the dataset columns in sorted order, followed by the average columns."""
     real = sorted(d for d in datasets if not is_average_col(d))
     avg = sorted(d for d in datasets if is_average_col(d))
     return real + avg
 
 
 def make_comparison_png(df, real_cols, out_path):
-    """One PNG, a grid of panels (one per dataset + MEAN): accuracy vs. KV budget,
-    one line per technique. Runs with the same technique repeated at a budget
-    (e.g. an M-sweep) are averaged to a single point so each technique is one line.
+    """Draw one PNG with one panel for each dataset and MEAN: accuracy against budget.
+
+    Each method is one line. Runs of the same method at the same budget are averaged.
     """
     try:
         import matplotlib
@@ -277,6 +273,7 @@ def make_comparison_png(df, real_cols, out_path):
 
 
 def parse_args():
+    """Parse the command-line arguments."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--benchmark", default="LongBench", choices=["LongBench", "RULER", "NIAH"])
     p.add_argument("--pred-dir", default=None,
@@ -296,6 +293,7 @@ def parse_args():
 
 
 def main():
+    """Collect, filter, print and write the results."""
     args = parse_args()
     args.pred_dir = args.pred_dir or os.path.join(REPO_ROOT, "experiments", args.benchmark, "pred")
     if not os.path.isdir(args.pred_dir):

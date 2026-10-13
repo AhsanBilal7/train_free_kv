@@ -1,21 +1,18 @@
 #!/usr/bin/env python
-"""Emit the LaTeX body of a LongBench results table from pred/.
+"""Write the LaTeX body of a LongBench results table from ``pred/``.
 
-The paper's per-backbone tables (tab:longbench_qwen2, tab:longbench_ministral3)
-are 16 datasets x 4 methods x 4 budgets plus a Full Cache row. Typing that by
-hand from 34 result directories is where transcription errors come from, so this
-reads the predictions, scores them with experiments/LongBench/eval.py's own
-scorer, and prints rows ready to paste.
+The per-backbone tables of the paper have 16 datasets, 4 methods and 4 budgets,
+and a Full Cache row. The script reads the predictions, scores them with the
+scorer of ``experiments/LongBench/eval.py`` and prints the rows.
 
-Scores are recomputed from the .jsonl files rather than read from result.json,
-which eval.py writes only at the end of a sweep and can therefore be stale for a
-run that is still in flight or was resumed.
+The script scores the ``.jsonl`` files and does not read ``result.json``.
+``eval.py`` writes ``result.json`` only at the end of a sweep.
 
-A cell with no predictions prints \\tbd, and a row's Avg. is \\tbd unless all 16
-datasets are present, so a partially finished table is never silently averaged
-over a subset.
+A cell without predictions shows \\tbd. A row average shows \\tbd if one of the 16
+datasets is missing.
 
-Usage:
+Usage::
+
     python scripts/longbench_table.py --backbone qwen2
     python scripts/longbench_table.py --backbone ministral3 --budgets 128 256
 """
@@ -55,6 +52,7 @@ LOOKAHEAD_CELLS = {"ent": ("1.0", "1.3", "0.0"), "dis": ("1.0", "1.0", "0.3")}
 
 
 def lookahead_dir(cell, model_tag, budget):
+    """Return the run-folder name of LORE-KV /E or /D for one backbone and budget."""
     from scripts.run_naming import build_run_name
     beta, gamma, lam_d = LOOKAHEAD_CELLS[cell]
     return build_run_name(
@@ -67,10 +65,9 @@ def lookahead_dir(cell, model_tag, budget):
 
 
 def score_dir(pred_root, folder):
-    """{dataset: score} for whatever this run has finished. Missing dir -> {}.
+    """Return ``{dataset: score}`` for the finished datasets of a run, or ``{}``.
 
-    `folder` may be a list of candidate names (baseline folders written by older
-    versions of the repository end in `_red_<x>`); the first one that exists wins.
+    ``folder`` can be a list of possible names. The first name that exists is used.
     """
     from eval import scorer, dataset2metric
     candidates = [folder] if isinstance(folder, str) else list(folder)
@@ -98,7 +95,7 @@ def score_dir(pred_root, folder):
 
 
 def fmt(scores):
-    """Per-column cells and the row average, before any highlighting."""
+    """Return the cells of a row and the row average, without highlighting."""
     cells = [f"{scores[ds]:.2f}" if ds in scores else r"\tbd" for ds, _ in DATASETS]
     complete = len(scores) == len(DATASETS)
     avg = f"{sum(scores.values()) / len(DATASETS):.2f}" if complete else r"\tbd"
@@ -106,19 +103,17 @@ def fmt(scores):
 
 
 def row(label, scores, cells=None, avg=None):
+    """Return one LaTeX table row."""
     if cells is None:
         cells, avg = fmt(scores)
     return f"{label} & " + " & ".join(cells) + f" & {avg} \\\\"
 
 
 def highlight(block):
-    """Wrap the best and second-best cell of each column in \\best / \\second.
+    """Mark the best and second-best cell of each column with \\best and \\second.
 
-    `block` is [(label, scores)] for the method rows of ONE budget -- Full Cache is
-    excluded, matching the paper: the highlighting ranks the eviction methods
-    against each other, not against the uncompressed reference. A column with
-    fewer than two finished values is left plain, so a partially filled table
-    never advertises a winner chosen from one entrant.
+    ``block`` is ``[(label, scores)]`` for the method rows of one budget. Full Cache is
+    not included. A column with less than two values is not marked.
     """
     out = [list(fmt(s)) for _, s in block]
     for col, (ds, _) in enumerate(DATASETS):
@@ -142,7 +137,7 @@ def highlight(block):
 
 
 def emit(backbone, budgets, pred_root, no_highlight=False):
-    """The table body, \toprule .. \bottomrule, as a list of lines."""
+    """Return the table body, from \\toprule to \\bottomrule, as a list of lines."""
     model_tag, _ = BACKBONES[backbone]
     lines = [r"\toprule",
              "Method & " + " & ".join(h for _, h in DATASETS) + r" & Avg. \\",
@@ -167,12 +162,7 @@ def emit(backbone, budgets, pred_root, no_highlight=False):
 
 
 def inject(tex_path, backbone, body):
-    """Replace the \toprule..\bottomrule block of tab:longbench_<backbone> in place.
-
-    Rewriting the file is what keeps the paper honest as runs land: the rows are
-    regenerated from pred/ rather than hand-copied, so a cell can never be stale
-    in one place and current in another.
-    """
+    """Replace the table body (\\toprule to \\bottomrule) of ``tab:longbench_<backbone>`` in a .tex file."""
     # A literal search, not a regex: the label contains \l and { }, which as a
     # pattern raise "bad escape \l" -- a failure that is easy to lose to a
     # redirected stderr and looks exactly like "nothing needed updating".
@@ -192,6 +182,7 @@ def inject(tex_path, backbone, body):
 
 
 def main():
+    """Print the table body or write it into a .tex file."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--backbone", required=True, choices=sorted(BACKBONES))
     ap.add_argument("--budgets", nargs="+", type=int, default=[128, 256, 512, 1024])

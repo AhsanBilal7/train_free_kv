@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-"""Run one benchmark over every combination of a config's sweep values.
+"""Run one benchmark for each combination of the sweep values in a config.
 
-A config file (``config/<name>.conf``) holds ``KEY = VALUE`` lines; a value may
-list several space-separated settings (``BUDGET = 128 256 512 1024``), and every
-combination becomes one run. Environment variables with the same names override
-the file, so a sweep can be widened from the command line::
+A config file (``config/<name>.conf``) contains ``KEY = VALUE`` lines. A value can
+list several settings separated by spaces (``BUDGET = 128 256 512 1024``). Each
+combination is one run. An environment variable with the same name replaces the
+value in the file::
 
     python scripts/sweep.py --benchmark LongBench --config config/lorekv-ent-unif-topk.conf
-    BUDGET="128 512" NUM_PARTICLES="1 4" python scripts/sweep.py --benchmark RULER \
+    BUDGET="128 512" NUM_PARTICLES="1 4" python scripts/sweep.py --benchmark RULER \\
         --config config/lorekv-ent-unif-topk.conf
 
-For each combination this script builds the run-folder name with
-:mod:`scripts.run_naming` (the same module the result tables parse it with), then
-calls ``experiments/<benchmark>/pred.py`` from that benchmark's directory.
-``pred.py`` skips any dataset whose output already exists, so re-launching an
-interrupted sweep resumes it. When every run is done, the benchmark's ``eval.py``
-scores all folders under ``pred/``.
+For each combination the script makes the run-folder name with
+:mod:`run_naming` and runs ``experiments/<benchmark>/pred.py`` in the directory of
+the benchmark. ``pred.py`` skips each dataset whose output exists, so a new start
+continues an interrupted sweep. After all runs, ``eval.py`` scores all folders in
+``pred/``.
 
-Precedence of every setting: environment variable > config file > default below.
+Order of precedence: environment variable, then config file, then default.
 """
 from __future__ import annotations
 
@@ -62,7 +61,7 @@ LONGBENCH_TASKS = ("qasper narrativeqa multifieldqa_en hotpotqa 2wikimqa musique
 
 
 def load_conf(path):
-    """Parse a ``KEY = VALUE`` config; ``#`` after whitespace starts a comment."""
+    """Read a ``KEY = VALUE`` config. A ``#`` after whitespace starts a comment."""
     conf = {}
     with open(path) as f:
         for line in f:
@@ -79,7 +78,7 @@ def load_conf(path):
 
 
 class Settings:
-    """Environment > config file > default lookup."""
+    """Get a setting from the environment, then the config file, then the default."""
 
     def __init__(self, conf):
         self.conf = conf
@@ -94,7 +93,7 @@ class Settings:
 
 
 def benchmark_args(benchmark, s):
-    """(max_length, pred.py arguments, out-name prefix) specific to one benchmark."""
+    """Return ``(max_length, pred.py arguments, out-name prefix)`` for one benchmark."""
     if benchmark == "LongBench":
         # 64000 exceeds every LongBench prompt, i.e. no truncation. Qwen2.5-14B's
         # configs cap it at its 32K window (App. E.3).
@@ -138,7 +137,7 @@ def benchmark_args(benchmark, s):
 
 
 def combinations(s):
-    """Yield one {variable: value} dict per run, in budget-major order."""
+    """Yield one ``{variable: value}`` dict for each run. The budget changes slowest."""
     shared = [s.values(k, d) for k, _, d in SHARED]
     lorekv = [s.values(k, d) for k, _, d in LOREKV]
     seen = set()
@@ -156,6 +155,11 @@ def combinations(s):
 
 
 def run_name(row, model_tag, prefix, pred_dir):
+    """Return the run-folder name of one combination.
+
+    For a baseline the function uses an existing folder with the older suffix
+    ``_red_0.0`` if the new name does not exist.
+    """
     if row["MODE"] != "causal_lookahead":
         name = build_run_name(mode=row["MODE"], model_tag=model_tag,
                               budget=row["BUDGET"], chunk_size=row["CHUNK_SIZE"])
@@ -179,6 +183,7 @@ def run_name(row, model_tag, prefix, pred_dir):
 
 
 def main():
+    """Run the sweep and then score the results."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--benchmark", default=os.environ.get("EXPERIMENT", "LongBench"),
                     choices=["LongBench", "RULER", "NIAH"])

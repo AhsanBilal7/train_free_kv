@@ -1,39 +1,37 @@
 #!/usr/bin/env python3
-"""Canonical names for run folders under ``experiments/<benchmark>/pred/``.
+"""Names of the run folders in ``experiments/<benchmark>/pred/``.
 
-One module both writes and reads these names: ``scripts/sweep.py`` builds a
-run's folder name with :func:`build_run_name`, and the evaluation / table scripts
-recover its hyper-parameters with :func:`parse_run_name`.
+``scripts/sweep.py`` makes each folder name with :func:`build_run_name`. The
+evaluation and table scripts get the hyperparameters back with
+:func:`parse_run_name`.
 
-LORE-KV (``--mode causal_lookahead``) runs::
+LORE-KV runs (``--mode causal_lookahead``)::
 
     lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_M_<M>_T_<T>
         _lL_<lambda_L>_lT_<temperature>_nrm_<0|1>_alpha_<alpha>_kappa_<kappa>
         [_obj_<unprojected|attention>]
 
-The hyphenated head is the run's identity and equals the basename of the config
-that produces it (``config/lorekv-ent-unif-topk-llama.conf`` writes
+The part before ``_B_`` identifies the run. It is equal to the name of the config
+file (``config/lorekv-ent-unif-topk-llama.conf`` writes
 ``lorekv-ent-unif-topk-llama_B_...``):
 
-    <cell>   reliability coefficients (beta, gamma, lambda_D) of Eq. 3, see CELLS
-    <brule>  head-budget rule from tau (Eq. 11): unif (0) | adap (1) | adap<tau>
-    <sel>    selection rule from (lambda_k, lambda_v) (App. D-C): topk (0, 0) |
-             div (0.1, 0.1) | div<lk>-<lv>
+    <cell>   Reliability coefficients (beta, gamma, lambda_D) of Eq. 3; see CELLS.
+    <brule>  Head-budget rule from tau (Eq. 11): unif (0), adap (1) or adap<tau>.
+    <sel>    Selection rule from (lambda_k, lambda_v) (App. D-C): topk (0, 0),
+             div (0.1, 0.1) or div<lk>-<lv>.
     <model>  '' for Mistral-7B-Instruct-v0.2, '-llama', '-qwen2', '-ministral3',
-             otherwise the model tag verbatim
+             else the model tag.
 
-The identity is derived from the numbers actually used, never from a config file
-name, so a command-line sweep (``LAMBDA_D="0.0 0.3"``) writes one folder per cell
-and a folder name cannot disagree with what was run. Coefficients that match no
-named cell fall back to ``b<beta>g<gamma>lD<lambda_D>``.
+The name comes from the values that the run uses, not from the config file name.
+A command-line sweep (``LAMBDA_D="0.0 0.3"``) thus writes one folder for each
+cell. Coefficients that are not in CELLS give ``b<beta>g<gamma>lD<lambda_D>``.
 
-``RUN_NAME_PREFIX`` replaces the identity for a run whose criterion is another
-method's, e.g. ``config/andpro-compute-eq.conf`` (AnDPro scoring on LORE-KV's own
-lookahead queries, Table 14) writes ``andpro-compute-eq_B_...``; CUSTOM_PREFIXES
-maps such a prefix back to its coefficients.
+``RUN_NAME_PREFIX`` replaces the identifier. For example
+``config/andpro-compute-eq.conf`` writes ``andpro-compute-eq_B_...``.
+CUSTOM_PREFIXES gives the coefficients of each prefix.
 
-Every other method writes ``<mode>_<model-tag>_<B>_chunk_<cs>``. Folders from
-older versions of this repository that end in ``_red_<x>`` are still parsed.
+Other methods write ``<mode>_<model-tag>_<B>_chunk_<cs>``. The parser also reads
+older folders that end in ``_red_<x>``.
 """
 import argparse
 import re
@@ -80,7 +78,7 @@ def _num(x):
 
 
 def _fmt(x):
-    """Compact, round-trippable number: 1.0 -> '1', 0.30 -> '0.3'."""
+    """Return a short number string that converts back to the same value: 1.0 -> '1', 0.30 -> '0.3'."""
     f = float(x)
     if f == int(f):
         return str(int(f))
@@ -123,7 +121,7 @@ def model_suffix(model_tag):
 
 
 def model_tag_from_suffix(suffix):
-    """Inverse of model_suffix. '' -> Mistral, '-llama' -> Llama, else verbatim."""
+    """Return the model tag of a name suffix (the inverse of :func:`model_suffix`)."""
     for base, short in MODEL_BASES:
         if suffix == short:
             return base
@@ -135,7 +133,7 @@ def model_tag_from_suffix(suffix):
 
 
 def config_name(beta, gamma, lambda_d, tau, lambda_k, lambda_v, model_tag):
-    """The run's identity: identical to its config file's basename."""
+    """Return the identifier of a LORE-KV run, which is equal to its config file name."""
     return (f"lorekv-{cell_name(beta, gamma, lambda_d)}"
             f"-{budget_rule_name(tau)}-{selection_name(lambda_k, lambda_v)}"
             f"{model_suffix(model_tag)}")
@@ -147,7 +145,7 @@ def build_run_name(*, mode, model_tag, budget, chunk_size,
                    normalize_typicality=None, robust_alpha=None, robust_topk_beta=None,
                    lambda_k=None, lambda_v=None, budget_tau=None,
                    score_objective=None, name_prefix=None):
-    """The folder name of one run (see the module docstring for the scheme)."""
+    """Return the folder name of one run. See the module docstring for the format."""
     if mode != "causal_lookahead":
         return f"{mode}_{model_tag}_{budget}_chunk_{chunk_size}"
     # RUN_NAME_PREFIX / --name-prefix: override just the identity string. Everything
@@ -193,11 +191,12 @@ def _pairs(tail):
 
 
 def parse_run_name(name):
-    """Folder name -> flat dict of hyper-parameters, or None if unparseable.
+    """Return the hyperparameters of a run folder as a dict, or None.
 
-    Always populated on success: mode, model, budget, chunk. LORE-KV runs also
-    carry cell, brule, sel, b, g, lD, tau, lK, lV, M, T, lL, lT, nrm, alpha,
-    kappa and obj. A ``multi_`` prefix (multi-needle NIAH) is ignored.
+    The dict always has ``mode``, ``model``, ``budget`` and ``chunk``. A LORE-KV run
+    also has ``cell``, ``brule``, ``sel``, ``b``, ``g``, ``lD``, ``tau``, ``lK``,
+    ``lV``, ``M``, ``T``, ``lL``, ``lT``, ``nrm``, ``alpha``, ``kappa`` and ``obj``. The
+    function ignores a ``multi_`` prefix (multi-needle NIAH).
     """
     name = name[len("multi_"):] if name.startswith("multi_") else name
 
@@ -266,6 +265,7 @@ def parse_run_name(name):
 
 
 def main():
+    """Print the folder name of the run that the arguments specify."""
     ap = argparse.ArgumentParser(description="Print a run's canonical output-folder name.")
     ap.add_argument("--mode", required=True)
     ap.add_argument("--model-tag", required=True)

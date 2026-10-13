@@ -1,28 +1,24 @@
-"""Generate the extra-backbone attention hijacks from each package's Llama hijack.
+"""Generate the attention forwards of the additional backbones from the Llama forward of each package.
 
-Two backbones need one, for different reasons, and both are derived by textual
-substitution from the package's own Llama hijack rather than retyped -- any drift
-between them would be a silent behaviour change on the new backbone only.
+The script changes the text of the Llama forward of each package. This keeps the
+generated forwards equal to the Llama forward.
 
-  <pkg>/monkeypatch/<name>_ext_hijack.py     Ministral3 (models_ext)
-      The vendored classes subclass Llama, so the model forward, the causal mask,
-      the cache and prepare_inputs_for_generation are all inherited and reused
-      as-is. Only the attention forward is re-emitted, because the vendored
-      attention class defines its own `forward` and would otherwise shadow
-      whatever is patched onto LlamaFlashAttention2. The one edit is to route the
-      q/k/v projections through the backbone's `project_qkv` hook and to apply its
-      optional post-RoPE `scale_query` hook.
+    <pkg>/monkeypatch/<name>_ext_hijack.py (Ministral3, models_ext):
+        The Ministral3 classes are Llama subclasses, so they use the Llama model
+        forward and prepare_inputs_for_generation. Only the attention forward is
+        generated, because the Ministral3 attention class defines ``forward``. The
+        q/k/v projections use the ``project_qkv`` hook, and the optional
+        ``scale_query`` hook applies after RoPE.
 
-  <pkg>/monkeypatch/<name>_qwen2_hijack.py   Qwen2 (native in transformers 4.44)
-      Qwen2 needs no vendoring, but its 4.44 implementation predates the rotary
-      refactor: the attention forward takes no `position_embeddings`, the rotary
-      module is table-based (`rotary_emb(x, seq_len=...)`), and
-      `apply_rotary_pos_emb` indexes that table with `position_ids`. The model
-      forward is otherwise the Llama one -- same `_update_causal_mask` signature --
-      minus the `position_embeddings` it computes and threads through the layers,
-      so both functions are emitted here.
+    <pkg>/monkeypatch/<name>_qwen2_hijack.py (Qwen2, transformers 4.44):
+        Qwen2 in transformers 4.44 uses an older rotary interface. The attention
+        forward has no ``position_embeddings``, the rotary module uses a table
+        (``rotary_emb(x, seq_len=...)``), and ``apply_rotary_pos_emb`` indexes the
+        table with ``position_ids``. The script thus generates the attention
+        forward and the model forward.
 
-Re-run after any change to a Llama hijack so the copies stay in lockstep:
+Run the script again after each change to a Llama forward::
+
     python scripts/gen_ext_hijacks.py
 """
 
@@ -122,7 +118,7 @@ this file. Run the generator again after each change to the Llama forward.
 
 
 def extract(src_text, name):
-    """The full source of `def <name>(...)`, up to the next top-level def."""
+    """Return the source of ``def <name>(...)`` up to the next top-level definition."""
     start = src_text.index(f"def {name}(")
     rest = src_text[start:]
     m = re.search(r"\n(?=def |\Z)", rest[1:])
@@ -131,13 +127,14 @@ def extract(src_text, name):
 
 
 def drop_position_embeddings_arg(body):
-    """Remove the `position_embeddings` parameter -- Qwen2's 4.44 forward has none."""
+    """Remove the ``position_embeddings`` parameter. The Qwen2 forward of release 4.44 does not have it."""
     out, n = re.subn(r"[ \t]*position_embeddings: Optional\[Tuple\[[^\]]*\]\][^\n]*\n", "", body)
     assert n == 1, f"position_embeddings parameter matched {n} times"
     return out
 
 
 def emit(path, header, imports, bodies):
+    """Write a generated file."""
     text = header + "\n" + "\n".join(imports) + "\n" + "\n\n".join(bodies)
     open(path, "w").write(text)
     print("wrote", path, len(text.splitlines()), "lines")
