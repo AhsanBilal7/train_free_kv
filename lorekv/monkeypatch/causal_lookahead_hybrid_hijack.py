@@ -1,4 +1,4 @@
-"""LORE-KV attention hijacks for hybrid-attention backbones on transformers 5.x.
+"""🧬 LORE-KV attention hijacks for hybrid-attention backbones on transformers 5.x.
 
 Why this file exists separately from causal_llama_hijack.py / _qwen2_hijack.py:
 those target the transformers 4.44 `*FlashAttention2.forward` signature, and 4.48

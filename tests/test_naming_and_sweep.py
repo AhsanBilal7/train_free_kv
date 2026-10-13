@@ -1,4 +1,4 @@
-"""Run-folder naming and sweep expansion (scripts/run_naming.py, scripts/sweep.py)."""
+"""🧪 Run-folder naming and sweep expansion (scripts/run_naming.py, scripts/sweep.py)."""
 import os
 import sys
 

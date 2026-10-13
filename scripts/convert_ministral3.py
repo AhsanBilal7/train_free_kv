@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Extract the text tower of a Mistral3 checkpoint into a standalone one.
+"""🛠️ Extract the text tower of a Mistral3 checkpoint into a standalone one.
 
 `mistralai/Ministral-3-8B-Instruct-2512[-BF16]` is published as
 `Mistral3ForConditionalGeneration`: a Pixtral vision tower, a multimodal

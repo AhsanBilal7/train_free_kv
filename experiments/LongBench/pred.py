@@ -1,4 +1,4 @@
-r"""LongBench prediction driver (paper Sec. 4.1, Tables 1, 2, 6, 8, 9, 11-14).
+r"""📚 LongBench prediction driver (paper Sec. 4.1, Tables 1, 2, 6, 8, 9, 11-14).
 
 Decodes every sample of the requested LongBench sub-tasks with one KV-eviction
 method and writes ``pred/<out_name>/<task>.jsonl`` (one ``{"pred", "answers",

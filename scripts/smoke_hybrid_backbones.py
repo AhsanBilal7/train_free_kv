@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Correctness check for the hybrid-attention hijacks, with no reference venv.
+"""🧪 Correctness check for the hybrid-attention hijacks, with no reference venv.
 
 The collect phase evicts nothing -- it only records what compress() will later
 need. So a correctly patched model must produce EXACTLY the same prefill logits as

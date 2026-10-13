@@ -1,4 +1,4 @@
-"""Score RULER predictions (paper Sec. 4.3, Tables 7 and 10).
+"""📏 Score RULER predictions (paper Sec. 4.3, Tables 7 and 10).
 
 For every run folder under ``pred/`` it scores each ``<length>.jsonl`` with
 RULER's string-match metrics (``calculate_metrics.py``): ``string_match_part``

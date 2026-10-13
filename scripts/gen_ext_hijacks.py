@@ -1,4 +1,4 @@
-"""Generate the extra-backbone attention hijacks from each package's Llama hijack.
+"""🛠️ Generate the extra-backbone attention hijacks from each package's Llama hijack.
 
 Two backbones need one, for different reasons, and both are derived by textual
 substitution from the package's own Llama hijack rather than retyped -- any drift

@@ -1,4 +1,4 @@
-"""SnapKV, Ada-KV and StreamingLLM eviction clusters and the varlen per-head cache.
+"""📐 SnapKV, Ada-KV and StreamingLLM eviction clusters and the varlen per-head cache.
 
 * ``SnapKVCluster`` -- SnapKV (Li et al., NeurIPS 2024): pooled attention of the
   observation-window queries, uniform budget per head; with ``pyram_mode`` the

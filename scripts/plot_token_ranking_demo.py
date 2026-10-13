@@ -1,4 +1,4 @@
-"""Figures for the CriticalKV vs AnDPro vs LORE-KV token-ranking demo.
+"""🔬 Figures for the CriticalKV vs AnDPro vs LORE-KV token-ranking demo.
 
 Reads what scripts/demo_token_ranking.py wrote under demos/<run>/ and draws two
 publication-style figures:

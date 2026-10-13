@@ -1,4 +1,4 @@
-"""Score Needle-in-a-Haystack predictions (paper Sec. 4.2, Figure 8).
+"""🪡 Score Needle-in-a-Haystack predictions (paper Sec. 4.2, Figure 8).
 
 Each (length, depth) cell is scored with the reference ExactMatchScorer of
 https://github.com/gkamradt/LLMTest_NeedleInAHaystack (MIT): the fraction of the

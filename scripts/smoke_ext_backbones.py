@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""End-to-end smoke test of the eviction pipeline on the models_ext backbones.
+"""🧪 End-to-end smoke test of the eviction pipeline on the models_ext backbones.
 
 scripts/validate_models_ext.py checks that the vendored modelling code IS the
 upstream model. This checks the other half: that each package's hijack actually

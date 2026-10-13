@@ -1,4 +1,4 @@
-"""LORE-KV's phase-aware forwards for Mistral under transformers 4.44.2.
+"""🔌 LORE-KV's phase-aware forwards for Mistral under transformers 4.44.2.
 
 ``causal_lookahead_MistralModel_forward`` and
 ``causal_lookahead_mistral_flash_attn2_forward`` replace ``MistralModel.forward`` and

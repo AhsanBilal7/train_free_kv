@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Collect every run's ``result.json`` under ``experiments/<benchmark>/pred/`` into one table.
+"""📋 Collect every run's ``result.json`` under ``experiments/<benchmark>/pred/`` into one table.
 
 ``eval.py`` writes a ``result.json`` into each run folder (LongBench: flat
 ``{task: score}``; RULER: ``{length: {task: score, "average": s}, "average": s}``).

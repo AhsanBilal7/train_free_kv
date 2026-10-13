@@ -1,4 +1,4 @@
-r"""Needle-In-A-Haystack (NIAH) prediction driver (paper Sec. 4.2, Figure 8).
+r"""🪡 Needle-In-A-Haystack (NIAH) prediction driver (paper Sec. 4.2, Figure 8).
 
 A port of the test popularized by Greg Kamradt
 (https://github.com/gkamradt/LLMTest_NeedleInAHaystack, MIT). Short "needle"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Materialize a Hub checkpoint as a local directory this repo's pinned stack can read.
+"""🛠️ Materialize a Hub checkpoint as a local directory this repo's pinned stack can read.
 
 Two things stand between a Hub id and `from_pretrained` here, neither about the
 model weights:

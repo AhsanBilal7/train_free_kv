@@ -1,3 +1,7 @@
+"""🔌 Install LORE-KV on a backbone: ``replace_{mistral,llama,qwen2,ministral3}_lookahead``
+for the dense backbones (transformers 4.44) and ``replace_hybrid_lookahead`` for Qwen3.5 and
+Gemma 4 (transformers 5.x). :func:`lorekv.harness.install_method` calls them.
+"""
 from importlib.metadata import version
 import warnings
 import transformers

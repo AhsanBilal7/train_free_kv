@@ -1,4 +1,4 @@
-"""Score LongBench predictions (paper Table 5 metrics).
+"""📏 Score LongBench predictions (paper Table 5 metrics).
 
 Adapted from the official evaluator of LongBench (Bai et al., ACL 2024;
 https://github.com/THUDM/LongBench, MIT). For every run folder under ``pred/``

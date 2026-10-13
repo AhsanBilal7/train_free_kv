@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-r"""Stage-wise latency of one request: TTFT / lookahead / scoring / decoding (Figure 7a).
+r"""⏱️ Stage-wise latency of one request: TTFT / lookahead / scoring / decoding (Figure 7a).
 
 Times the four stages of every sample for the first ``--num_samples`` examples
 of LongBench, RULER and NIAH and averages them per (method, budget). It produces

@@ -1,4 +1,4 @@
-"""Ministral3 (text tower) configuration for transformers 4.44.
+"""🧩 Ministral3 (text tower) configuration for transformers 4.44.
 
 `mistralai/Ministral-3-8B-Instruct-2512` ships as a `Mistral3ForConditionalGeneration`
 checkpoint: a Pixtral vision tower plus a `ministral3` text model. Only the text

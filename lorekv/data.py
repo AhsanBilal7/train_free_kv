@@ -1,4 +1,4 @@
-"""Dataset loaders shared by the benchmark drivers and the analysis figures.
+"""📦 Dataset loaders shared by the benchmark drivers and the analysis figures.
 
 LongBench (Bai et al., ACL 2024; https://huggingface.co/datasets/THUDM/LongBench)
     The Hub repository is a loading-script dataset (``LongBench.py`` plus one

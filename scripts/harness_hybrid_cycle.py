@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Fast local harness: prefill -> lookahead -> compress -> ragged decode, tiny model.
+"""🧪 Fast local harness: prefill -> lookahead -> compress -> ragged decode, tiny model.
 
 Drives the same LORE-KV / baseline code path as a real hybrid-backbone run on a
 randomly initialised Qwen3.5 (2 full-attention + 6 linear-attention layers) or

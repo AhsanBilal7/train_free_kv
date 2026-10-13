@@ -1,4 +1,4 @@
-"""LORE-KV's phase-aware forwards for Llama under transformers 4.44.2.
+"""🔌 LORE-KV's phase-aware forwards for Llama under transformers 4.44.2.
 
 ``causal_lookahead_LlamaModel_forward`` and
 ``causal_lookahead_llama_flash_attn2_forward`` replace ``LlamaModel.forward`` and

@@ -1,4 +1,4 @@
-"""LORE-KV scoring, reliability weighting and selection (paper Secs. 3.2-3.5, Algorithm 1).
+"""🎯 LORE-KV scoring, reliability weighting and selection (paper Secs. 3.2-3.5, Algorithm 1).
 
 Notation follows the paper. For layer ``l`` and head ``h``, ``K``/``V`` are the
 prefill keys and values, ``Q_W`` the queries of the last ``w`` prompt tokens, and

@@ -1,4 +1,4 @@
-"""AnDPro eviction cluster and the shared varlen per-head cache.
+"""📐 AnDPro eviction cluster and the shared varlen per-head cache.
 
 ``AnDProAdaptiveSnapKVCluster`` scores chunks of the prompt by projecting their
 attention-weighted values onto the anchor direction of the droppable values,

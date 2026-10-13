@@ -1,4 +1,4 @@
-"""Monte Carlo lookahead made concrete (paper Figure 1, App. F.2): what the M trajectories are.
+"""🎲 Monte Carlo lookahead made concrete (paper Figure 1, App. F.2): what the M trajectories are.
 
 The paper claims that "the $M$ lookahead trajectories form Monte-Carlo samples of
 plausible response-side query states". This script captures exactly that object for a

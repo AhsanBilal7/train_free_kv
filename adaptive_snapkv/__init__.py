@@ -1,4 +1,4 @@
-"""SnapKV / PyramidKV / StreamingLLM / Ada-KV baselines and the varlen per-head cache.
+"""📐 SnapKV / PyramidKV / StreamingLLM / Ada-KV baselines and the varlen per-head cache.
 
 Adapted from the AdaKV code base (Feng et al., "Ada-KV: Optimizing KV Cache Eviction
 by Adaptive Budget Allocation for Efficient LLM Inference", 2025;

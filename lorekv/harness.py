@@ -1,4 +1,4 @@
-"""Benchmark harness shared by ``experiments/{LongBench,RULER,NIAH}/pred.py``.
+"""⚙️ Benchmark harness shared by ``experiments/{LongBench,RULER,NIAH}/pred.py``.
 
 Every benchmark driver needs the same four things before it can decode a single
 prompt, and they must be identical across benchmarks for the comparison in the

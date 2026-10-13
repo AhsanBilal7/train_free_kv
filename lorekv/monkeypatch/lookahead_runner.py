@@ -1,4 +1,4 @@
-"""LORE-KV generation for one prompt: lookahead, reliability weighting, eviction, decoding.
+"""🔭 LORE-KV generation for one prompt: lookahead, reliability weighting, eviction, decoding.
 
 :func:`generate_with_lookahead` implements Algorithm 1 of the paper around the
 per-layer state in :class:`lorekv.monkeypatch.scoring.TestTimeLookaheadKVCluster`.

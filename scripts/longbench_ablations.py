@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Emit the LaTeX for the two appendix ablations that are not in the main tables.
+"""📋 Emit the LaTeX for the two appendix ablations that are not in the main tables.
 
   (i)  score objective -- projected (default) vs attention vs unprojected, at each
        budget, over all 16 datasets.

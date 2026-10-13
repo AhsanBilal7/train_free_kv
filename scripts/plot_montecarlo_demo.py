@@ -1,4 +1,4 @@
-"""Figure: the M lookahead trajectories as Monte-Carlo samples of response-side queries.
+"""🎲 Figure: the M lookahead trajectories as Monte-Carlo samples of response-side queries.
 
 Draws what scripts/demo_montecarlo_queries.py captured, for one prompt:
 

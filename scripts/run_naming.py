@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Canonical names for run folders under ``experiments/<benchmark>/pred/``.
+"""🏷️ Canonical names for run folders under ``experiments/<benchmark>/pred/``.
 
 One module both writes and reads these names: ``scripts/sweep.py`` builds a
 run's folder name with :func:`build_run_name`, and the evaluation / table scripts

@@ -1,4 +1,4 @@
-"""Backbone support beyond what the pinned Transformers release covers.
+"""🧩 Backbone support beyond what the pinned Transformers release covers.
 
 The dense-attention experiments are pinned to transformers 4.44 because every
 eviction hijack in adaptive_snapkv / andpro_snapkv / lorekv patches

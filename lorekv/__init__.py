@@ -1,4 +1,4 @@
-"""LORE-KV: Lookahead Output-perturbation with Reliability-weighted Ensembles for KV caches.
+"""🔭 LORE-KV: Lookahead Output-perturbation with Reliability-weighted Ensembles for KV caches.
 
 A training-free KV-cache eviction method. Before the prompt's cache is compressed,
 LORE-KV samples ``M`` short continuations of length ``T`` from the frozen model,
