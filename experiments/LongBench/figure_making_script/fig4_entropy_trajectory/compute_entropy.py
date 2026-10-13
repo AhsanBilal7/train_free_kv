@@ -5,7 +5,7 @@ whose query states poorly match the queries that actually drive decoding; scorin
 eviction from that one trajectory then hurts. This script quantifies the risk and
 shows the fix:
 
-  * per particle: predictive entropy (Eq. 7) and how well that ONE trajectory's
+  * per particle: mean predictive entropy (H_bar in Eq. 3) and how well that ONE trajectory's
     query states cover the true full-cache decode queries (single-particle
     alignment). We expect high-entropy particles to align worse.
   * per sample: alignment when you (a) pick a random single trajectory
@@ -97,10 +97,10 @@ def main():
         # strategy coverages, averaged over layers
         cov_uniform, cov_logprob, cov_lorekv = [], [], []
         w_uniform = torch.full((M,), 1.0 / M)
-        # "log-prob only" is (beta, gamma, lambda_D) = (1, 1, 0): a FULL entropy penalty.
+        # log-probability only: (beta, gamma, lambda_D) = (1, 1, 0).
         w_logprob = common.reliability_weights_from_capture(
             common.centered_score(logprob, entropy), entropy, beta=1.0, gamma=1.0)
-        # Eq. 3 /E cell: (beta, gamma, lambda_D) = (1, 1 + lambda_H_old, 0).
+        # LORE-KV /E: (beta, gamma, lambda_D) = (1, gamma_E, 0).
         w_lorekv = common.reliability_weights_from_capture(
             common.centered_score(logprob, entropy), entropy, beta=1.0, gamma=gamma_E)
 

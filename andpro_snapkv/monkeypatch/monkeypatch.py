@@ -1,3 +1,7 @@
+"""Install the AnDPro forwards on Mistral, Llama, Qwen2 and Ministral3 (``replace_*_andpro``).
+
+Adapted from LLM-AnDPro (Geng et al., NeurIPS 2025; https://github.com/MIRALab-USTC/LLM-AnDPro, MIT).
+"""
 from importlib.metadata import version
 import warnings
 import transformers

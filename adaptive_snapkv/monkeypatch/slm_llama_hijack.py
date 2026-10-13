@@ -1,3 +1,7 @@
+"""StreamingLLM attention / model forwards for Llama (transformers 4.44.2).
+
+Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT) and the transformers 4.44.2 Llama implementation (Apache-2.0).
+"""
 import torch
 from typing import List, Optional, Tuple, Union
 from transformers.cache_utils import Cache, DynamicCache, StaticCache

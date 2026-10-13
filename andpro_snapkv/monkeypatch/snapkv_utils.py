@@ -1,3 +1,13 @@
+"""AnDPro eviction cluster and the shared varlen per-head cache.
+
+``AnDProAdaptiveSnapKVCluster`` scores chunks of the prompt by projecting their
+attention-weighted values onto the anchor direction of the droppable values,
+accumulated over the observation-window queries, and keeps the top chunks across
+heads (anchor direction projection; Geng et al., NeurIPS 2025). ``SnapKVCluster``
+and ``DynamicCacheSplitHeadFlatten`` are shared with the SnapKV / Ada-KV code.
+
+Adapted from LLM-AnDPro (Geng et al., NeurIPS 2025; https://github.com/MIRALab-USTC/LLM-AnDPro, MIT), which builds on AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT).
+"""
 import warnings
 
 import torch

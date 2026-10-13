@@ -1,3 +1,8 @@
+"""Build the ``tiny_api_cuda`` extension (``update_flatten_view``) for sm_80 and sm_90.
+
+Run through ``make install`` from the repository root. From the AdaKV code base
+(https://github.com/FFY0/AdaKV, MIT); see csrc/LICENSE.
+"""
 import subprocess
 import os
 from packaging.version import parse, Version
@@ -38,10 +43,10 @@ if CUDA_HOME is not None:
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Keep build artifacts (build/temp.*, build/lib.*) off the home/repo filesystem.
+# Keep build artifacts (build/temp.*, build/lib.*) out of the repository.
 build_base = os.environ.get(
-    "ANDPRO_BUILD_BASE",
-    os.path.join(os.environ.get("TMPDIR", "/tmp"), "andpro_csrc_build"),
+    "LOREKV_BUILD_BASE",
+    os.path.join(os.environ.get("TMPDIR", "/tmp"), "lorekv_csrc_build"),
 )
 os.makedirs(build_base, exist_ok=True)
 

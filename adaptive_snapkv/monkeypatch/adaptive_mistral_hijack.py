@@ -1,3 +1,7 @@
+"""Ada-KV attention / model forwards for Mistral (transformers 4.44.2).
+
+Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT) and the transformers 4.44.2 Mistral implementation (Apache-2.0).
+"""
 import inspect
 import torch
 from typing import List, Optional, Tuple, Union

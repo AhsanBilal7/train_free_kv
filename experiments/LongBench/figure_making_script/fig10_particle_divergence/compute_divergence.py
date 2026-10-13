@@ -1,12 +1,11 @@
 """Figure 10 (compute stage) - Trajectory disagreement as the confidence signal.
 
-This figure prices the change made to the particle confidence score R_m (Eq. 7):
-the absolute predictive-entropy penalty is replaced by how ATYPICAL a particle's
-future-query trajectory is relative to the rest of the ensemble,
+Paper App. F.4. Relates the query-space disagreement of Eq. 10,
 
     D_m = 1/(M-1) sum_{r!=m} 1/(T|G|) sum_{u,g} [ 1 - cos(q^m_{u,g}, q^r_{u,g}) ],
 
-standardized across the M particles before it enters R_m.
+standardized across the M trajectories (App. C.3), and the entropy channel of the
+reliability score R_m (Eq. 3) to each trajectory's oracle utility.
 
 Two questions have to be answered with data, and this script measures both on the
 same captured particles (so the comparison is exactly like-for-like):
@@ -20,8 +19,7 @@ same captured particles (so the comparison is exactly like-for-like):
      This is the relationship the figure is named after.
 
  (2) DOES THE WEIGHTING THAT USES IT WIN?  For each sample we re-weight the same M
-     particles under uniform / log-prob / log-prob-minus-entropy (the published
-     rule) / log-prob-minus-divergence (this method) weights and measure the
+     particles under uniform / log-prob / LORE-KV /E / LORE-KV /D weights and measure the
      resulting ensemble coverage of Q_future. Because every scheme sees identical
      particles, any difference is attributable to the weights alone -- no extra
      test-time compute is involved.
@@ -79,10 +77,8 @@ def main():
     grid = common.weighting_grid(gamma_E=gamma_E, lambda_D=lambda_d)
 
     # per-particle signals + utilities, and per-sample ensemble coverage per weighting.
-    # The grid is the Eq. 3 (beta, gamma, lambda_D) plane; "logprob" (1,1,0) is the
-    # draft's "log-probability only" and carries a FULL unit of entropy penalty, while
-    # "typicality" (1,0,0) is the actual no-entropy control and "typ_div" (1,0,lambda_D)
-    # is disagreement INSTEAD of entropy -- the cell /D was meant to be.
+    # The grid is the Eq. 3 (beta, gamma, lambda_D) plane: "logprob" (1,1,0),
+    # "typicality" (1,0,0) as the no-entropy control, and "typ_div" (1,0,lambda_D).
     strat_keys = list(grid)
     part_keys = ["logp_a", "ent_a", "cbar_a", "div_a", "divz_a", "ualign_a", "urecall_a"]
     state, done = ckpt.load_or({**{k: [] for k in part_keys},

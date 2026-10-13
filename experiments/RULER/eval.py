@@ -1,3 +1,12 @@
+"""Score RULER predictions (paper Sec. 4.3, Tables 7 and 10).
+
+For every run folder under ``pred/`` it scores each ``<length>.jsonl`` with
+RULER's string-match metrics (``calculate_metrics.py``): ``string_match_part``
+for the two QA tasks and ``string_match_all`` (fractional credit over reference
+answers) for the other eleven, as in the official RULER protocol (Hsieh et al.,
+2024; App. E.4). It writes ``result.json`` with per-task scores, the 13-task mean
+at each length and the mean over lengths.
+"""
 import os
 import json
 import argparse
@@ -6,15 +15,6 @@ import pandas as pd
 
 from calculate_metrics import calculate_metrics
 
-# -----------------------------------------------------------------------------
-# RULER scorer.
-#
-# Consumes the prediction jsonl files written by pred.py (one per sequence-length
-# config under pred/<out_name>/) and scores them with the RULER string-match
-# metric (calculate_metrics.py: partial match for the `qa` tasks, all-match for
-# every other task). For each method run we report per-task scores, the mean over
-# the 13 tasks at each length, and the overall mean across lengths.
-# -----------------------------------------------------------------------------
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser()

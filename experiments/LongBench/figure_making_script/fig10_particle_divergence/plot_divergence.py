@@ -27,9 +27,8 @@ _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import common
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Rules are labelled by their Eq. 3 coordinates (beta, gamma, lambda_D). The draft's
-# "log-probability only" is (1,1,0) -- a full unit of entropy penalty -- so (1,0,0) is
-# the no-entropy control and (1,0,lambda_D) is disagreement instead of entropy.
+# Rules are labelled by their Eq. 3 coordinates (beta, gamma, lambda_D); (1,0,0) is
+# the no-entropy control and (1,0,lambda_D) uses disagreement without entropy.
 LABEL = {"uniform": "Uniform $(0,0,0)$", "logprob": "log-prob $(1,1,0)$",
          "typicality": "typicality $(1,0,0)$",
          "entropy": "/E $(1,\\gamma,0)$", "divergence": "/D $(1,1,\\lambda_D)$",

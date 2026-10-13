@@ -1,3 +1,10 @@
+// update_flatten_view: append one decoded token to every head of a ragged,
+// head-flattened KV cache ([sum_h len_h, head_dim], offsets cu_headlens), producing
+// the layout flash_attn_varlen_func reads. Used by DynamicCacheSplitHeadFlatten.
+//
+// From the AdaKV code base (https://github.com/FFY0/AdaKV, MIT), originally
+// written by 66RING (see csrc/LICENSE).
+
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda.h>

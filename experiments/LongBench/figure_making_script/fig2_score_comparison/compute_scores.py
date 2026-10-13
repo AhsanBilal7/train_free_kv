@@ -8,7 +8,7 @@ prompt + lookahead particles:
   * single_lookahead - LORE-KV output-projection perturbation score with the
                        window queries + ONE lookahead trajectory (Eq. 13, M=1).
   * lorekv_multi     - LORE-KV score with window + M confidence-weighted
-                       trajectories (Eq. 13, the full method).
+                       trajectories (Eq. 7, the full method).
 
 We reuse the *exact* per-layer scoring already implemented on each layer's
 `kv_cluster` (TestTimeLookaheadKVCluster._project_and_score), so the numbers

@@ -1,3 +1,16 @@
+"""Score Needle-in-a-Haystack predictions (paper Sec. 4.2, Figure 8).
+
+Each (length, depth) cell is scored with the reference ExactMatchScorer of
+https://github.com/gkamradt/LLMTest_NeedleInAHaystack (MIT): the fraction of the
+expected fragments that appear (case-insensitive) in the response, i.e. 1/0 for a
+single needle and graded for several. A word-level recall is recorded as well
+(``NIAH_METRIC=recall`` makes it the headline metric).
+
+For each run it writes ``result.json`` (the score grid, per-length means and the
+overall mean) and ``heatmap.png``, then prints a cross-run summary in which a
+length that was never run is shown as ``--`` and one that stopped mid-way as
+``tmp``, so runs are not compared over different grids.
+"""
 import os
 import sys
 import csv
@@ -6,34 +19,6 @@ import argparse
 
 import numpy as np
 
-# -----------------------------------------------------------------------------
-# NIAH scorer.
-#
-# Consumes the prediction jsonl files written by pred.py (one per target context
-# length under pred/<out_name>/) and scores each (length, depth) cell with the
-# reference ExactMatchScorer (needlehaystack/scorers/exact_match.py): the
-# FRACTION of the expected fragments that appear as (case-insensitive,
-# whitespace-trimmed) substrings of the model response. Single-needle cells
-# carry one fragment, so this is the classic 1.0/0.0 exact match; multi-needle
-# cells are graded (2 of 3 ingredients -> 0.667). A softer word-level recall is
-# also recorded for a smoother heatmap when desired (NIAH_METRIC=recall).
-#
-# For each run we write:
-#   * result.json  — the full (length x depth) score grid + per-length means +
-#                    an overall mean, plus the word-recall grid.
-#   * heatmap.png  — the signature NIAH retrieval heatmap (depth x length).
-#
-# Finally a cross-run SUMMARY TABLE is printed: one row per run, one column per
-# target context length (the per-length mean), plus the overall mean and the
-# number of scored cells. Because a run is only averaged over the lengths that
-# actually produced a final <length>.jsonl, two runs can silently report means
-# over different denominators — the table makes that explicit by marking
-#   '--'   a length that was never run, and
-#   'tmp'  a length that crashed mid-way (only <length>.jsonl_tmp exists, so
-#          pred.py never wrote the final file and it is excluded from the mean).
-# Rows whose length set differs from the most complete one are flagged so the
-# numbers are not compared across unequal grids.
-# -----------------------------------------------------------------------------
 
 # Which score drives result.json's headline means + the heatmap coloring:
 #   "exact_match" (default, faithful to gkamradt) or "recall" (graded word recall).
@@ -163,11 +148,7 @@ def save_heatmap(grid, lengths, depths, out_path, metric, run_name):
     plt.close(fig)
 
 
-# out_name is built by scripts/run_naming.py, which is also what parses it here, so
-# the summary table can never disagree with what run.sh wrote. causal_lookahead runs
-# are `lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_...`; baselines keep
-# `<mode>_<MODEL_TAG>_<B>_chunk_<cs>_red_<red>`. Both are handled, as are folders
-# written before the reparametrization.
+# Run folders are named and parsed by scripts/run_naming.py.
 sys.path.insert(0, os.path.abspath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "scripts")))
 from run_naming import parse_run_name  # noqa: E402

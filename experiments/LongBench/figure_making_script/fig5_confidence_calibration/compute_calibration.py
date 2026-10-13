@@ -9,7 +9,7 @@ confidence signal:
                    (b) recall@B   = top-B overlap of particle m's perturbation score
                                     with the oracle score S* (scored under Q_true)
   signals       :  mean log-prob, mean entropy, trajectory disagreement D_m,
-                   combined R_m = logp - lambda_H*H, normalized weight omega_m
+                   reliability R_m (Eq. 3), normalized weight omega_m
 
 Terminology note: this is ordinary categorical NEXT-TOKEN entropy, NOT semantic
 entropy (which groups meaning-equivalent generations). Keep them distinct.
@@ -91,8 +91,7 @@ def main():
         M = cap["M"]
         logprob = cap["particle_logprob"]; entropy = cap["particle_entropy"]
         divergence = cap["particle_divergence"]; divergence_z = cap["particle_divergence_z"]
-        # Eq. 3 at the /E cell in the new coordinates: (beta, gamma, lambda_D) =
-        # (1, 1 + lambda_H_old, 0). cbar = logp_mean + H_mean is the centered channel.
+        # LORE-KV /E reliability (Eq. 3): (beta, gamma, lambda_D) = (1, gamma_E, 0).
         c_bar = common.centered_score(logprob, entropy)
         combined = common.reliability_R(c_bar, entropy, beta=1.0, gamma=gamma_E)
         weights = torch.softmax(combined, dim=0)

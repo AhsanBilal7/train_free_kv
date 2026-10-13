@@ -1,3 +1,9 @@
+"""AnDPro attention / model forwards for Llama (transformers 4.44.2).
+
+Same structure as the Mistral hijack. Adapted from LLM-AnDPro (Geng et al., NeurIPS 2025; https://github.com/MIRALab-USTC/LLM-AnDPro, MIT) and the transformers
+4.44.2 Llama implementation (Apache-2.0). The Qwen2 and Ministral3 variants are
+generated from this file by ``scripts/gen_ext_hijacks.py``.
+"""
 import torch
 from typing import List, Optional, Tuple, Union
 from transformers.cache_utils import Cache, StaticCache

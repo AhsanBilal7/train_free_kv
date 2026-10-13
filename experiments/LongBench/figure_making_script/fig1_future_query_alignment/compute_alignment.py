@@ -12,8 +12,8 @@ estimated query sets cover them (cosine coverage, common.weighted_coverage):
   * a single lookahead trajectory      (Lookahead Q-Cache style)
   * M trajectories, uniform weights
   * M trajectories, log-probability weighting
-  * M trajectories, log-prob - entropy weighting        (the published rule)
-  * M trajectories, log-prob - trajectory-disagreement  (this method)
+  * M trajectories, LORE-KV /E weighting
+  * M trajectories, LORE-KV /D weighting
 
 Saved: alignment_data.npz (read by plot_alignment.py). No figure is drawn here.
 
@@ -67,15 +67,13 @@ def main():
     model, tokenizer = common.load_model_and_tokenizer(model_path)
     common.configure_model(model, conf, args.budget)
     # Every rule must be non-degenerate here even if the run's own config switched a
-    # channel off, otherwise the curves would be indistinguishable. gamma_E is
-    # 1 + lambda_H_old, so "entropy" relabels the published /E cell exactly.
+    # channel off, otherwise the curves would be indistinguishable.
     gamma_E = model.model.config.particle_gamma if model.model.config.particle_gamma > 1.0 else 1.3
     lambda_d = model.model.config.lambda_d if model.model.config.lambda_d > 0 else 0.3
     grid = common.weighting_grid(gamma_E=gamma_E, lambda_D=lambda_d)
 
-    # "logprob" is (1,1,0) -- the draft's "log-probability only" is a FULL unit of
-    # entropy penalty, not a no-penalty control; "typicality" (1,0,0) is that control,
-    # and "typ_div" (1,0,lambda_D) is disagreement INSTEAD of entropy.
+    # "logprob" is (1,1,0); "typicality" (1,0,0) is the no-entropy control and
+    # "typ_div" (1,0,lambda_D) uses disagreement without entropy (App. C.3).
     strategies = ["prompt_window", "single_traj"] + list(grid)
     # per-strategy: list (over samples) of arrays (over m_list) of mean coverage; resumable.
     state, done = ckpt.load_or({"acc": {s: [] for s in strategies}, "n_samples": 0})

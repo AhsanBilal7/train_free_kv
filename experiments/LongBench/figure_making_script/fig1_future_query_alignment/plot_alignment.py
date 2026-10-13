@@ -21,9 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 STYLE = {
     "prompt_window": ("Prompt-window queries", "#7f7f7f", "o", "--"),
     "single_traj":   ("Single trajectory (M=1)", "#1f77b4", "s", "--"),
-    # Labels are the (beta, gamma, lambda_D) coordinates of Eq. 3. Note that the
-    # draft's "log-probability only" is (1, 1, 0) -- a FULL unit of entropy penalty --
-    # while (1, 0, 0) is the actual no-entropy control.
+    # Labels are the (beta, gamma, lambda_D) coordinates of Eq. 3; log-probability
+    # only is (1, 1, 0) and (1, 0, 0) is the no-entropy control (App. C.3).
     "uniform":       (r"Uniform  $(0,0,0)$", "#2ca02c", "^", "-"),
     "logprob":       (r"Log-prob  $(1,1,0)$", "#ff7f0e", "D", "-"),
     "typicality":    (r"Typicality  $(1,0,0)$", "#9467bd", "v", "-"),

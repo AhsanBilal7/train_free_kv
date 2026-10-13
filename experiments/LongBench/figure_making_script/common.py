@@ -487,7 +487,7 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
     particle_logprob = particle_lp.mean(-1)          # kept: the figures index it by name
     particle_entropy = particle_H.mean(-1)
 
-    # Eq. 4/5: trajectory disagreement D_m, computed from the SAME per-layer lookahead
+    # Eq. 10 / App. C.3: trajectory disagreement D_m, computed from the SAME per-layer lookahead
     # query buffers the runner uses (so the figures and the deployed method score
     # identically). Always computed here -- even when lambda_D == 0 -- because test S4
     # (the incremental value of disagreement over (cbar, Hbar)) must run on ANY capture.
@@ -498,7 +498,7 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
         model.model.layers, M, layer_stride=div_stride, device=device)
     particle_divergence_z = standardize_disagreement(particle_divergence)
 
-    # Eq. 3/6: reliability score and normalized weights (matches the runner / paper).
+    # Eqs. 3-4: reliability score and normalized weights (matches the runner / paper).
     weights, parts = reliability_weights(
         particle_c, particle_H, particle_V, particle_divergence_z,
         beta=beta, gamma=gamma, lambda_d=lambda_d, normalize=normalize)
@@ -619,22 +619,21 @@ def softmax_weights(scores, eta=1.0):
 
 
 # ---------------------------------------------------------------------------
-# Eq. 3 in the (beta, gamma, lambda_D) parametrization, evaluated on a capture.
+# Trajectory reliability (Eqs. 2-3), evaluated on a capture.
 #
 #   c_u  = log q(y_u | h_u) + H(q(. | h_u)),  E[c_u | h_u] = 0
 #   R_m  = beta * cbar_m - gamma * Hbar_m - lambda_D * Dhat_m
 #
-# cbar_m is exactly recoverable from any existing capture as
-#   cbar_m = (mean log-prob)_m + (mean entropy)_m,
-# so every score-level sweep below re-weights already-captured particles with NO
-# re-decoding. Prop. 1 (nesting) in (beta, gamma, lambda_D) coordinates:
+# cbar_m = (mean log-prob)_m + (mean entropy)_m is recoverable from any capture, so
+# every score-level sweep below re-weights the same captured trajectories without
+# re-decoding. Settings in (beta, gamma, lambda_D) coordinates (App. C.3, Table 4):
 #
 #   uniform weights                     (0,   0,       0)
-#   draft "log-probability only"        (1,   1,       0)   <- a FULL entropy penalty
-#   draft LORE-KV /E (lambda_H = 0.3)   (1,   1.3,     0)
-#   draft LORE-KV /D (lambda_D = 0.3)   (1,   1,       0.3) <- disagreement ON TOP of it
-#   pure typicality                     (1,   0,       0)   <- unreachable before
-#   disagreement instead of entropy     (1,   0,       0.3) <- what /D was meant to be
+#   log-probability only                (1,   1,       0)
+#   LORE-KV /E                          (1,   1.3,     0)
+#   LORE-KV /D                          (1,   1,       0.3)
+#   typicality only                     (1,   0,       0)
+#   disagreement without entropy        (1,   0,       0.3)
 # ---------------------------------------------------------------------------
 def centered_score(logprob_mean, entropy_mean):
     """cbar_m = mean_u log q(y_u|h_u) + mean_u H_u."""
@@ -659,8 +658,8 @@ def reliability_weights_from_capture(c_bar, H_bar, d_hat=None, **kw):
     return F.softmax(reliability_R(c_bar, H_bar, d_hat, **kw), dim=0)
 
 
-# The (beta, gamma, lambda_D) grid every score-level figure compares. `gamma_E` is
-# 1 + lambda_H_old, so "entropy" relabels the published /E cell exactly.
+# The (beta, gamma, lambda_D) grid every score-level figure compares; gamma_E is
+# LORE-KV /E's entropy coefficient.
 def weighting_grid(gamma_E=1.3, lambda_D=0.3):
     return {
         "uniform":     (0.0, 0.0,     0.0),
@@ -673,7 +672,7 @@ def weighting_grid(gamma_E=1.3, lambda_D=0.3):
 
 
 # ---------------------------------------------------------------------------
-# Trajectory disagreement D_m (Eq. 7) recomputed from an already-captured sample.
+# Trajectory disagreement D_m (Eq. 10) recomputed from an already-captured sample.
 #
 # collect_and_lookahead() returns D over the FULL ensemble it generated; figures that
 # sweep nested prefixes (fig1's M in {1,2,4,8}) need D restricted to the prefix, since
@@ -735,7 +734,7 @@ def make_lookahead_batches(kvc, M):
 
 def combine_lookahead_scores(scores, weights, lambda_L, M):
     """Given _project_and_score output [window, p0..pM-1], build the window-only, single-
-    trajectory, and confidence-weighted multi scores (Eq. 13). Each is [H, n]."""
+    trajectory, and confidence-weighted multi scores (Eq. 7). Each is [H, n]."""
     s_window = scores[0]
     s_single = s_window + lambda_L * scores[1] if M >= 1 else s_window.clone()
     s_multi = s_window.clone()

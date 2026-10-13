@@ -1,3 +1,17 @@
+"""SnapKV, Ada-KV and StreamingLLM eviction clusters and the varlen per-head cache.
+
+* ``SnapKVCluster`` -- SnapKV (Li et al., NeurIPS 2024): pooled attention of the
+  observation-window queries, uniform budget per head; with ``pyram_mode`` the
+  PyramidKV layer schedule (Cai et al., 2025).
+* ``AdaptiveSnapKVCluster`` -- Ada-KV (Feng et al., 2025): the same scores with
+  the layer budget allocated adaptively across heads (``floor_alpha`` of each
+  head's budget is reserved). The repository's ``ada`` and ``critical`` modes use it.
+* ``StreamingLLMKVCluster`` -- attention sink plus recent window (Xiao et al., 2024).
+* ``DynamicCacheSplitHeadFlatten`` -- the ragged per-head cache used for decoding.
+
+Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT), which builds on SnapKV (https://github.com/FasterDecoding/SnapKV)
+and PyramidKV (https://github.com/Zefan-Cai/PyramidKV, MIT).
+"""
 import warnings
 
 import torch
