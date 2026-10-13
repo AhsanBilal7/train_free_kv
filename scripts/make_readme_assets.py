@@ -40,7 +40,7 @@ from PIL import Image  # noqa: E402
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(REPO, "assets")
 
-# Palette shared with assets/src/lorekv_architecture.tex and website/.
+# Palette shared with assets/src/lorekv_architecture.tex.
 SURFACE = "#f7f7f4"
 CARD = "#ffffff"
 RULE = "#e2e1dc"

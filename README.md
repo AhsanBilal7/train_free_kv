@@ -338,8 +338,7 @@ experiments/
 config/                       one .conf per configuration in the paper
 scripts/                      sweep driver, launchers, tables, latency, analyses, checks
 tests/                        CPU unit tests
-assets/                       README and project-page figures (scripts/make_readme_assets.py)
-website/                      project page (index.html)
+assets/                       README figures (scripts/make_readme_assets.py)
 ```
 
 ## ⚠️ Limitations
