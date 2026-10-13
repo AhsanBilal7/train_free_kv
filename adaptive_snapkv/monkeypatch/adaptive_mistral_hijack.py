@@ -1,5 +1,7 @@
-"""Ada-KV attention / model forwards for Mistral (transformers 4.44.2).
+"""Ada-KV attention and model forwards for Mistral (transformers 4.44.2).
 
+The prefill forward evicts one time through the ``kv_cluster`` of the layer. The
+decode forward reads the ragged per-head cache with ``flash_attn_varlen_func``.
 Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT) and the transformers 4.44.2 Mistral implementation (Apache-2.0).
 """
 import inspect

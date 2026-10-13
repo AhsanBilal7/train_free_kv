@@ -1,10 +1,9 @@
-"""Register the vendored backbone with the Auto* factories.
+"""Register the Ministral3 implementation with the Auto* classes.
 
-Only Ministral3 is vendored: `qwen2` and every other backbone the paper uses is
-native to the pinned Transformers release. pred.py loads every backbone through
-`AutoModelForCausalLM.from_pretrained`, so `ministral3` only needs to be findable
-by model_type. Calling this is idempotent and a no-op for any model_type
-transformers already knows, so it is safe to call unconditionally at import time.
+Only Ministral3 needs registration. All other backbones are in transformers 4.44.
+The drivers load each backbone with ``AutoModelForCausalLM.from_pretrained``. The
+function can be called more than one time, and it has no effect on a model type
+that transformers already contains.
 """
 
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer

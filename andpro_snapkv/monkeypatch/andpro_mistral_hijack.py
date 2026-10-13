@@ -1,7 +1,7 @@
-"""AnDPro attention / model forwards for Mistral (transformers 4.44.2).
+"""AnDPro attention and model forwards for Mistral (transformers 4.44.2).
 
-Prefill evicts once inside the attention forward via the layer's kv_cluster;
-decoding attends over the ragged per-head cache with ``flash_attn_varlen_func``.
+The prefill forward evicts one time through the ``kv_cluster`` of the layer. The
+decode forward reads the ragged per-head cache with ``flash_attn_varlen_func``.
 Adapted from LLM-AnDPro (Geng et al., NeurIPS 2025; https://github.com/MIRALab-USTC/LLM-AnDPro, MIT) and the transformers 4.44.2 Mistral implementation (Apache-2.0).
 """
 import inspect

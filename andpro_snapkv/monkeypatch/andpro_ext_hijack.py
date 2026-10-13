@@ -1,9 +1,7 @@
-"""andpro_ext_flash_attn2_forward -- andpro_snapkv's hijack for the models_ext backbones (Ministral3).
+"""andpro_ext_flash_attn2_forward: andpro_snapkv forwards for the models_ext backbones (Ministral3).
 
-GENERATED from andpro_snapkv/monkeypatch/andpro_llama_hijack.py by scripts/gen_ext_hijacks.py;
-do not edit by hand. Re-run the generator after any change to the Llama hijack
-so the two stay in lockstep. See that script's docstring for what is edited and
-why.
+Generated from andpro_snapkv/monkeypatch/andpro_llama_hijack.py by scripts/gen_ext_hijacks.py. Do not edit
+this file. Run the generator again after each change to the Llama forward.
 """
 
 from typing import Optional, Tuple

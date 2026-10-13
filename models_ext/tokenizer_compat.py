@@ -1,25 +1,27 @@
-"""Make a modern tokenizer.json readable by the pinned tokenizers 0.19.
+"""Convert a tokenizer.json to the format that tokenizers 0.19 can read.
 
-transformers 4.44 pins `tokenizers>=0.19,<0.20`. Files written by tokenizers
->= 0.20 store BPE merges as ["a", "b"] pairs; 0.19 only parses the older "a b"
-string form and fails the whole load with
+transformers 4.44 requires ``tokenizers>=0.19,<0.20``. tokenizers 0.20 and later
+store each BPE merge as a pair ["a", "b"]. Release 0.19 reads only the string
+format "a b" and fails with::
 
     Exception: data did not match any variant of untagged enum ModelWrapper
 
-Ministral-3 ships the new form. The two encodings are equivalent
-for byte-level BPE, where no merge piece can contain a literal space (spaces are
-the 'G-dot' byte), so the join back to a string is unambiguous -- and
-`downgrade_merges` refuses rather than guesses if that ever stops being true.
+The Ministral-3 tokenizer uses the pair format. For byte-level BPE no merge piece
+contains a space, so the conversion is exact. :func:`downgrade_merges` raises an
+error if a piece contains a space.
 
-This is a file-format downgrade only. It does not touch the vocabulary, the
-pre-tokenizer regex, the added tokens, or the decoder, so the resulting tokenizer
-produces identical ids; scripts/validate_models_ext.py checks that against the
-original file read by a modern tokenizers.
+The conversion changes only the file format. The vocabulary, pre-tokenizer, added
+tokens and decoder do not change, so the token IDs are the same.
+``scripts/validate_models_ext.py`` checks this.
 """
 
 
 def downgrade_merges(tok_json):
-    """["a","b"] merge pairs -> "a b" strings, in place. Returns the number rewritten."""
+    """Convert ["a", "b"] merge pairs to "a b" strings in place.
+
+    Returns:
+        The number of converted merges.
+    """
     model = tok_json.get("model", {})
     merges = model.get("merges")
     if not merges or isinstance(merges[0], str):

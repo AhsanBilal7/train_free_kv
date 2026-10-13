@@ -1,26 +1,22 @@
-"""The three class attributes every eviction package has to patch, per backbone.
+"""The three class attributes that each eviction package patches, for each backbone.
 
-Each `<pkg>/monkeypatch/monkeypatch.py` patches the same trio for Mistral and
-Llama:
+Each ``<pkg>/monkeypatch/monkeypatch.py`` patches these attributes for Mistral and
+Llama::
 
     <Model>ForCausalLM.prepare_inputs_for_generation
     <Model>FlashAttention2.forward
     <Model>Model.forward
 
-`apply_ext_hijack` installs that trio for the two backbones added on top of the
-pinned Transformers release, so a package's replace_* function stays a two-liner
-and no package has to know how either backbone is put together:
+:func:`apply_ext_hijack` patches the same attributes for the two additional
+backbones:
 
-  ministral3  vendored in models_ext as a Llama subclass, so the package passes
-              its LLAMA model forward and prepare_inputs verbatim; only the
-              attention forward is package-specific (see gen_ext_hijacks.py).
+    ministral3: A Llama subclass in models_ext. The package gives its Llama model
+        forward and prepare_inputs_for_generation. Only the attention forward is
+        specific to the package (see scripts/gen_ext_hijacks.py).
 
-  qwen2       native in transformers 4.44, so the classes come straight from
-              transformers. Its 4.44 implementation predates the rotary refactor,
-              so the package passes a Qwen2-specific model forward as well;
-              prepare_inputs_for_generation is byte-identical to Llama's apart
-              from a StaticCache branch these hijacks reject anyway, so the
-              package's Llama one is reused.
+    qwen2: The classes come from transformers 4.44. The package also gives a
+        Qwen2 model forward, because Qwen2 uses an older rotary interface. The
+        Llama prepare_inputs_for_generation is used, because it is equivalent.
 """
 
 from transformers.models.qwen2.modeling_qwen2 import (
@@ -43,11 +39,13 @@ EXT_BACKBONES = {
 
 
 def apply_ext_hijack(backbone, attn_forward, model_forward, prepare_inputs):
-    """Install one package's hijack onto one extra backbone.
+    """Install the forwards of one package on one additional backbone.
 
-    Setting the model forward explicitly (rather than relying on Ministral3
-    inheriting whatever was patched onto LlamaModel) keeps the backbones
-    independent of the order in which pred.py calls the replace_* functions.
+    The function sets the model forward explicitly. The result thus does not depend
+    on the order of the ``replace_*`` calls.
+
+    Raises:
+        ValueError: If ``backbone`` is not known.
     """
     try:
         attn_cls, model_cls, causal_lm_cls = EXT_BACKBONES[backbone]

@@ -113,12 +113,10 @@ ROPE_STASH = (
     "    self.config._rope_seq_len = int(position_ids.max()) + 1\n"
 )
 
-HEADER = '''"""{names} -- {pkg}'s hijack{plural} for {backbone}.
+HEADER = '''"""{names}: {pkg} forwards for {backbone}.
 
-GENERATED from {pkg}/monkeypatch/{src} by scripts/gen_ext_hijacks.py;
-do not edit by hand. Re-run the generator after any change to the Llama hijack
-so the two stay in lockstep. See that script's docstring for what is edited and
-why.
+Generated from {pkg}/monkeypatch/{src} by scripts/gen_ext_hijacks.py. Do not edit
+this file. Run the generator again after each change to the Llama forward.
 """
 '''
 

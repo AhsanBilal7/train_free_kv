@@ -1,4 +1,4 @@
-"""Install the AnDPro forwards on Mistral, Llama, Qwen2 and Ministral3 (``replace_*_andpro``).
+"""Functions that install the AnDPro forwards on Mistral, Llama, Qwen2 and Ministral3.
 
 Adapted from LLM-AnDPro (Geng et al., NeurIPS 2025; https://github.com/MIRALab-USTC/LLM-AnDPro, MIT).
 """
@@ -12,7 +12,7 @@ from andpro_snapkv.monkeypatch.andpro_llama_hijack import andpro_llama_flash_att
 from andpro_snapkv.monkeypatch.andpro_llama_hijack import prepare_inputs_for_generation_llama as ada_prepare_inputs_for_generation_llama
 
 def check_version():
-    """Warn when transformers is not the 4.44 release these patches were written for."""
+    """Warn if the installed transformers is not release 4.44."""
     try:
         transformers_version = version("transformers")
     except Exception as e:

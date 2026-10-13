@@ -1,16 +1,19 @@
-"""SnapKV, Ada-KV and StreamingLLM eviction clusters and the varlen per-head cache.
+"""SnapKV, Ada-KV and StreamingLLM eviction clusters and the per-head cache.
 
-* ``SnapKVCluster`` -- SnapKV (Li et al., NeurIPS 2024): pooled attention of the
-  observation-window queries, uniform budget per head; with ``pyram_mode`` the
-  PyramidKV layer schedule (Cai et al., 2025).
-* ``AdaptiveSnapKVCluster`` -- Ada-KV (Feng et al., 2025): the same scores with
-  the layer budget allocated adaptively across heads (``floor_alpha`` of each
-  head's budget is reserved). The repository's ``ada`` and ``critical`` modes use it.
-* ``StreamingLLMKVCluster`` -- attention sink plus recent window (Xiao et al., 2024).
-* ``DynamicCacheSplitHeadFlatten`` -- the ragged per-head cache used for decoding.
+Classes:
+    SnapKVCluster: SnapKV (Li et al., NeurIPS 2024). It pools the attention of the
+        observation-window queries and gives each head the same budget. With
+        ``pyram_mode`` it uses the PyramidKV layer schedule (Cai et al., 2025).
+    AdaptiveSnapKVCluster: Ada-KV (Feng et al., 2025). It uses the same scores and
+        divides the layer budget adaptively across heads. Each head keeps a
+        ``floor_alpha`` fraction of its budget. The ``ada`` and ``critical`` modes
+        use this class.
+    StreamingLLMKVCluster: Attention sink and recent window (Xiao et al., 2024).
+    DynamicCacheSplitHeadFlatten: The ragged per-head cache for decoding.
 
-Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT), which builds on SnapKV (https://github.com/FasterDecoding/SnapKV)
-and PyramidKV (https://github.com/Zefan-Cai/PyramidKV, MIT).
+Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT). AdaKV contains code from SnapKV
+(https://github.com/FasterDecoding/SnapKV) and PyramidKV
+(https://github.com/Zefan-Cai/PyramidKV, MIT).
 """
 import warnings
 
@@ -28,8 +31,10 @@ except ImportError:            # unused here, and flash-attn is optional on the
 # this version will not update in inference mode
 
 class DynamicCacheSplitHeadFlatten(Cache):
-    """
-    Flattened version of DynamicCacheSplitHead
+    """KV cache in which each head can keep a different number of tokens.
+
+    Each layer stores its heads one after the other in one tensor of shape
+    [sum_h len_h, head_dim].
     """
     def __init__(self) ->None:
         # Token wise List[]  Head wise KV List[torch.Tensor]
@@ -90,7 +95,7 @@ class DynamicCacheSplitHeadFlatten(Cache):
         return None
 
     def to_legacy_cache(self) -> Tuple[Tuple[torch.Tensor], Tuple[torch.Tensor]]:
-        """Converts the `DynamicCache` instance into the its equivalent in the legacy cache format."""
+        """Convert the cache to the legacy tuple format."""
         legacy_cache = ()
         for layer_idx in range(len(self)):
             legacy_cache += ((self.key_cache[layer_idx], self.value_cache[layer_idx]),)
@@ -98,7 +103,7 @@ class DynamicCacheSplitHeadFlatten(Cache):
 
     @classmethod
     def from_legacy_cache(cls, past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None) -> "DynamicCacheEachHead":
-        """Converts a cache in the legacy cache format into an equivalent `DynamicCache`."""
+        """Make a cache from the legacy tuple format."""
         cache = cls()
         if past_key_values is not None:
             for layer_idx in range(len(past_key_values)):
@@ -184,9 +189,10 @@ class DynamicCacheSplitHeadFlatten(Cache):
 
 # Copied from transformers.models.llama.modeling_llama.repeat_kv for gqa_support
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """Repeat the KV heads n_rep times, as torch.repeat_interleave(x, dim=1, repeats=n_rep).
+
+    The shape changes from (batch, num_key_value_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim).
     """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:

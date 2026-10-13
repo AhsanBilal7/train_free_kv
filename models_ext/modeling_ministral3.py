@@ -1,24 +1,18 @@
-"""Ministral3 text tower for transformers 4.44, expressed in the Llama idiom.
+"""Ministral3 text model for transformers 4.44, written as a Llama subclass.
 
-Structurally Ministral3 is Llama-3 (SwiGLU MLP, RMSNorm pre-norm blocks, GQA,
-no attention bias, no sliding window). It departs in exactly two places, both
-reproduced from `transformers.models.ministral3.modular_ministral3` in 5.x:
+Ministral3 has the structure of Llama-3: SwiGLU MLP, RMSNorm pre-norm blocks, GQA,
+no attention bias and no sliding window. It is different in two items. Both come
+from ``transformers.models.ministral3.modular_ministral3`` (release 5.x):
 
-  1. RoPE uses a YaRN inverse-frequency schedule. 4.44 also ships a "yarn"
-     branch, but an older one: it takes the correction range from
-     `max_position_embeddings` (262144) rather than from
-     `original_max_position_embeddings` (16384), and it derives the attention
-     factor as 0.1*log(factor)+1 rather than from the mscale ratio. Using it
-     would silently mis-rotate every position, so the schedule is recomputed
-     here with the newer formula.
-  2. After RoPE the query is scaled by
-         1 + beta * log(1 + floor(pos / original_max_position_embeddings)),
-     the "llama-4" length scaling. It is exactly 1 for every position below
-     16384 and 1.069 in the 16384-32767 band, so it matters for the long
-     LongBench/RULER prompts and is a no-op for the short ones.
+1. RoPE uses a YaRN inverse-frequency schedule. The "yarn" branch of release 4.44
+   is older and gives different frequencies: it uses ``max_position_embeddings``
+   (262144) and not ``original_max_position_embeddings`` (16384) for the
+   correction range. This module thus computes the schedule with the 5.x formula.
+2. After RoPE the query is multiplied by
+       1 + beta * log(1 + floor(pos / original_max_position_embeddings)).
+   The factor is 1 below position 16384 and 1.069 from 16384 to 32767.
 
-Verified against upstream `transformers.models.ministral3` -- see
-scripts/validate_models_ext.py.
+``scripts/validate_models_ext.py`` compares this module with the 5.x implementation.
 """
 
 import math
@@ -50,10 +44,10 @@ Ministral3MLP = LlamaMLP
 
 
 def compute_yarn_inv_freq(config: Ministral3Config, device=None):
-    """YaRN inverse frequencies + attention factor, per transformers 5.x.
+    """Compute the YaRN inverse frequencies and the attention factor (transformers 5.x).
 
-    Line-for-line `_compute_yarn_parameters` from transformers 5.16
-    `modeling_rope_utils.py`, restricted to the keys a Ministral3 config sets.
+    The function follows ``_compute_yarn_parameters`` of transformers 5.16
+    (``modeling_rope_utils.py``) for the keys of a Ministral3 config.
     """
     rp = config.rope_parameters
     base = float(rp["rope_theta"])
@@ -104,17 +98,16 @@ def compute_yarn_inv_freq(config: Ministral3Config, device=None):
 
 
 def get_llama_4_attn_scale(position_ids: torch.Tensor, beta: float, max_position_embeddings: int) -> torch.Tensor:
-    """[bsz, 1, seq, 1] query scale, broadcasting over heads and head_dim."""
+    """Return the query scale with shape [bsz, 1, seq, 1]."""
     scaling = 1 + beta * torch.log(1 + torch.floor(position_ids / max_position_embeddings))
     return scaling[:, None, :, None]
 
 
 class Ministral3RotaryEmbedding(nn.Module):
-    """`LlamaRotaryEmbedding`'s forward with the YaRN schedule above.
+    """Rotary embedding with the YaRN schedule of :func:`compute_yarn_inv_freq`.
 
-    Not a subclass: LlamaRotaryEmbedding.__init__ resolves the schedule through
-    `ROPE_INIT_FUNCTIONS[config.rope_scaling["rope_type"]]`, which is the 4.44
-    yarn this file exists to avoid.
+    The class does not subclass LlamaRotaryEmbedding, because that class uses the
+    4.44 YaRN schedule.
     """
 
     def __init__(self, config: Ministral3Config, device=None):
@@ -143,7 +136,7 @@ class Ministral3RotaryEmbedding(nn.Module):
 
 
 class Ministral3Attention(LlamaAttention):
-    """Eager attention with the YaRN rotary and the llama-4 query scale."""
+    """Eager attention with the YaRN rotary embedding and the llama-4 query scale."""
 
     def __init__(self, config: Ministral3Config, layer_idx: Optional[int] = None):
         super().__init__(config, layer_idx)
@@ -161,7 +154,7 @@ class Ministral3Attention(LlamaAttention):
         self._llama4_window = config.rope_parameters.get("original_max_position_embeddings")
 
     def project_qkv(self, hidden_states):
-        """q/k/v as [bsz, heads, q_len, head_dim]. Pre-RoPE; identical to Llama."""
+        """Return q, k and v with shape [bsz, heads, q_len, head_dim], before RoPE."""
         bsz, q_len, _ = hidden_states.size()
         q = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(hidden_states).view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -169,7 +162,7 @@ class Ministral3Attention(LlamaAttention):
         return q, k, v
 
     def scale_query(self, query_states, position_ids):
-        """Post-RoPE llama-4 length scaling. Exactly 1.0 below the 16384 window."""
+        """Apply the llama-4 query scale after RoPE. The scale is 1.0 below position 16384."""
         if not self._llama4_beta or position_ids is None:
             return query_states
         scale = get_llama_4_attn_scale(position_ids, self._llama4_beta, self._llama4_window)
@@ -345,11 +338,11 @@ class Ministral3PreTrainedModel(LlamaPreTrainedModel):
 
 
 class Ministral3Model(Ministral3PreTrainedModel, LlamaModel):
-    """Llama-3's model body with Ministral3 decoder layers.
+    """Llama-3 model body with Ministral3 decoder layers.
 
-    `self.rotary_emb` is the YaRN one, so the `position_embeddings` LlamaModel.forward
-    computes once and threads through the layers already carries the right schedule;
-    the per-layer `rotary_emb` is only a fallback for callers that pass none.
+    ``self.rotary_emb`` uses the YaRN schedule, so the ``position_embeddings`` that
+    LlamaModel.forward computes are correct. The rotary embedding of each layer is
+    used only if the caller gives no position embeddings.
     """
 
     def __init__(self, config: Ministral3Config):

@@ -1,9 +1,7 @@
-"""causal_lookahead_qwen2_Qwen2Model_forward, causal_lookahead_qwen2_flash_attn2_forward -- lorekv's hijacks for Qwen2 (native in transformers 4.44).
+"""causal_lookahead_qwen2_Qwen2Model_forward, causal_lookahead_qwen2_flash_attn2_forward: lorekv forwards for Qwen2 (native in transformers 4.44).
 
-GENERATED from lorekv/monkeypatch/causal_llama_hijack.py by scripts/gen_ext_hijacks.py;
-do not edit by hand. Re-run the generator after any change to the Llama hijack
-so the two stay in lockstep. See that script's docstring for what is edited and
-why.
+Generated from lorekv/monkeypatch/causal_llama_hijack.py by scripts/gen_ext_hijacks.py. Do not edit
+this file. Run the generator again after each change to the Llama forward.
 """
 
 from typing import List, Optional, Tuple, Union

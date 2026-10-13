@@ -1,15 +1,15 @@
-"""Ministral3 (text tower) configuration for transformers 4.44.
+"""Configuration of the Ministral3 text model for transformers 4.44.
 
-`mistralai/Ministral-3-8B-Instruct-2512` ships as a `Mistral3ForConditionalGeneration`
-checkpoint: a Pixtral vision tower plus a `ministral3` text model. Only the text
-tower is used here, and scripts/convert_ministral3.py writes it out as a
-standalone checkpoint whose config.json is exactly what this class parses.
+``mistralai/Ministral-3-8B-Instruct-2512`` is a ``Mistral3ForConditionalGeneration``
+checkpoint with a Pixtral vision tower and a ``ministral3`` text model. Only the
+text model is used. ``scripts/convert_ministral3.py`` writes it as a separate
+checkpoint, and this class reads its config.json.
 
-Two fields drive the departures from Llama, both carried inside `rope_parameters`
-verbatim from upstream so nothing is re-derived:
-  * a YaRN inverse-frequency schedule (`type: yarn`, factor 16 over an original
-    16384-token window), and
-  * `llama_4_scaling_beta`, a post-RoPE query scale that grows with position.
+Two fields in ``rope_parameters`` make the model different from Llama:
+
+* a YaRN inverse-frequency schedule (``type: yarn``, factor 16 over an original
+  window of 16384 tokens), and
+* ``llama_4_scaling_beta``, a post-RoPE query scale that increases with the position.
 """
 
 from transformers.configuration_utils import PretrainedConfig

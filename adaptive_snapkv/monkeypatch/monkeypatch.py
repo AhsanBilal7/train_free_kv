@@ -1,4 +1,5 @@
-"""Install the SnapKV (``fixed``), Ada-KV (``adaptive``) and StreamingLLM (``slm``) forwards.
+"""Functions that install the SnapKV (``fixed``), Ada-KV (``adaptive``) and
+StreamingLLM (``slm``) forwards.
 
 Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT).
 """
@@ -20,7 +21,7 @@ from adaptive_snapkv.monkeypatch.slm_llama_hijack import slm_llama_flash_attn2_f
 from adaptive_snapkv.monkeypatch.slm_mistral_hijack import slm_mistral_flash_attn2_forward, slm_MistralModel_forward
 
 def check_version():
-    """Warn when transformers is not the 4.44 release these patches were written for."""
+    """Warn if the installed transformers is not release 4.44."""
     try:
         transformers_version = version("transformers")
     except Exception as e:

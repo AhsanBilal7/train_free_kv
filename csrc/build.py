@@ -1,6 +1,6 @@
 """Build the ``tiny_api_cuda`` extension (``update_flatten_view``) for sm_80 and sm_90.
 
-Run through ``make install`` from the repository root. From the AdaKV code base
+Run ``make install`` from the repository root. From AdaKV
 (https://github.com/FFY0/AdaKV, MIT); see csrc/LICENSE.
 """
 import subprocess

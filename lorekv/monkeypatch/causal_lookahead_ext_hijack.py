@@ -1,9 +1,7 @@
-"""causal_lookahead_ext_flash_attn2_forward -- lorekv's hijack for the models_ext backbones (Ministral3).
+"""causal_lookahead_ext_flash_attn2_forward: lorekv forwards for the models_ext backbones (Ministral3).
 
-GENERATED from lorekv/monkeypatch/causal_llama_hijack.py by scripts/gen_ext_hijacks.py;
-do not edit by hand. Re-run the generator after any change to the Llama hijack
-so the two stay in lockstep. See that script's docstring for what is edited and
-why.
+Generated from lorekv/monkeypatch/causal_llama_hijack.py by scripts/gen_ext_hijacks.py. Do not edit
+this file. Run the generator again after each change to the Llama forward.
 """
 
 from typing import Optional, Tuple

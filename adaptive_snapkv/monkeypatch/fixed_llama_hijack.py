@@ -1,5 +1,7 @@
-"""SnapKV / PyramidKV attention / model forwards for Llama (transformers 4.44.2).
+"""SnapKV and PyramidKV attention and model forwards for Llama (transformers 4.44.2).
 
+The prefill forward evicts one time through the ``kv_cluster`` of the layer. The
+decode forward reads the ragged per-head cache with ``flash_attn_varlen_func``.
 Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT) and the transformers 4.44.2 Llama implementation (Apache-2.0).
 """
 import torch
