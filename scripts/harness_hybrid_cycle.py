@@ -1,15 +1,17 @@
 #!/usr/bin/env python
-"""Fast local harness: prefill -> lookahead -> compress -> ragged decode, tiny model.
+"""Run prefill, lookahead, compression and ragged decoding on a small random hybrid model.
 
-Drives the same LORE-KV / baseline code path as a real hybrid-backbone run on a
-randomly initialised Qwen3.5 (2 full-attention + 6 linear-attention layers) or
-Gemma 4 model with tiny dimensions, so one cycle takes seconds on CPU. Needs the
-transformers 5.x environment of the hybrid backbones.
+The script uses the same LORE-KV and baseline code as a real hybrid-backbone run,
+on a random Qwen3.5 model (2 full-attention and 6 linear-attention layers) or a
+random Gemma 4 model with small dimensions. One run takes seconds on CPU. It
+requires the transformers 5.x environment of the hybrid backbones.
 
-It is a plumbing test, not a quality test: random weights produce meaningless
-tokens. It asserts that the pipeline completes and that eviction happened.
+The test checks the data flow, not the quality: random weights give random
+tokens. It checks that the pipeline finishes and that eviction occurs.
 
-    python scripts/harness_hybrid_cycle.py            # qwen3.5-shaped
+Usage::
+
+    python scripts/harness_hybrid_cycle.py              # Qwen3.5 shape
     python scripts/harness_hybrid_cycle.py --arch gemma4
 """
 
@@ -30,7 +32,7 @@ BASE_CONFIGS = {"qwen35": os.path.join(REPO_ROOT, "models", "Qwen3.5-9B"),
 
 
 def build_tiny(arch, base_config=None):
-    """A tiny hybrid model with the same layer_types structure as the real one."""
+    """Make a small hybrid model with the same layer-type structure as the real model."""
     from transformers import AutoConfig, AutoModelForCausalLM
 
     if arch == "qwen35":

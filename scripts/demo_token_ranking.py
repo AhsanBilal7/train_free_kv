@@ -1,64 +1,48 @@
-"""Token-ranking analysis: CriticalKV vs AnDPro vs LORE-KV on the SAME captured state.
+"""Compare CriticalKV, AnDPro and LORE-KV on the same captured state (paper App. F.1-F.5, Figures 9-11).
 
-Paper App. F.1-F.5 (Figures 9-11): the score-level evidence behind the end-to-end
-tables. Given one prompt, one prefill and one set of lookahead particles, it scores
-every candidate KV pair under each method's own criterion, selects a cache with a
-shared selector, and measures how well each retained cache matches what the model
-actually needs while answering -- the true decoding queries, recorded afterwards
-from a full-cache greedy decode and used only as ground truth.
+For one prompt, one prefill and one set of lookahead trajectories, the script
+scores each candidate KV pair with the criterion of each method. It selects a
+cache with one shared selector. It then measures how well each cache agrees with
+the true decoding queries, which a full-cache greedy decode gives after the fact.
 
-Criteria (all evaluated on identical captured K/V, window queries and particles)
--------------------------------------------------------------------------------
-  criticalkv       repo `MODE=critical` (experiments/*/pred.py -> replace_*_adaptive):
-                   pooled mean prompt-window attention over the last w queries,
-                   maxpool(kernel=7) smoothed. Ported verbatim from
-                   adaptive_snapkv/monkeypatch/snapkv_utils.py:AdaptiveSnapKVCluster.
-  andpro           repo `MODE=andpro`: anchor-direction projection -- each chunk's
-                   attention-weighted value vector projected on the summed droppable
-                   value direction, accumulated over the w window queries. Ported
-                   verbatim from andpro_snapkv/monkeypatch/snapkv_utils.py.
-  lorekv_window    LORE-KV score at lambda_L = 0: projected leave-one-out deletion
-                   effect (Eq. 5) on prompt-window queries only. This is the paper's
-                   "AnDPro window" analysis criterion (App. mechanism protocol).
-  lorekv           the full method (Eq. 7): window + lambda_L * sum_m omega_m * particle_m,
-                   with omega from the config's (beta, gamma, lambda_D).
-  oracle           the same projected score evaluated on the TRUE future decoding
-                   queries. Not deployable -- it is the target every criterion is
-                   trying to approximate.
+Criteria (all on the same K, V, window queries and trajectories):
+    criticalkv: The ``critical`` mode of this repository: mean attention of the last
+        w prompt queries with max pooling (kernel 7), copied from
+        ``AdaptiveSnapKVCluster`` in ``adaptive_snapkv``.
+    andpro: The ``andpro`` mode: projection of the attention-weighted value of each
+        chunk onto the summed droppable value direction, over the w window
+        queries. Copied from ``andpro_snapkv``.
+    lorekv_window: The LORE-KV score with lambda_L = 0 (prompt-window queries only).
+    lorekv: The full score of Eq. 7 with the weights of the config.
+    oracle: The projected score on the true decoding queries. It is the target of
+        all criteria and is not available at eviction time.
 
-Metrics (per sample x budget x criterion; per layer, then aggregated)
----------------------------------------------------------------------
-  recall_at_b      |top_B(S) ∩ top_B(S*)| / B against the oracle ranking (Eq. 14)
-  spearman         rank correlation with the oracle score
-  fidelity         cos(o_retained, o_full) on the true future queries (Eq. 15)
-  evidence_keep    fraction of gold-answer token positions surviving eviction
-  evidence_enrich  P(answer token | retained) / P(answer token | prompt)
-  overlap_*        pairwise top-B agreement between criteria (how far the rankings move)
-  stability        LORE-KV top-B self-overlap between two disjoint halves of the
-                   particle ensemble -- the sampling-noise robustness check
+Metrics (for each sample, budget and criterion; per layer, then averaged):
+    recall_at_b: |top_B(S) and top_B(S*)| / B against the oracle (Eq. 14).
+    spearman: Rank correlation with the oracle score.
+    fidelity: cos(o_retained, o_full) on the true queries (Eq. 15).
+    evidence_keep: Fraction of the answer-token positions that are kept.
+    evidence_enrich: P(answer token | kept) / P(answer token | prompt).
+    overlap_*: Top-B agreement between two criteria.
+    stability: Top-B agreement of LORE-KV between two halves of the trajectories.
 
-Selection is held FIXED across criteria (uniform per-head chunk top-B with the
-protected set forced in), so every difference is attributable to the score alone;
-this is the paper's own mechanism protocol. Budgets are in tokens and converted to
-chunks with the config's chunk size, exactly as compress() does.
+All criteria use the same selector: uniform per-head top-B over chunks, with the
+protected set always kept. A difference is thus caused by the score only.
 
-Outputs (everything under --out-dir, default ./demos)
-----------------------------------------------------
-  demos/<run>/manifest.json                        config, model, hyperparameters, git sha
-  demos/<run>/samples/<dataset>__s<i>.npz          per-sample arrays (per layer, per budget)
-  demos/<run>/summary_long.csv                     tidy rows: one metric value per row
-  demos/<run>/summary.json                         aggregated mean / sem per (dataset, budget, method)
-  demos/<run>/profiles/<dataset>__s<i>.npz         score profiles for the ranking figures
+Outputs (in ``--out-dir``, default ``./demos``):
+    <run>/manifest.json: Config, model, hyperparameters and git commit.
+    <run>/samples/<dataset>__s<i>.npz: Arrays of each sample.
+    <run>/summary_long.csv: One metric value per row.
+    <run>/summary.json: Mean and standard error for each dataset, budget and method.
+    <run>/profiles/<dataset>__s<i>.npz: Score profiles for the figures.
 
-Usage (on a GPU node; login nodes have no GPU)
-----------------------------------------------
-  python scripts/demo_token_ranking.py --benchmark longbench --dataset single \\
-      --samples-per-dataset 2 --budgets 128 512
-  python scripts/demo_token_ranking.py --benchmark ruler --dataset 4096,8192 \\
-      --samples-per-dataset 2 --budgets 128 512
+Usage (on a GPU node)::
 
-  # both benchmarks through the cluster wrapper:
-  sbatch scripts/run_demo_token_ranking.sh
+    python scripts/demo_token_ranking.py --benchmark longbench --dataset single \
+        --samples-per-dataset 2 --budgets 128 512
+    python scripts/demo_token_ranking.py --benchmark ruler --dataset 4096,8192 \
+        --samples-per-dataset 2 --budgets 128 512
+    sbatch scripts/run_demo_token_ranking.sh     # both benchmarks
 """
 from __future__ import annotations
 
@@ -93,12 +77,11 @@ PAIRS = [("criticalkv", "lorekv"), ("andpro", "lorekv"), ("criticalkv", "andpro"
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def score_criticalkv(kvc, key, kernel_size=7, pooling="maxpool"):
-    """Port of AdaptiveSnapKVCluster.calcul_attn_sore -> [H, n] (window columns = -inf).
+    """Return the CriticalKV score [H, n] (copy of ``AdaptiveSnapKVCluster.calcul_attn_sore``).
 
-    attn over the last w prompt queries, causal inside the window, averaged over the
-    query axis, then max-pooled along the candidate axis. The window columns are not
-    scored there (they are protected), so they are returned as -inf and forced in by
-    the shared selector.
+    The attention of the last w prompt queries (causal inside the window) is averaged
+    over the queries and max-pooled over the candidates. The window columns are
+    protected, so they get -inf, and the shared selector keeps them.
     """
     q = kvc.window_queries[0].float()          # [H, w, D]
     k = key[0].float()                         # [H, n, D]
@@ -127,12 +110,12 @@ def score_criticalkv(kvc, key, kernel_size=7, pooling="maxpool"):
 @torch.no_grad()
 def score_andpro(kvc, key, value, chunk_size=4, window_size=32, kernel_size=7,
                  pooling="maxpool"):
-    """Port of AndProSnapKVCluster.update_kv_wo_gqa's scoring core -> [H, n].
+    """Return the AnDPro score [H, n] (scoring part of ``update_kv_wo_gqa``).
 
-    Per window query i, chunk-sum the attention-weighted values, take the inner product
-    with the summed *droppable* chunk direction (the anchor), and accumulate over i.
-    Chunk scores are expanded back to their tokens so every criterion is compared on
-    the same [H, n] grid; the shared selector re-pools them to chunks anyway.
+    For each window query the function sums the attention-weighted values of each
+    chunk, takes the inner product with the summed droppable chunk direction (the
+    anchor), and adds the result over the queries. Chunk scores are copied to their
+    tokens, so all criteria use the same [H, n] grid.
     """
     q = kvc.window_queries[0].float()          # [H, w, D]
     k = key[0].float()
@@ -177,7 +160,7 @@ def score_andpro(kvc, key, value, chunk_size=4, window_size=32, kernel_size=7,
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def select_mask(scores, n, budget, window_size, chunk_size):
-    """scores: [H, n] -> bool token mask [H, n] retaining `budget` tokens per head."""
+    """Return a bool mask [H, n] that keeps ``budget`` tokens in each head."""
     H = scores.shape[0]
     device = scores.device
     pad = (chunk_size - (n % chunk_size)) % chunk_size
@@ -214,11 +197,10 @@ def spearman(a, b):
 
 @torch.no_grad()
 def mask_overlap(mask_a, mask_b, restrict=None):
-    """Mean per-head overlap |A ∩ B| / |A| (both masks keep the same count).
+    """Return the mean per-head overlap |A and B| / |A| of two masks with the same count.
 
-    `restrict` (bool [n]) limits the comparison to those positions -- used to drop the
-    protected set, which every criterion retains by construction and which would
-    otherwise account for ~25% of the agreement at B = 128.
+    ``restrict`` (bool [n]) limits the comparison to these positions. Use it to
+    exclude the protected set, which all criteria keep.
     """
     if restrict is not None:
         mask_a = mask_a & restrict.unsqueeze(0)
@@ -230,7 +212,7 @@ def mask_overlap(mask_a, mask_b, restrict=None):
 
 @torch.no_grad()
 def fidelity(true_q, key, value, mask):
-    """cos(o_retained, o_full) averaged over heads and future-query steps."""
+    """Return cos(o_retained, o_full), averaged over heads and future-query steps."""
     q = true_q[0].float()                     # [H, Tt, D]
     k = key[0].float()
     v = value[0].float()
@@ -241,12 +223,11 @@ def fidelity(true_q, key, value, mask):
 
 
 def find_answer_positions(input_ids, answers, tokenizer):
-    """Positions of gold-answer tokens in the prompt.
+    """Return the positions of the answer tokens in the prompt.
 
-    Exact token-id subsequence match first (the paper's D4 rule); if an answer never
-    appears as a contiguous id run (tokenizer boundary effects), fall back to the set of
-    its content token ids, ignoring ids that occur in more than 2% of the prompt so a
-    stopword does not swamp the class.
+    The function first looks for the answer as a contiguous token-ID sequence. If it
+    does not find it, it uses the content token IDs of the answer and ignores IDs that
+    are more than 2% of the prompt.
     """
     ids = input_ids[0].tolist()
     n = len(ids)
@@ -291,7 +272,7 @@ def find_answer_positions(input_ids, answers, tokenizer):
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def run_sample(model, tokenizer, sample, cap, args, cfg):
-    """Return (rows, per_sample_arrays, profiles) for one captured prompt."""
+    """Return ``(rows, per_sample_arrays, profiles)`` for one captured prompt."""
     from lorekv.monkeypatch.scoring import repeat_kv
 
     n = cap["n"]
@@ -467,7 +448,7 @@ def git_sha():
 
 
 def aggregate(rows):
-    """mean / sem / n per (dataset, budget, method, metric)."""
+    """Return the mean, standard error and count for each dataset, budget, method and metric."""
     agg = {}
     for r in rows:
         k = (r["dataset"], r["budget"], r["method"], r["metric"])

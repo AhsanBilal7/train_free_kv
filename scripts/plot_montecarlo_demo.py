@@ -1,20 +1,16 @@
-"""Figure: the M lookahead trajectories as Monte-Carlo samples of response-side queries.
+"""Draw the M lookahead trajectories as Monte Carlo samples of answer-time queries (paper Figure 1).
 
-Draws what scripts/demo_montecarlo_queries.py captured, for one prompt:
+The script reads the output of ``scripts/demo_montecarlo_queries.py`` for one prompt
+and draws:
 
-  (a) the query states themselves, projected to 2D by a PCA fitted on their union: the
-      prompt-end window (grey), the M sampled trajectories (colours) and the queries the
-      model really issues while answering (black stars). The samples land where the
-      future queries live; the window does not.
-  (b) coverage of the true future queries against the number of trajectories, over nested
-      prefixes of the same draw, with the prompt-window value as the reference line --
-      the estimator converging.
-  (c) the trajectories as text, with their reliability weight and coverage, beside the
-      answer the model actually produced. This is the concrete reading of "plausible
-      response-side continuation".
+(a) the query states in 2-D (PCA of their union): the prompt window (grey), the M
+    trajectories (colors) and the true answer-time queries (black stars);
+(b) the coverage of the true queries as a function of M, over nested prefixes of
+    the same sample, with the prompt-window value as reference;
+(c) the trajectories as text, with their weight and coverage, and the real answer.
 
-Usage
------
+Usage::
+
     python scripts/plot_montecarlo_demo.py                       # newest capture
     python scripts/plot_montecarlo_demo.py --run demos/montecarlo/<tag> --sample 0
 """
@@ -96,7 +92,7 @@ def newest_run(root):
 
 
 def make_query_scatter(ax, d, colors):
-    """PCA of the query states: window, sampled trajectories, true decoding steps."""
+    """Draw the PCA of the query states: window, trajectories and true decoding steps."""
     coords = np.asarray(d["coords"])
     nW, M, T = int(d["n_window"]), int(d["M"]), int(d["T"])
     W, P, F = coords[:nW], coords[nW:nW + M * T], coords[nW + M * T:]
@@ -139,11 +135,10 @@ def make_coverage_curve(ax, d):
 
 
 def make_text_panel(ax, texts, d, colors, width=54, max_rows=5):
-    """The trajectories as text, with omega and coverage, beside the real answer.
+    """Show the trajectories as text with their weight and coverage, and the real answer.
 
-    Identical continuations are collapsed with a count, and the LOWEST-weight
-    trajectory is always shown: a branch the ensemble does not reproduce, and the
-    small omega it receives, is the whole point of the reliability term.
+    Equal continuations are shown one time with a count. The trajectory with the
+    lowest weight is always shown.
     """
     ax.set_axis_off()
     parts = texts["particles"]

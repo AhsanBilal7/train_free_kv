@@ -1,31 +1,23 @@
-"""Monte Carlo lookahead made concrete (paper Figure 1, App. F.2): what the M trajectories are.
+"""Capture the Monte Carlo lookahead trajectories of real prompts (paper Figure 1, App. F.2).
 
-The paper claims that "the $M$ lookahead trajectories form Monte-Carlo samples of
-plausible response-side query states". This script captures exactly that object for a
-real prompt and writes everything a figure needs to show it:
+For each prompt the script records:
 
-  * the text of each sampled continuation, and of the answer the model really produces
-    from the full cache -- so the reader sees what "a plausible future" is;
-  * the post-RoPE query states of the prompt-end window, of each sampled trajectory, and
-    of the true decoding steps, projected to 2D by a PCA fitted on their union -- so the
-    reader sees the samples land where the future queries live and the prompt window
-    does not;
-  * per-particle coverage of the true future queries and the reliability weight omega_m,
-    so a mis-sampled branch can be seen being down-weighted;
-  * coverage as a function of M over nested prefixes of the same draw, which is the
-    estimator converging.
+* the text of each sampled continuation and of the answer from the full cache;
+* the post-RoPE queries of the prompt window, of each trajectory and of the true
+  decoding steps, with a 2-D PCA of their union;
+* the coverage of the true queries by each trajectory, and its weight omega_m;
+* the coverage as a function of M, over nested prefixes of the same sample.
 
-Everything is captured with the deployed code path (the same monkeypatch, config and
-scoring buffers as scripts/demo_token_ranking.py), so the picture is of the method as it
-runs, not of a re-implementation.
+The script uses the same patches, configuration and buffers as
+``scripts/demo_token_ranking.py``.
 
-Usage (GPU node)
-----------------
-    python scripts/demo_montecarlo_queries.py --benchmark ruler --dataset 4096 \\
+Usage (on a GPU node)::
+
+    python scripts/demo_montecarlo_queries.py --benchmark ruler --dataset 4096 \
         --samples-per-dataset 1 --particles 8
-    python scripts/plot_montecarlo_demo.py            # draws the figure
+    python scripts/plot_montecarlo_demo.py
 
-Output: demos/montecarlo/<tag>/sample_<i>.npz  +  sample_<i>.json (the texts)
+Output: ``demos/montecarlo/<tag>/sample_<i>.npz`` and ``sample_<i>.json`` (the texts).
 """
 from __future__ import annotations
 
@@ -51,11 +43,17 @@ def unit(x, eps=1e-8):
 
 @torch.no_grad()
 def head_coverage(true_q, src):
-    """Per-head coverage of the true queries by one query source.
+    """Return the coverage of the true queries by one query source, for each head.
 
-    true_q, src: [H, T, D] and [H, Q, D] -> [H] mean over true steps of the best cosine
-    to any query in the source. This is Eq. 13 restricted to a single source, so
-    it is comparable across heads and across sources.
+    The coverage is the mean, over the true steps, of the best cosine to a query of
+    the source (Eq. 13 for one source).
+
+    Args:
+        true_q: Tensor [H, T, D].
+        src: Tensor [H, Q, D].
+
+    Returns:
+        Tensor [H].
     """
     tq, s = unit(true_q.float()), unit(src.float())
     sim = torch.matmul(tq, s.transpose(1, 2))          # [H, T, Q]
@@ -64,10 +62,10 @@ def head_coverage(true_q, src):
 
 @torch.no_grad()
 def capture(model, tokenizer, input_ids, attention_mask, decode_steps, cfg):
-    """Prefill + true greedy decode + M sampled trajectories, keeping the token ids.
+    """Run the prefill, the true greedy decode and M sampled trajectories, and keep the token IDs.
 
-    A trimmed copy of common._collect_and_lookahead_impl. The only addition is that the
-    sampled and greedy token ids are kept, so the trajectories can be shown as text.
+    This is a short copy of ``common._collect_and_lookahead_impl`` that also keeps the
+    sampled and greedy token IDs.
     """
     from lorekv.monkeypatch.lookahead_runner import _shape_logits
     from lorekv.monkeypatch.scoring import (
@@ -160,7 +158,7 @@ def capture(model, tokenizer, input_ids, attention_mask, decode_steps, cfg):
 
 
 def pca2(X):
-    """2-D PCA of unit-normalised rows; returns coords and the explained-variance ratio."""
+    """Compute a 2-D PCA of unit-normalized rows. Return the coordinates and the explained variance."""
     X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-8)
     Xc = X - X.mean(0, keepdims=True)
     U, S, Vt = np.linalg.svd(Xc, full_matrices=False)

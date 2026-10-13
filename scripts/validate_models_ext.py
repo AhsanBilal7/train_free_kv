@@ -1,35 +1,31 @@
 #!/usr/bin/env python
-"""Check the vendored models_ext backbones against upstream transformers.
+"""Compare the models_ext implementation with the upstream transformers implementation.
 
-models_ext/ re-expresses Ministral3 in the transformers 4.44 Llama
-idiom because the eviction hijacks cannot survive the transformers version those
-architectures actually shipped in. That is only sound if the re-expression is
-numerically the same model, so this script runs the SAME checkpoint on the SAME
-tokens under both implementations and compares the logits.
+models_ext implements Ministral3 as a transformers 4.44 Llama subclass, because the
+eviction patches do not work with the transformers release that contains the
+architecture. This script runs the same checkpoint on the same tokens with both
+implementations and compares the logits.
 
-It is deliberately two processes, because the two implementations cannot coexist
-in one interpreter -- they need different transformers releases:
+The two implementations need different transformers releases, so the script runs
+in two processes::
 
-  # 1. reference, in the transformers 5.x environment
-  $TF5_PY scripts/validate_models_ext.py --impl upstream \
-      --model models/Ministral-3-8B-Instruct-2512 \
-      --ref-model mistralai/Ministral-3-8B-Instruct-2512 --out val/upstream.npz
+    # 1. Reference, in the transformers 5.x environment
+    $TF5_PY scripts/validate_models_ext.py --impl upstream \\
+        --model models/Ministral-3-8B-Instruct-2512 \\
+        --ref-model mistralai/Ministral-3-8B-Instruct-2512 --out val/upstream.npz
 
-  # 2. this repo's implementation, in the main environment
-  python scripts/validate_models_ext.py --impl vendored \
-      --model models/Ministral-3-8B-Instruct-2512 --out val/vendored.npz
+    # 2. This implementation, in the main environment
+    python scripts/validate_models_ext.py --impl vendored \\
+        --model models/Ministral-3-8B-Instruct-2512 --out val/vendored.npz
 
-  # 3. compare (either environment)
-  python scripts/validate_models_ext.py --compare val/upstream.npz val/vendored.npz
+    # 3. Comparison (either environment)
+    python scripts/validate_models_ext.py --compare val/upstream.npz val/vendored.npz
 
-Both runs use sdpa and bfloat16 so the only difference is the modelling code:
-flash-attention is not installed in the reference venv, and matching the kernel
-matters more than matching production here.
+Both runs use SDPA and bfloat16, so only the model code is different.
 
-For Ministral3 the two sides load different directories -- upstream reads the
-published Mistral3 wrapper, `vendored` reads the text-only checkpoint written by
-scripts/convert_ministral3.py -- so pass --ref-model for the upstream side. That
-is intentional: it validates the conversion and the modelling code together.
+The upstream side reads the published Mistral3 checkpoint (``--ref-model``). The
+vendored side reads the text-only checkpoint of ``scripts/convert_ministral3.py``.
+The test thus also checks the conversion.
 """
 
 import argparse

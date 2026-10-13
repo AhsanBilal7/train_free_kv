@@ -1,4 +1,4 @@
-"""CPU checks of LORE-KV's estimator and scoring against the paper's equations."""
+"""CPU tests of the LORE-KV estimator and scoring against the equations of the paper."""
 import math
 
 import pytest
@@ -16,6 +16,7 @@ torch.manual_seed(0)
 
 
 def _cluster(window=8, budget=16, chunk=4, H=2, D=8, hidden=12, **kw):
+    """Make a small TestTimeLookaheadKVCluster with a random output projection."""
     args = dict(window_size=window, base_capacity=budget, chunk_size=chunk, skip=0,
                 layer_idx=0, num_hidden_layers=1, num_particles=2, lookahead_len=3,
                 particle_beta=1.0, particle_gamma=1.3, robust_alpha=0.0,
@@ -32,7 +33,7 @@ def _cluster(window=8, budget=16, chunk=4, H=2, D=8, hidden=12, **kw):
 @pytest.mark.parametrize("top_k,top_p,temp", [(None, None, 1.0), (5, None, 1.0),
                                               (None, 0.8, 1.0), (None, None, 0.7)])
 def test_centered_score_has_zero_conditional_mean(top_k, top_p, temp):
-    """E_{y~q}[c(y)] = 0 under the distribution the token is sampled from (Eq. 2)."""
+    """E_{y~q}[c(y)] = 0 for the sampling distribution (Eq. 2)."""
     logits = torch.randn(3, 50)
     vocab = torch.arange(50)
     cs, qs = [], []
@@ -47,7 +48,7 @@ def test_centered_score_has_zero_conditional_mean(top_k, top_p, temp):
 
 
 def test_varentropy_matches_definition():
-    """V_u = Var_{y~q}[log q(y)] (Eq. 9)."""
+    """V_u = Var_{y~q}[log q(y)] and H_u is the entropy (Eq. 9)."""
     logits = torch.randn(1, 30)
     _, H, V, _ = step_stats(logits, torch.tensor([0]))
     logq = torch.log_softmax(logits, -1)
@@ -59,6 +60,7 @@ def test_varentropy_matches_definition():
 
 # ------------------------------------------------------------------------ Eqs. 3-4
 def test_reliability_weights_follow_eqs_3_and_4():
+    """The weights are softmax(beta * c_bar - gamma * H_bar - lambda_D * D_hat) (Eqs. 3-4)."""
     M, T = 4, 6
     c, H, V = torch.randn(M, T), torch.rand(M, T), torch.rand(M, T)
     d_hat = torch.randn(M)
@@ -70,7 +72,7 @@ def test_reliability_weights_follow_eqs_3_and_4():
 
 
 def test_uniform_and_logprob_settings():
-    """(0,0,0) gives uniform weights; (1,1,0) weights by mean log-probability (App. C.3)."""
+    """(0, 0, 0) gives uniform weights. (1, 1, 0) gives mean log-probability weights (App. C.3)."""
     M, T = 5, 4
     logp, H = -torch.rand(M, T) * 3, torch.rand(M, T) * 2
     c = logp + H
@@ -82,6 +84,7 @@ def test_uniform_and_logprob_settings():
 
 # ------------------------------------------------------------------- Eq. 10, C.3
 def test_disagreement_and_standardization():
+    """Equal trajectories have zero disagreement. D_hat has zero mean and unit deviation (Eq. 10)."""
     M, Hq, T, D = 4, 3, 5, 8
     q = torch.randn(1, Hq, T, D).repeat(M, 1, 1, 1)          # identical trajectories
     assert torch.allclose(divergence_from_query_stacks([q], M), torch.zeros(M), atol=1e-6)
@@ -101,7 +104,7 @@ def test_disagreement_and_standardization():
 
 # ------------------------------------------------------------------------ Eqs. 5-6
 def test_leave_one_out_deletion_effect_is_exact():
-    """o_q - o_{q,-i} = a_{q,i} / (1 - a_{q,i}) (v_i - o_q) when eps = 0 (Eq. 5)."""
+    """o_q - o_{q,-i} = a_{q,i} / (1 - a_{q,i}) * (v_i - o_q) for eps = 0 (Eq. 5)."""
     n, D = 10, 6
     q, K, V = torch.randn(D), torch.randn(n, D), torch.randn(n, D)
     a = torch.softmax(K @ q / math.sqrt(D), 0)
@@ -115,6 +118,7 @@ def test_leave_one_out_deletion_effect_is_exact():
 
 @pytest.mark.parametrize("objective", ["projected", "unprojected", "attention"])
 def test_projected_scores_match_brute_force(objective):
+    """The Gram-identity scores are equal to a direct computation (Eqs. 5-6)."""
     H, D, n, Qn = 2, 8, 20, 5
     cl = _cluster(H=H, D=D, score_objective=objective)
     K, V = torch.randn(1, H, n, D), torch.randn(1, H, n, D)
@@ -134,6 +138,7 @@ def test_projected_scores_match_brute_force(objective):
 
 # ------------------------------------------------------------------- Eq. 7-8, 11
 def _compress(cl, n=64, H=2, D=8, M=2, T=3):
+    """Fill a cluster with random state and run compress()."""
     cl.num_key_value_groups = 1
     cl.full_key_states = torch.randn(1, H, n, D)
     cl.full_value_states = torch.randn(1, H, n, D)
@@ -144,6 +149,7 @@ def _compress(cl, n=64, H=2, D=8, M=2, T=3):
 
 
 def test_compress_keeps_budget_and_protected_set():
+    """Each head keeps B tokens, including the sink and the window."""
     H, n = 2, 64
     cl = _cluster(H=H, budget=16, chunk=4, window=8)
     k, v, meta = _compress(cl, n=n, H=H)
@@ -157,7 +163,7 @@ def test_compress_keeps_budget_and_protected_set():
 
 
 def test_score_combines_window_and_weighted_lookahead(monkeypatch):
-    """S = psi(E_W) + lambda_L sum_m omega_m psi(E_m) (Eq. 7) drives selection."""
+    """The selection uses S = psi(E_W) + lambda_L * sum_m omega_m * psi(E_m) (Eq. 7)."""
     cl = _cluster(H=1, budget=12, chunk=4, window=4, lambda_lookahead=2.0)
     seen = {}
     real_score, real_select = cl._project_and_score, cl._select_chunks
@@ -178,7 +184,7 @@ def test_score_combines_window_and_weighted_lookahead(monkeypatch):
 
 
 def test_adaptive_head_budget_conserves_layer_budget():
-    """Eq. 11 with tau > 0 redistributes, but never changes, the layer's total budget."""
+    """With tau > 0, Eq. 11 changes the head budgets but not the layer budget."""
     H = 4
     cl = _cluster(H=H, budget=24, chunk=4, window=8, budget_tau=1.0)
     _, _, meta = _compress(cl, n=96, H=H)

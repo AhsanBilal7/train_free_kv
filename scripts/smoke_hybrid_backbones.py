@@ -1,20 +1,18 @@
 #!/usr/bin/env python
-"""Correctness check for the hybrid-attention hijacks, with no reference venv.
+"""Check the hybrid-attention patches without a reference environment.
 
-The collect phase evicts nothing -- it only records what compress() will later
-need. So a correctly patched model must produce EXACTLY the same prefill logits as
-the unpatched model. Any difference is a bug in the hijack's reimplementation of
-the attention forward (a dropped gate, a missing norm, a wrong rotary call), which
-is precisely the class of error that is otherwise invisible until scores look
-"slightly off" and nobody can say why.
+The ``collect`` phase does not evict. A correct patch thus gives the same prefill
+logits as the original model. A difference shows an error in the patched
+attention forward, for example a missing gate, norm or rotary call.
 
-Run in float32 with eager attention: torch picks different sdpa backends across
-versions, and a *correct* port still shows max logit differences ~12 in bf16 with
-99.5% top-1 agreement. In fp32/eager a correct port is bit-exact, so any
-discrepancy is real.
+Run in float32 with eager attention. In bfloat16 a correct patch can show logit
+differences of about 12 (99.5% top-1 agreement), because different SDPA kernels
+are selected. In float32 with eager attention a correct patch gives equal logits.
 
-    python scripts/smoke_hybrid_backbones.py --model $SCRATCH/models/Qwen3.5-9B
-    python scripts/smoke_hybrid_backbones.py --model $SCRATCH/models/gemma-4-12B-it
+Usage::
+
+    python scripts/smoke_hybrid_backbones.py --model models/Qwen3.5-9B
+    python scripts/smoke_hybrid_backbones.py --model models/gemma-4-12B-it
 """
 
 import argparse

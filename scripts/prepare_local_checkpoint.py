@@ -1,25 +1,26 @@
 #!/usr/bin/env python
-"""Materialize a Hub checkpoint as a local directory this repo's pinned stack can read.
+"""Copy a Hub checkpoint into a local directory that the pinned stack can read.
 
-Two things stand between a Hub id and `from_pretrained` here, neither about the
-model weights:
+The script solves two problems:
 
-1. Cache layout. On clusters whose compute nodes have no outbound network, a Hub
-   id that resolves on the login node can fail on a worker when the transformers
-   and huggingface_hub caches disagree. A plain local directory (weights symlinked,
-   so no second copy) avoids both, and its basename becomes a clean MODEL_TAG.
+1. Cache layout. On a cluster whose compute nodes have no network, a Hub ID can
+   load on the login node and fail on a compute node. A local directory (with
+   links to the weights, so no second copy) prevents this. Its name is the
+   MODEL_TAG.
 
-2. tokenizer.json format. Files written by tokenizers >= 0.20 store BPE merges as
-   ["a", "b"] pairs; tokenizers 0.19 (pinned by transformers 4.44) only parses the
-   older "a b" string form and dies with
+2. tokenizer.json format. tokenizers 0.20 and later store BPE merges as pairs
+   ["a", "b"]. tokenizers 0.19 (required by transformers 4.44) reads only the
+   string format "a b" and fails with::
+
        Exception: data did not match any variant of untagged enum ModelWrapper
-   The rewrite is applied only when needed and is checked for losslessness first
-   (see models_ext/tokenizer_compat.py). A checkpoint already in the old format is
-   copied through untouched.
 
-Run once, from the repo root:
-    python scripts/prepare_local_checkpoint.py --src Qwen/Qwen2.5-14B-Instruct \
-        --out "$SCRATCH/models/Qwen2.5-14B-Instruct"
+   The script converts the file only if necessary and checks that the conversion
+   is exact (see models_ext/tokenizer_compat.py).
+
+Usage (from the repository root)::
+
+    python scripts/prepare_local_checkpoint.py --src Qwen/Qwen2.5-14B-Instruct \\
+        --out models/Qwen2.5-14B-Instruct
 """
 
 import argparse

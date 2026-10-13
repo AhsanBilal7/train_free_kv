@@ -1,16 +1,17 @@
 #!/usr/bin/env python
-"""End-to-end smoke test of the eviction pipeline on the models_ext backbones.
+"""End-to-end test of the eviction pipeline on the models_ext backbones (Qwen2, Ministral3).
 
-scripts/validate_models_ext.py checks that the vendored modelling code IS the
-upstream model. This checks the other half: that each package's hijack actually
-drives it -- prefill capture, lookahead rollout, compression and the flattened
-varlen decode -- on Qwen2 and Ministral3, not just on Llama.
+``scripts/validate_models_ext.py`` checks that the Ministral3 implementation is
+equal to the upstream model. This script checks that each package drives the
+backbone: prefill, lookahead, compression and varlen decoding.
 
-It runs the same setup pred.py does (the same lorekv.harness calls) on one long
-synthetic prompt and prints what comes out. A mode passes if it decodes non-empty text without raising; the
-text itself is a sanity read, not an assertion.
+The script uses the same :mod:`lorekv.harness` calls as pred.py on one long
+synthetic prompt and prints the result. A mode passes if it decodes non-empty
+text without an error.
 
-    python scripts/smoke_ext_backbones.py --model "$SCRATCH/models/Qwen2.5-14B-Instruct" \
+Usage::
+
+    python scripts/smoke_ext_backbones.py --model models/Qwen2.5-14B-Instruct \\
         --modes causal_lookahead andpro critical --budget 128
 """
 
@@ -42,6 +43,7 @@ FILLER = (
 def build_prompt(tokenizer, target_tokens):
     # Repeat until the filler alone exceeds the target, so --n-tokens is honoured
     # for every tokenizer rather than silently capping at whatever one pass yields.
+    """Return a prompt of about ``target_tokens`` tokens with one fact near the start."""
     reps = max(200, target_tokens // 40)
     body = FILLER * 4 + NEEDLE + " " + FILLER * reps
     ids = tokenizer(body, return_tensors="pt").input_ids[0][:target_tokens]
@@ -53,13 +55,14 @@ def build_prompt(tokenizer, target_tokens):
 
 
 def config_compress(model, budget, mode):
-    """The settings pred.py applies, at the core LORE-KV configuration (Table 4)."""
+    """Apply the settings of pred.py with the core LORE-KV configuration (Table 4)."""
     args = add_method_args(argparse.ArgumentParser()).parse_args(
         ["--mode", mode, "--budget", str(budget)])
     configure_model(model, args)
 
 
 def run_mode(model_path, mode, budget, n_tokens, max_gen):
+    """Decode the synthetic prompt with one mode and return the context length, the text and the peak memory."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     install_method(mode)
@@ -93,17 +96,15 @@ def run_mode(model_path, mode, budget, n_tokens, max_gen):
 
 
 def prefill_equivalence(model_path, n_tokens):
-    """Patched "collect"-phase prefill must equal the stock model's prefill.
+    """Check that the patched prefill gives the same logits as the original model.
 
-    The collect phase evicts nothing -- it is plain causal attention plus the
-    capture of window queries and full K/V -- so its logits must match the
-    unpatched model exactly. This is the check that actually exercises the
-    rewritten rotary path: Qwen2's 4.44 rotary is table-based and indexed by
-    position_ids, so the hijack has to size the table from the positions being
-    served rather than from the cache, and getting that wrong shows up here.
+    The ``collect`` phase does not evict. It is causal attention that also records
+    the window queries and the full K and V. Its logits must thus be equal to those
+    of the original model. The check covers the Qwen2 rotary path, which must size
+    its table from the positions and not from the cache.
 
-    Both sides load in the same process, so the patch has to be installed AFTER
-    the stock reference is computed.
+    Both models load in the same process, so the patch is installed after the
+    reference logits are computed.
     """
     from transformers import AutoModelForCausalLM, AutoTokenizer
 

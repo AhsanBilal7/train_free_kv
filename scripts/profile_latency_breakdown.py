@@ -1,45 +1,31 @@
 #!/usr/bin/env python
-r"""Stage-wise latency of one request: TTFT / lookahead / scoring / decoding (Figure 7a).
+r"""Latency of each stage of one request: TTFT, lookahead, scoring and decoding (Figure 7a).
 
-Times the four stages of every sample for the first ``--num_samples`` examples
-of LongBench, RULER and NIAH and averages them per (method, budget). It produces
-the stage breakdown of Figure 7(a); end-to-end per-sample latency over full
-benchmarks (Table 3) comes from ``scripts/report_length_time.py`` instead.
+The script measures the four stages of each sample for the first
+``--num_samples`` examples of LongBench, RULER and NIAH. It averages them for each
+method and budget. The per-sample latency over the full benchmarks (Table 3)
+comes from ``scripts/report_length_time.py``.
 
-Phase definitions
-------------------
-andpro / critical (plain `model.generate`-style greedy decode, but driven by a
-hand-rolled loop here so the phases are separable):
-    ttft      -- the single prefill forward pass, MINUS the time spent inside
-                 the method's own update_kv (eviction/scoring) call. This is
-                 the "pure compute" prefill time, comparable to lorekv's
-                 uncompressed collect-phase prefill below.
-    lookahead -- always 0 (no lookahead phase in these methods).
-    scoring   -- wall time inside kv_cluster.update_kv during that same
-                 prefill forward (measured via a monkeypatched wrapper around
-                 AnDProAdaptiveSnapKVCluster.update_kv / AdaptiveSnapKVCluster.
-                 update_kv; not a source change, just an in-process wrap).
-    decoding  -- every subsequent per-token forward call.
+Stages of AnDPro and CriticalKV (a greedy decode loop, equal to ``model.generate``):
+    ttft: The prefill forward, minus the time in ``update_kv`` (eviction).
+    lookahead: Always 0.
+    scoring: The time in ``kv_cluster.update_kv`` during the prefill forward.
+    decoding: The forward calls of the answer tokens.
 
-lorekv (causal_lookahead, Algorithm 1's 4 phases -- see
-lorekv/monkeypatch/lookahead_runner.py's docstring):
-    ttft      -- Phase 1, the uncompressed "collect" prefill.
-    lookahead -- Phase 2, the M x T sampled-continuation rollout.
-    scoring   -- particle-weight computation + Phase 3's per-layer compress()
-                 (Eqs. 3-8): score, allocate, select, evict.
-    decoding  -- Phase 4, the real answer's per-token forward calls.
+Stages of LORE-KV (see :mod:`lorekv.monkeypatch.lookahead_runner`):
+    ttft: Phase 1, the uncompressed prefill.
+    lookahead: Phase 2, the M x T sampled tokens.
+    scoring: The trajectory weights and ``compress()`` of each layer (Eqs. 3-8).
+    decoding: Phase 4, the forward calls of the answer tokens.
 
-Both families report `ttft` as the non-eviction prefill compute, so it is the
-one column directly comparable across methods; `scoring` and `lookahead` are
-each method's own added cost on top of it, and `total = ttft + lookahead +
-scoring + decoding` is the latency plotted against quality in Figure 7(b).
+``ttft`` is comparable across methods. ``scoring`` and ``lookahead`` are the
+additional cost of each method. ``total = ttft + lookahead + scoring + decoding``
+is the latency of Figure 7(b).
 
-Timing hooks are pure in-process monkeypatches (see _install_hooks): no repo
-file is modified. Each (method, budget) cell loads a fresh model, as a real run
-does, since the hijacks are class-level monkeypatches and a stale kv_cluster
-from a previous mode must not be reused across models.
+The timing hooks wrap functions in the process and do not change files. Each
+method and budget loads a new model, because the patches change classes.
 
-Usage (from experiments/LongBench, so config/dataset2*.json resolve)::
+Usage (from experiments/LongBench, so that config/dataset2*.json are found)::
 
     python ../../scripts/profile_latency_breakdown.py \
         --budgets 128 256 512 1024 --num_samples 10 --out latency_breakdown.json
@@ -71,7 +57,7 @@ def _load_module(name, path):
 # Timing hooks -- in-process monkeypatches, no repo file is touched.
 # ---------------------------------------------------------------------------
 class PhaseClock:
-    """Records phase-boundary timestamps for one sample, then reduces to durations."""
+    """Record the time of each stage boundary of one sample and compute the durations."""
 
     def __init__(self):
         self.marks = {}
@@ -90,12 +76,10 @@ class PhaseClock:
 
 
 def _install_lookahead_hooks(clock):
-    """Wrap lookahead_runner._set_phase / reliability_weights for phase marks.
+    """Wrap ``lookahead_runner._set_phase`` and ``reliability_weights`` to record stage boundaries.
 
-    Sequence inside generate_with_lookahead: _set_phase("collect") ->
-    [prefill] -> _set_phase("lookahead") -> [M x T rollout] ->
-    reliability_weights(...) -> [compress() x layers] -> _set_phase("final") ->
-    [decode loop] -> return.
+    The order in ``generate_with_lookahead`` is: collect, prefill, lookahead, M x T
+    tokens, ``reliability_weights``, ``compress()`` of each layer, final, decode loop.
     """
     lr = sys.modules.get("lorekv.monkeypatch.lookahead_runner")
     if lr is None:
@@ -144,9 +128,10 @@ def _uninstall_scoring_hook(cluster_cls, orig):
 # Greedy generation loops that expose the phase boundaries.
 # ---------------------------------------------------------------------------
 def run_baseline(model, input_ids, attention_mask, max_gen, eos_ids, clock, device):
-    """andpro / critical: hand-rolled greedy decode (matches pred.py's
-    model.generate(do_sample=False, num_beams=1) token-for-token), instrumented
-    for ttft/scoring/decoding via the update_kv hook installed by the caller."""
+    """Decode one sample greedily with AnDPro or CriticalKV and measure the stages.
+
+    The loop gives the same tokens as ``model.generate(do_sample=False, num_beams=1)``.
+    """
     clock.reset()
     torch.cuda.synchronize(); t0 = time.perf_counter()
     out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
@@ -180,6 +165,7 @@ def run_baseline(model, input_ids, attention_mask, max_gen, eos_ids, clock, devi
 
 
 def run_lorekv(model, tokenizer, input_ids, attention_mask, max_gen, eos_ids, clock):
+    """Decode one sample with LORE-KV and measure the stages."""
     from lorekv.monkeypatch.lookahead_runner import generate_with_lookahead
     clock.reset()
     answer_ids = generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen, eos_ids)

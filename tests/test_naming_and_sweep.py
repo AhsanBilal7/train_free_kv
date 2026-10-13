@@ -1,4 +1,4 @@
-"""Run-folder naming and sweep expansion (scripts/run_naming.py, scripts/sweep.py)."""
+"""Tests of the run-folder names (scripts/run_naming.py) and the sweep expansion (scripts/sweep.py)."""
 import os
 import sys
 
@@ -16,6 +16,7 @@ CORE = dict(mode="causal_lookahead", model_tag="Mistral-7B-Instruct-v0.2", budge
 
 
 def test_core_run_name_matches_its_config():
+    """The core configuration gives the name of its config file and parses back."""
     name = run_naming.build_run_name(**CORE)
     assert name == ("lorekv-ent-unif-topk_B_128_chunk_4_M_4_T_8_lL_1.0_lT_1.0_nrm_0"
                     "_alpha_0.0_kappa_1.0")
@@ -25,6 +26,7 @@ def test_core_run_name_matches_its_config():
 
 
 def test_identity_follows_the_numbers_not_the_file():
+    """The run name comes from the hyperparameter values."""
     llama_dis = dict(CORE, model_tag="Llama-3.1-8B-Instruct", gamma="1.0", lambda_d="0.3")
     assert run_naming.build_run_name(**llama_dis).startswith("lorekv-dis-unif-topk-llama_B_128")
     ablation = dict(CORE, score_objective="attention", budget_tau="1.0")
@@ -33,6 +35,7 @@ def test_identity_follows_the_numbers_not_the_file():
 
 
 def test_baselines_and_legacy_names_parse():
+    """Baseline names and older ``_red_`` names parse."""
     assert run_naming.build_run_name(mode="andpro", model_tag="Qwen2.5-14B-Instruct",
                                      budget=256, chunk_size=4) == "andpro_Qwen2.5-14B-Instruct_256_chunk_4"
     p = run_naming.parse_run_name("critical_Llama-3.1-8B-Instruct_512_chunk_4_red_0.0")
@@ -40,6 +43,7 @@ def test_baselines_and_legacy_names_parse():
 
 
 def test_every_config_parses_and_names_its_runs():
+    """Each config in ``config/`` gives run names that parse."""
     cfg_dir = os.path.join(REPO, "config")
     for fn in sorted(os.listdir(cfg_dir)):
         s = sweep.Settings(sweep.load_conf(os.path.join(cfg_dir, fn)))
@@ -58,6 +62,7 @@ def test_every_config_parses_and_names_its_runs():
 
 
 def test_environment_overrides_config(monkeypatch):
+    """Environment variables replace the config values."""
     monkeypatch.setenv("BUDGET", "128 512")
     monkeypatch.setenv("NUM_PARTICLES", "1 4")
     s = sweep.Settings(sweep.load_conf(os.path.join(REPO, "config", "lorekv-ent-unif-topk.conf")))

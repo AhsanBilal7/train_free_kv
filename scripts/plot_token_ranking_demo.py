@@ -1,29 +1,21 @@
-"""Figures for the CriticalKV vs AnDPro vs LORE-KV token-ranking demo.
+"""Draw the figures of the token-ranking comparison (paper Figures 9-11).
 
-Reads what scripts/demo_token_ranking.py wrote under demos/<run>/ and draws two
-publication-style figures:
+The script reads the output of ``scripts/demo_token_ranking.py`` in
+``demos/<run>/`` and draws:
 
-  ranking_quality.{png,pdf}
-     (a) Recall@B against the oracle ranking, per budget   -- does the criterion
-         pick the tokens the true future queries need?
-     (b) Rank correlation with the oracle, per layer       -- is that agreement
-         uniform across depth, or only in a few layers?
-     (c) Attention-output fidelity of the retained cache   -- does the kept cache
-         reproduce the full-cache behaviour on future queries?
+ranking_quality.{png,pdf}:
+    (a) Recall@B against the oracle, for each budget.
+    (b) Rank correlation with the oracle, for each layer.
+    (c) Attention-output fidelity of the kept cache.
 
-  ranking_evidence.{png,pdf}
-     (a) Answer/evidence-token retention and enrichment    -- does the criterion
-         keep the tokens that carry the answer?
-     (b) Retention strip for one prompt                    -- which positions each
-         criterion keeps, with the gold-answer positions marked.
+ranking_evidence.{png,pdf}:
+    (a) Retention and enrichment of the answer tokens.
+    (b) The kept positions of one prompt, with the answer positions marked.
 
-Style: shared PALETTE, apply_publication_style,
-make_* helpers, finalize_figure), matching make_arch_figure.py.
+Usage::
 
-Usage
------
-    python scripts/plot_token_ranking_demo.py                     # newest demos/ run
-    python scripts/plot_token_ranking_demo.py --run demos/<run>   # a specific run
+    python scripts/plot_token_ranking_demo.py                     # newest run in demos/
+    python scripts/plot_token_ranking_demo.py --run demos/<run>
     python scripts/plot_token_ranking_demo.py --run demos/<run> --out-dir figures
 """
 from __future__ import annotations
@@ -116,7 +108,7 @@ def finalize_figure(fig, out_path, formats=None, dpi=300, close=True, pad=0.05, 
 
 def make_grouped_bar(ax, categories, series, labels, colors, ylabel=None, annotate=False,
                      yerr=None, hatches=None, width=None):
-    """Grouped bars with black edges (print-safe) and optional value annotation."""
+    """Draw grouped bars with black edges and optional value labels."""
     n_g = len(series)
     x = np.arange(len(categories), dtype=float)
     width = width or 0.8 / max(1, n_g)
@@ -139,7 +131,7 @@ def make_grouped_bar(ax, categories, series, labels, colors, ylabel=None, annota
 
 
 def figure_legend(fig, axes, ncol=4, y=1.02):
-    """One frameless legend for the whole figure, so no panel has to host one."""
+    """Draw one legend without a frame for the full figure."""
     handles, labels, seen = [], [], set()
     for ax in axes:
         for h, l in zip(*ax.get_legend_handles_labels()):
@@ -192,12 +184,12 @@ def load_rows(run_dirs):
 
 
 def recall_metric(rows):
-    """`recall_cand` (protected positions excluded) when the run has it, else `recall`."""
+    """Return ``recall_cand`` (protected positions excluded) if the run has it, else ``recall``."""
     return "recall_cand" if any(r["metric"] == "recall_cand" for r in rows) else "recall"
 
 
 def stat(rows, benchmark=None, budget=None, method=None, metric=None):
-    """mean, sem over the selected rows (empty -> (nan, nan))."""
+    """Return the mean and standard error of the selected rows, or (nan, nan)."""
     v = [r["value"] for r in rows
          if (benchmark is None or r["benchmark"] == benchmark)
          and (budget is None or r["budget"] == budget)
@@ -210,14 +202,14 @@ def stat(rows, benchmark=None, budget=None, method=None, metric=None):
 
 
 def run_benchmark(run):
-    """The benchmark a run folder holds ('LongBench' or 'RULER'), from its own rows."""
+    """Return the benchmark of a run folder ('LongBench' or 'RULER')."""
     for r in load_rows([run]):
         return r["benchmark"]
     return "?"
 
 
 def load_per_layer(run_dirs, key):
-    """Stack a per-layer array (e.g. 'lorekv__spearman') over every sample npz."""
+    """Stack a per-layer array (for example 'lorekv__spearman') over all sample files."""
     out = []
     for run in run_dirs:
         for f in sorted(glob.glob(os.path.join(run, "samples", "*.npz"))):
@@ -247,7 +239,7 @@ def pick_profile(run_dirs, prefer=None):
 # Figure 1: ranking quality
 # ---------------------------------------------------------------------------
 def _cats(benches, budgets):
-    """Bar-group labels: name the benchmark only when a panel holds more than one."""
+    """Return the bar-group labels. Add the benchmark name only if a panel has more than one benchmark."""
     if len(benches) == 1:
         return [f"$B={bd}$" for bd in budgets]
     return [f"{b}\nB={bd}" for b in benches for bd in budgets]
@@ -255,11 +247,10 @@ def _cats(benches, budgets):
 
 def _panel_metric_vs_budget(ax, rows, bench, budgets, metric, ylabel, tag,
                             invert=False, logy=False):
-    """One line per criterion across the budget sweep.
+    """Draw one line for each criterion over the budgets.
 
-    `invert` plots 1 - value: cosine fidelity sits at 0.82-0.96 where a 0.04 gap is
-    invisible, while the same gap is a fifth of the *error* 1 - cos, which is the
-    quantity a cache is actually judged on.
+    With ``invert`` the panel shows 1 - value. A fidelity of 0.82-0.96 shows small
+    differences more clearly as an error 1 - cos.
     """
     for meth in ORDER:
         lab, col, mk, st = METHOD_STYLE[meth]
@@ -332,9 +323,11 @@ def _panel_fidelity(ax, rows, benches, budgets, tag):
 
 
 def figure_quality(rows, run_dirs, out_base, layout="combined"):
-    """layout='combined': 1x3, both benchmarks inside each panel.
-       layout='rows':     2x3, one benchmark per row (a-c / d-f), matching the
-                          MATLAB figure and the paper caption."""
+    """Draw the ranking-quality figure.
+
+    ``layout="combined"`` gives 1 x 3 panels with both benchmarks in each panel.
+    ``layout="rows"`` gives 2 x 3 panels with one benchmark in each row.
+    """
     budgets = sorted({r["budget"] for r in rows})
     benches = [b for b in ("LongBench", "RULER") if any(r["benchmark"] == b for r in rows)]
     rec_key = recall_metric(rows)
@@ -502,10 +495,9 @@ def figure_evidence(rows, run_dirs, out_base, prefer_profile=None, bins=400):
 
 
 def figure_criteria(rows, out_base):
-    """Schematic: what each criterion looks at, what it measures, what it cannot see.
+    """Draw a diagram of the input, the measurement and the limit of each criterion.
 
-    The bottom band carries the measured numbers from the run, so the diagram is a
-    claim with evidence attached rather than a picture.
+    The bottom band shows the measured values of the run.
     """
     from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Rectangle
 

@@ -1,28 +1,27 @@
 #!/usr/bin/env python
-"""Extract the text tower of a Mistral3 checkpoint into a standalone one.
+"""Extract the text model of a Mistral3 checkpoint into a separate checkpoint.
 
-`mistralai/Ministral-3-8B-Instruct-2512[-BF16]` is published as
-`Mistral3ForConditionalGeneration`: a Pixtral vision tower, a multimodal
-projector, and the `ministral3` text model, with every text weight living under
-a `language_model.` prefix and the text config nested in `config.text_config`.
+``mistralai/Ministral-3-8B-Instruct-2512[-BF16]`` is a
+``Mistral3ForConditionalGeneration`` checkpoint: a Pixtral vision tower, a
+multimodal projector and the ``ministral3`` text model. The text weights have the
+prefix ``language_model.``, and the text config is ``config.text_config``.
 
-The eviction pipeline is text-only, and every entry point in this repo
-(`experiments/*/pred.py`, the figure scripts) goes through
-`AutoModelForCausalLM.from_pretrained(MODEL_PATH)`. Rather than teach each of
-them about the wrapper, this script writes a plain
-`Ministral3ForCausalLM` checkpoint once, so MODEL_PATH is an ordinary local
-directory from then on.
+The eviction pipeline uses text only and loads each model with
+``AutoModelForCausalLM.from_pretrained(MODEL_PATH)``. This script writes a
+``Ministral3ForCausalLM`` checkpoint one time, so MODEL_PATH is a normal local
+directory.
 
-The tensors are copied verbatim -- only key names change:
+The script copies the tensors without change. Only the key names change::
 
-    language_model.model.*  ->  model.*
-    language_model.lm_head.weight -> lm_head.weight
-    vision_tower.*, multi_modal_projector.*  ->  dropped
+    language_model.model.*                   ->  model.*
+    language_model.lm_head.weight            ->  lm_head.weight
+    vision_tower.*, multi_modal_projector.*  ->  removed
 
-Usage:
-    python scripts/convert_ministral3.py \
-        --src mistralai/Ministral-3-8B-Instruct-2512-BF16 \
-        --out "$SCRATCH/models/Ministral-3-8B-Instruct-2512"
+Usage::
+
+    python scripts/convert_ministral3.py \\
+        --src mistralai/Ministral-3-8B-Instruct-2512-BF16 \\
+        --out models/Ministral-3-8B-Instruct-2512
 """
 
 import argparse
@@ -47,7 +46,7 @@ SIDECAR_FILES = (
 
 
 def resolve_source(src):
-    """Local dir as-is; otherwise the Hub snapshot dir (already-cached files are reused)."""
+    """Return a local directory unchanged, else the Hub snapshot directory (cached files are used)."""
     if os.path.isdir(src):
         return src
     from huggingface_hub import snapshot_download
@@ -55,7 +54,7 @@ def resolve_source(src):
 
 
 def build_text_config(wrapper_config):
-    """The nested text_config, flattened into a standalone Ministral3Config dict."""
+    """Return the nested text_config as a separate Ministral3Config dict."""
     text = dict(wrapper_config["text_config"])
     text["model_type"] = "ministral3"
     text["architectures"] = ["Ministral3ForCausalLM"]
