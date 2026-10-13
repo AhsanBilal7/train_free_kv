@@ -15,19 +15,15 @@ from lorekv.monkeypatch.causal_llama_hijack import (
 
 
 def check_version():
+    """Warn when transformers is not the 4.44 release these patches were written for."""
     try:
         transformers_version = version("transformers")
     except Exception as e:
         print(f"Transformers not installed: {e}")
         return
-    version_list = ['4.37']
-    warning_flag = True
-    for x in version_list:
-        if x in transformers_version:
-            warning_flag = False
-            break
-    if warning_flag:
-        warnings.warn(f"Transformers version {transformers_version} might not be compatible with SnapKV. SnapKV is tested with Transformers version {version_list}.")
+    if not transformers_version.startswith("4.44"):
+        warnings.warn(f"transformers {transformers_version} is untested with these patches; "
+                      "they target transformers 4.44.2 (see pyproject.toml).")
 
 
 # NOTE: the active phase (model.model.config.lookahead_phase, one of "collect"/"lookahead"/"final")

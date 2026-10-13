@@ -1,3 +1,21 @@
+"""LORE-KV's phase-aware forwards for Mistral under transformers 4.44.2.
+
+``causal_lookahead_MistralModel_forward`` and
+``causal_lookahead_mistral_flash_attn2_forward`` replace ``MistralModel.forward`` and
+``MistralFlashAttention2.forward``; they are adapted from those transformers 4.44.2
+implementations (Apache-2.0) and from the varlen decode path of the AdaKV / AnDPro
+hijacks. The phase in ``config.lookahead_phase`` selects the behaviour (see
+:mod:`lorekv.monkeypatch.lookahead_runner`):
+
+* ``collect``   -- causal flash attention on a stock DynamicCache; record Q_W and
+  the full K/V on the layer's ``kv_cluster``.
+* ``lookahead`` -- the same attention for one trajectory step; record its queries.
+* ``final``     -- one decode step against the evicted per-head cache with
+  ``flash_attn_varlen_func``.
+
+The model forward returns hidden states for the last position only, since only
+those logits are ever used; this avoids the [n, vocab] LM-head product at prefill.
+"""
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -9,8 +27,6 @@ from transformers.models.mistral.modeling_mistral import (
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.utils import logging, is_flash_attn_2_available
-import os, sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from lorekv.monkeypatch.scoring import init_lookahead_snapkv, DynamicCacheSplitHeadFlatten
 
 logger = logging.get_logger(__name__)
@@ -19,16 +35,8 @@ if is_flash_attn_2_available():
     from flash_attn import flash_attn_varlen_func
 
 
-# ------------------------------------------------------------------
-# Model.forward: a single phase-aware MistralModel.forward used across all three phases of the
-# pipeline (lookahead_runner.generate_with_lookahead drives `model.model.config.lookahead_phase`):
-#   "collect"   - normal full-attention prefill, using a stock (un-flattened) DynamicCache.
-#   "lookahead" - normal full-attention decode steps for the M lookahead particles, same cache type.
-#   "final"     - the post-eviction varlen decode loop, using the flattened per-head cache, exactly
-#                 like causal_andpro_snapkv.causal_MistralModel_forward.
-# Phase is read off `self.config` (not off a layer's kv_cluster) because on the very first ever
-# call the attention modules haven't lazily constructed their kv_cluster yet.
-# ------------------------------------------------------------------
+# The phase is read from `self.config`, not from a layer's kv_cluster, because the
+# attention modules create their kv_cluster lazily on the first call.
 def causal_lookahead_MistralModel_forward(
     self,
     input_ids: torch.LongTensor = None,
@@ -183,7 +191,7 @@ def causal_lookahead_mistral_flash_attn2_forward(
         )
         attn_output = attn_output.reshape(bsz, q_len, self.num_heads * self.head_dim).contiguous()
     else:
-        # phase == "final": identical decode-time varlen flow to causal_andpro_snapkv.
+        # phase == "final": decode against the evicted per-head cache (as in AnDPro / Ada-KV).
         cache_kwargs["head_lens"] = self.kv_cluster.head_lens
         cache_kwargs["cu_klen"] = self.kv_cluster.cu_klen
         key_states = repeat_kv(key_states, self.num_key_value_groups)

@@ -15,7 +15,7 @@ drift apart.
 
 Layer scoping, the per-layer flat cache and the fall-through-when-not-ours rule
 are shared with the LORE-KV hijack; see causal_lookahead_hybrid_hijack.py and
-docs/HYBRID_ATTENTION.md for why only the full-attention layers are compressed.
+hybrid_support.py for why only the full-attention layers are compressed (paper App. E.2).
 """
 
 from __future__ import annotations

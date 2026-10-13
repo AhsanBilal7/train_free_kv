@@ -1,3 +1,21 @@
+"""LORE-KV's phase-aware forwards for Llama under transformers 4.44.2.
+
+``causal_lookahead_LlamaModel_forward`` and
+``causal_lookahead_llama_flash_attn2_forward`` replace ``LlamaModel.forward`` and
+``LlamaFlashAttention2.forward``; they are adapted from those transformers 4.44.2
+implementations (Apache-2.0) and from the varlen decode path of the AdaKV / AnDPro
+hijacks. The phase in ``config.lookahead_phase`` selects the behaviour (see
+:mod:`lorekv.monkeypatch.lookahead_runner`):
+
+* ``collect``   -- causal flash attention on a stock DynamicCache; record Q_W and
+  the full K/V on the layer's ``kv_cluster``.
+* ``lookahead`` -- the same attention for one trajectory step; record its queries.
+* ``final``     -- one decode step against the evicted per-head cache with
+  ``flash_attn_varlen_func``.
+
+The model forward returns hidden states for the last position only, since only
+those logits are ever used; this avoids the [n, vocab] LM-head product at prefill.
+"""
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -9,8 +27,6 @@ from transformers.models.llama.modeling_llama import (
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.utils import logging, is_flash_attn_2_available
-import os, sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from lorekv.monkeypatch.scoring import init_lookahead_snapkv, DynamicCacheSplitHeadFlatten
 
 logger = logging.get_logger(__name__)

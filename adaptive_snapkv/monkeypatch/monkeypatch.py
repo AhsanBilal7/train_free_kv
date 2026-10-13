@@ -16,18 +16,15 @@ from adaptive_snapkv.monkeypatch.slm_llama_hijack import slm_llama_flash_attn2_f
 from adaptive_snapkv.monkeypatch.slm_mistral_hijack import slm_mistral_flash_attn2_forward, slm_MistralModel_forward
 
 def check_version():
+    """Warn when transformers is not the 4.44 release these patches were written for."""
     try:
         transformers_version = version("transformers")
     except Exception as e:
         print(f"Transformers not installed: {e}")
-    version_list = ['4.37']
-    warning_flag = True
-    for x in version_list:
-        if x in transformers_version:
-            warning_flag = False
-            break
-    if warning_flag:
-        warnings.warn(f"Transformers version {transformers_version} might not be compatible with SnapKV. SnapKV is tested with Transformers version {version_list}.")
+        return
+    if not transformers_version.startswith("4.44"):
+        warnings.warn(f"transformers {transformers_version} is untested with these patches; "
+                      "they target transformers 4.44.2 (see pyproject.toml).")
 
 
 def replace_mistral_fixed():

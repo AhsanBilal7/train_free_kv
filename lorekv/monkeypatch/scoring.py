@@ -1,3 +1,34 @@
+"""LORE-KV scoring, reliability weighting and selection (paper Secs. 3.2-3.5, Algorithm 1).
+
+Notation follows the paper. For layer ``l`` and head ``h``, ``K``/``V`` are the
+prefill keys and values, ``Q_W`` the queries of the last ``w`` prompt tokens, and
+``Q_look^(m)`` the queries of lookahead trajectory ``m = 1..M`` of length ``T``.
+
+* :func:`step_stats` -- per-step centered score ``c_u`` (Eq. 2), entropy ``H_u``
+  and varentropy ``V_u`` (Eq. 9) of one sampled token.
+* :func:`reliability_weights` -- trajectory reliability ``R_m`` (Eq. 3) and soft
+  weights ``omega = softmax(R)`` (Eq. 4).
+* :func:`divergence_from_query_stacks` / :func:`standardize_disagreement` --
+  query-space disagreement ``D_m`` (Eq. 10) and its standardization ``D_hat``
+  (App. C.3).
+* :class:`TestTimeLookaheadKVCluster` -- the per-layer state and the eviction
+  itself: projected leave-one-out deletion scores (Eqs. 5-6), their aggregation
+  into the token score ``S_i`` (Eq. 7), head-budget allocation and selection
+  (Eq. 8, Eq. 11, App. D), and the compressed per-head cache.
+
+Implementation notes that differ from a literal reading of the equations:
+
+* The per-query score is the deletion magnitude ``|c_{q,i}| ||W_O v_i - W_O o_q||``
+  (Eq. 12, App. F.1), not its square. For a single query this preserves the
+  ranking of Eq. 6; averaged over a query set it weights large deletions less.
+* Selection operates on chunks of ``chunk_size`` adjacent tokens scored by their
+  maximum (SnapKV / Ada-KV practice; Table 4: chunk size 4).
+* Under grouped-query attention the cached K/V are repeated to the query-head
+  count and every query head keeps its own ``B`` tokens, as in the AnDPro
+  implementation the baselines share.
+* The protected set ``P`` is the first chunk (attention sink) plus the chunks of
+  the observation window; the optional structural set ``B`` of App. C.1 is empty.
+"""
 import math
 from typing import List, Optional, Tuple
 
@@ -6,13 +37,17 @@ import torch.nn.functional as F
 from transformers.cache_utils import Cache
 
 
-# ------------------------------------------------------------------
-# Flattened per-head cache, identical contract to
-# causal_andpro_snapkv.monkeypatch.snapkv_utils.DynamicCacheSplitHeadFlatten.
-# Duplicated here (rather than imported) so this package has no dependency
-# on causal_andpro_snapkv and can be copied/moved independently.
-# ------------------------------------------------------------------
 class DynamicCacheSplitHeadFlatten(Cache):
+    """KV cache whose heads hold different numbers of tokens after eviction.
+
+    Each layer stores its heads back to back as one ``[sum_h len_h, head_dim]``
+    tensor; ``head_lens`` and the cumulative offsets ``cu_klen`` locate each head,
+    which is the layout ``flash_attn_varlen_func`` consumes at decode time. New
+    tokens are appended per head by the ``update_flatten_view`` CUDA kernel in
+    ``csrc/``. Adapted from the AdaKV code base (https://github.com/FFY0/AdaKV, MIT),
+    with the same contract as ``andpro_snapkv`` / ``adaptive_snapkv``.
+    """
+
     def __init__(self) -> None:
         super().__init__()
         self.key_cache: List[torch.Tensor] = []
@@ -80,46 +115,29 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-# ==================================================================
-# Eq. 3 (reparametrized): per-step reliability statistics.
+# ---------------------------------------------------------------------------
+# Trajectory reliability (Sec. 3.3, App. C.3).
 #
-# The published score weighted a particle by its average log-probability and then
-# subtracted lambda_H times its average predictive entropy. Those two channels are
-# not independent: the particles are drawn from p_theta itself, so
+# For a token y_u sampled from q(.|h_u), the centered score (Eq. 2)
 #
-#     E[ log p_theta(y_u | h_u) | h_u ] = -H( p_theta(. | h_u) ),
+#     c_u = log q(y_u | h_u) + H(q(. | h_u)),        E[c_u | h_u] = 0,
 #
-# i.e. the log-probability term already CONTAINS the entropy. Subtracting entropy on
-# top of it does not add a second signal, it just scales the one that is already there
-# -- which is why lambda_H = 0 vs 0.3 moves LongBench by 0.01 points.
+# separates how atypical the sampled branch was from how uncertain the context
+# was. Trajectory reliability (Eq. 3) combines per-step means with the
+# query-space disagreement of Eq. 10:
 #
-# We therefore split the two channels explicitly. For each sampled token define the
-# CENTERED score
+#     R_m = beta * c_bar_m - gamma * H_bar_m - lambda_D * D_hat_m,   omega = softmax(R).
 #
-#     c_u = log q(y_u | h_u) + H( q(. | h_u) ),        E[c_u | h_u] = 0,
+# Because mean_u log q = c_bar - H_bar, uniform weights are (0, 0, 0) and
+# log-probability-only weighting is (1, 1, 0) (App. C.3); LORE-KV /E is
+# (1, 1.3, 0) and /D is (1, 1, 0.3) (Table 4). A softmax temperature would be
+# redundant with the three coefficients, so there is none.
 #
-# which measures only how improbable the branch actually taken was *relative to the
-# uncertainty at that context* (branch atypicality), with the uncertainty itself removed.
-# A trajectory is then scored as
-#
-#     R_m = beta * cbar_m - gamma * Hbar_m - lambda_D * Dhat_m
-#
-# so beta prices branch atypicality, gamma prices context uncertainty (an explicit,
-# deliberate preference for low-entropy histories, matching the near-greedy deployment
-# operating point), and lambda_D prices ensemble disagreement -- three independent knobs
-# instead of one entropy signal counted twice.
-#
-# Nesting: since (1/T) sum_u log q(y_u|h_u) = cbar_m - Hbar_m, the old score is the
-# (beta, gamma, lambda_D) = (1, 1 + lambda_H, lambda_D) ray. In particular the old
-# "log-probability only" setting lambda_H = 0 is gamma = 1 -- a FULL unit of entropy
-# penalty, not a no-penalty control. gamma = 0 was unreachable before.
-#
-# NOTE (centering law == sampling law): E[c_u | h_u] = 0 holds only when the particles
-# are drawn from the same distribution c_u is centered against. Any truncation
-# (top-k / top-p) or temperature != 1 must therefore be applied to the logits BEFORE
-# the log-softmax below, otherwise q concentrates on high-probability tokens,
-# E_q[log p] > -H(p), and cbar_m acquires a silent positive bias.
-# ==================================================================
+# E[c_u | h_u] = 0 holds only if c_u is centered against the distribution the
+# token was sampled from. Any temperature or top-k / top-p truncation must
+# therefore be applied to the logits before the log-softmax (step_stats does);
+# the paper samples at temperature 1 without truncation (App. E.1).
+# ---------------------------------------------------------------------------
 def mask_top_k(z, top_k):
     """-inf outside the top-k support, so log_softmax gives the truncated law exactly."""
     if not top_k or top_k <= 0 or top_k >= z.shape[-1]:
@@ -140,19 +158,19 @@ def mask_top_p(z, top_p):
 
 
 def step_stats(logits, y, temperature=1.0, top_k=None, top_p=None):
-    """Per-step reliability statistics for one decoding step.
+    """Per-step reliability statistics of one sampled token (Eqs. 2 and 9).
 
-    logits : [M, |V|] raw next-token logits (the SAME logits the sampler consumed)
+    logits : [M, |V|] raw next-token logits (the same logits the sampler consumed)
     y      : [M] the sampled token ids at this step
 
     Returns (logp, H, V, c), each [M]:
       logp -- log q(y | h)
-      H    -- entropy of q(. | h)                      (nats)
-      V    -- varentropy Var_{y~q}[log q(y)]           (Prop. 3)
-      c    -- centered score logp + H, with E[c | h] = 0
+      H    -- entropy of q(. | h) in nats
+      V    -- varentropy Var_{y~q}[log q(y)] (Eq. 9)
+      c    -- centered score logp + H (Eq. 2), with E[c | h] = 0
 
-    `temperature`, `top_k` and `top_p` MUST match the sampler's, or the centering
-    law stops being the sampling law and E[c | h] != 0.
+    ``temperature``, ``top_k`` and ``top_p`` must match the sampler's, otherwise
+    the centering law is not the sampling law and E[c | h] != 0.
     """
     z = logits.float() / max(float(temperature), 1e-5)
     if top_k is not None:
@@ -176,17 +194,14 @@ def step_stats(logits, y, temperature=1.0, top_k=None, top_p=None):
 
 
 def reliability_weights(c, H, V, D_hat, beta, gamma, lambda_d=0.0, normalize=False):
-    """Eq. 3 + Eq. 6: particle weights omega from the three independent channels.
+    """Trajectory weights omega (Eqs. 3-4).
 
     c, H, V : [M, T] per-step centered score / entropy / varentropy
-    D_hat   : [M] standardized trajectory disagreement (Eq. 5), or None
-    normalize : use the variance-normalized typicality ctilde = cbar / sqrt(Vbar / T)
-                instead of cbar. An ABLATED SWITCH, not a default (see test V5).
+    D_hat   : [M] standardized query-space disagreement (App. C.3), or None
+    normalize : use c_bar / sqrt(V_bar / T), the standard-error-normalized
+                typicality of App. C.3, instead of c_bar (ablation only)
 
-    Returns (omega [M], parts dict) so the caller can log the channels separately.
-    There is no eta: softmax(eta * (beta*c - gamma*H - lambda_D*D)) is exactly
-    softmax((eta*beta)*c - (eta*gamma)*H - (eta*lambda_D)*D), so eta is not
-    identifiable alongside the three coefficients and has been absorbed into them.
+    Returns (omega [M], parts) where ``parts`` holds the per-trajectory channels.
     """
     T = max(int(c.shape[-1]), 1)
     c_bar, H_bar, V_bar = c.mean(-1), H.mean(-1), V.mean(-1)
@@ -199,44 +214,26 @@ def reliability_weights(c, H, V, D_hat, beta, gamma, lambda_d=0.0, normalize=Fal
     }
 
 
-# ------------------------------------------------------------------
-# Eq. 7: trajectory-disagreement term of the particle confidence score.
+# ---------------------------------------------------------------------------
+# Query-space disagreement (Eq. 10). How far trajectory m's lookahead queries
+# sit from those of the other trajectories:
 #
-# The published R_m subtracted the mean predictive entropy of a particle. That is
-# redundant in expectation: the particles are themselves drawn from p_theta, so
-# E[log p_theta(y_u) | y_{<u}] = -H(p_theta(.|y_{<u})), and the average log-prob term
-# already carries the same low-entropy signal -- the softmax tilt then counts it twice
-# and pulls the estimator toward a likelihood-tilted (mode-seeking) distribution rather
-# than p_theta itself.
+#   D_m = 1/(M-1) sum_{r != m} 1/(T L H_q) sum_{u,l,g} [1 - cos(q^(m)_{u,l,g}, q^(r)_{u,l,g})].
 #
-# We replace it with how ATYPICAL a particle's *future query trajectory* is relative to
-# the rest of the ensemble:
-#
-#   D_m = 1/(M-1) sum_{r != m}  1/(T|G|) sum_{u,g} [ 1 - cos(q^{(m)}_{u,g}, q^{(r)}_{u,g}) ]
-#
-# where u indexes the T lookahead steps and g ranges over the (layer, head) groups G.
-# Both queries in a pair sit at the same absolute position n+u, so they carry the same
-# rotary phase and the cosine is directly comparable.
-#
-# D_m is measured in the same space the score actually consumes (query directions), and
-# it is a purely ENSEMBLE-RELATIVE quantity: after the standardization below it sums to
-# zero over the particles, so the tilt only re-allocates mass *within* the sample from
-# p_theta instead of systematically shifting the target distribution the way an absolute
-# likelihood/entropy penalty does. It also bounds the damage from a confidently-wrong
-# particle: a particle whose queries nobody else reproduces is down-weighted no matter
-# how confident the model was while generating it.
-# ------------------------------------------------------------------
+# Queries compared at step u occupy the same absolute position n + u and hence the
+# same rotary phase, so their cosine is meaningful. D_m is ensemble-relative: once
+# standardized it sums to zero over the trajectories, so it re-weights within the
+# sample rather than shifting the estimator's target (App. C.3).
+# ---------------------------------------------------------------------------
 @torch.no_grad()
 def divergence_from_query_stacks(stacks, num_particles, eps=1e-6, device=None):
-    """Core D_m math, shared by the runner and the analysis figures.
+    """D_m of Eq. 10, shared by the runner and the analysis figures.
 
-    `stacks` yields one [M, Hq, T, D] tensor per (layer) group -- particle m's captured
-    post-RoPE lookahead queries for that layer, stacked along dim 0 in particle order.
-    Returns a float32 tensor [M]; all-zeros when M <= 2 or when no group supplied any
-    query. The M <= 2 guard is not cosmetic: disagreement is undefined for a single
-    particle, and DEGENERATE for two, because D_1 = d(1,2) = D_2 by symmetry, so
-    sd(D) = 0 and the standardization in Eq. 5 would be 0/0. Any (M = 2, lambda_D > 0)
-    cell therefore reduces exactly to lambda_D = 0 rather than producing NaNs.
+    ``stacks`` yields one [M, Hq, T, D] tensor per layer -- trajectory m's post-RoPE
+    lookahead queries, stacked along dim 0. Returns a float32 tensor [M]. It is all
+    zeros when M <= 2 or no layer supplied a query: disagreement is undefined for
+    one trajectory and degenerate for two (D_1 = D_2 by symmetry, so sd(D) = 0), so
+    any (M <= 2, lambda_D > 0) setting reduces exactly to lambda_D = 0.
 
     `device` may be left None, in which case the accumulator adopts the device of the
     first stack (the caller's query tensors normally live on the GPU already).
@@ -290,7 +287,7 @@ def _cluster_query_stacks(layers, num_particles, layer_stride=1):
 
 @torch.no_grad()
 def particle_trajectory_divergence(layers, num_particles, layer_stride=1, eps=1e-6, device=None):
-    """Mean pairwise query-trajectory disagreement D_m, one scalar per particle.
+    """Query-space disagreement D_m (Eq. 10), one scalar per trajectory.
 
     `layers` are the decoder layers whose `self_attn.kv_cluster._lookahead_buffers[m]`
     hold the m-th particle's captured post-RoPE query states (list of T x [1,Hq,1,D]);
@@ -303,18 +300,11 @@ def particle_trajectory_divergence(layers, num_particles, layer_stride=1, eps=1e
 
 
 def standardize_disagreement(x, eps=1e-6):
-    """Eq. 5: zero-mean / unit-std across the M particles.
+    """D_hat = (D - mean D) / sd(D) across the M trajectories (App. C.3).
 
-    Centering is free (softmax is shift-invariant) but makes the "pure re-allocation"
-    reading exact; the std normalization is what makes lambda_D scale-free, so one
-    setting transfers across prompts whose absolute disagreement levels differ, and
-    keeps the resulting tilt bounded (a z-score over M particles cannot exceed
-    sqrt(M-1)).
-
-    Returns all-zeros for M <= 2: disagreement is undefined for one particle and
-    degenerate for two (D_1 = D_2 by symmetry, so sd(D) = 0 and the z-score is 0/0).
-    Degenerate spread at larger M (every particle identical) also collapses to zeros,
-    i.e. uniform weights.
+    The standardization makes lambda_D scale-free across prompts and bounds the
+    tilt (|z| <= sqrt(M - 1)). Returns zeros for M <= 2 and when every trajectory
+    has the same disagreement.
     """
     if x.numel() <= 2:
         return torch.zeros_like(x)
@@ -325,20 +315,20 @@ def standardize_disagreement(x, eps=1e-6):
     return centered / sd
 
 
-# Back-compatible name used by the analysis/figure scripts.
+# Alias used by the analysis figures.
 standardize_particle_scores = standardize_disagreement
 
 
 class TestTimeLookaheadKVCluster:
-    """Implements "Training-Free Test-Time Lookahead Causal KV Eviction" (proposed_updated_idea.pdf).
+    """Per-layer LORE-KV state and eviction (Algorithm 1, lines 7-24).
 
-    Unlike AnDProAdaptiveSnapKVCluster.update_kv (causal_andpro_snapkv), compression here is NOT
-    triggered automatically inside the attention forward during prefill. The attention hijack only
-    feeds this object raw observations (window queries, lookahead-trajectory queries, the full
-    uncompressed K/V); the actual scoring + eviction happens once, in `compress()`, called explicitly
-    by lorekv.monkeypatch.lookahead_runner after all M lookahead particles have run
-    (Algorithm 1, lines 1-34). This split is required because the lookahead continuations themselves
-    must be generated against the *full* (uncompressed) cache before eviction can happen.
+    One instance lives on every compressed attention layer (``self.kv_cluster``).
+    Unlike the baselines, which evict inside the prefill forward, LORE-KV must
+    first generate the lookahead trajectories against the full cache. The
+    attention hijack therefore only records observations -- the window queries
+    Q_W, each trajectory's queries Q_look^(m) and the full K/V -- and
+    :func:`lorekv.monkeypatch.lookahead_runner.generate_with_lookahead` calls
+    :meth:`compress` once per layer after the rollout.
     """
 
     def __init__(self, window_size, base_capacity, chunk_size, skip, layer_idx, num_hidden_layers,
@@ -354,34 +344,29 @@ class TestTimeLookaheadKVCluster:
         self.layer_idx = layer_idx
         self.num_hidden_layers = num_hidden_layers
 
-        # Eq. 3/6: lookahead particle generation + reliability weighting.
-        # R_m = beta * cbar_m - gamma * Hbar_m - lambda_D * Dhat_m, three independent
-        # channels (branch atypicality / context uncertainty / ensemble disagreement).
+        # Lookahead (Eq. 1) and reliability R_m = beta*c_bar - gamma*H_bar - lambda_D*D_hat (Eq. 3).
         self.num_particles = num_particles
         self.lookahead_len = lookahead_len
         self.particle_beta = particle_beta   # beta:  typicality (centered log-prob) coefficient
         self.particle_gamma = particle_gamma # gamma: entropy coefficient
         self.lambda_d = lambda_d             # lambda_D: trajectory-disagreement coefficient
-        self.normalize_typicality = bool(normalize_typicality)  # ablated switch (Prop. 3)
+        self.normalize_typicality = bool(normalize_typicality)  # App. C.3 ablation
         self.divergence_layer_stride = divergence_layer_stride
         self.lookahead_temperature = lookahead_temperature
 
-        # Eq. 15-18: robust aggregation + particle-weighted lookahead score.
+        # Aggregation psi (App. D-A: alpha, kappa) and lookahead weight lambda_L (Eq. 7).
         self.robust_alpha = robust_alpha
         self.robust_topk_beta = robust_topk_beta
         self.lambda_lookahead = lambda_lookahead
 
-        # Eq. 19-21: adaptive head-wise budget + diversity-aware greedy selection.
+        # Head budgets (Eq. 11: tau) and diversity-aware selection (App. D-C: lambda_k, lambda_v).
         self.budget_tau = budget_tau
         self.lambda_k = lambda_k
         self.lambda_v = lambda_v
 
-        # App. C (iii): perturbation objective. What is measured for a candidate token
-        # under a scoring query, BEFORE the rho-aggregation of Eq. 15-17. The lookahead
-        # queries, the reliability weights and everything downstream are untouched, so
-        # this is a single-factor control on Eq. 14.
-        #   'projected'   |c_{q,i}| * || W_O v_i - W_O y_q ||   (Eq. 14, the core method)
-        #   'unprojected' |c_{q,i}| * ||      v_i -      y_q ||   (drops W_O only)
+        # Per-query deletion score (App. D, ablation iii); everything else is unchanged:
+        #   'projected'   |c_{q,i}| * || W_O v_i - W_O o_q ||   (Eqs. 5-6, the core method)
+        #   'unprojected' |c_{q,i}| * ||      v_i -      o_q ||   (W_O dropped)
         #   'attention'   a_{q,i}                                (accumulated attention mass)
         self.score_objective = str(score_objective).lower()
         if self.score_objective not in ("projected", "unprojected", "attention"):
@@ -405,7 +390,7 @@ class TestTimeLookaheadKVCluster:
         self._lookahead_buffers = [[] for _ in range(num_particles)]
         self.particle_weights = None        # tensor [M], set after particle confidence scoring
 
-        # Decode-time (varlen flash-attn) metadata, same convention as causal_andpro_snapkv.
+        # Decode-time (varlen flash-attn) metadata, same convention as the baselines.
         self.head_lens = None
         self.max_seqlen_k = 0
         self.klen_sum = 0
@@ -420,7 +405,7 @@ class TestTimeLookaheadKVCluster:
     # Observation hooks called from the attention forward hijack.
     # ------------------------------------------------------------------
     def capture_window_queries(self, query_states):
-        """Eq. 2/5: Q_W, the last `window_size` prefill queries (post-RoPE)."""
+        """Record Q_W, the post-RoPE queries of the last ``window_size`` prompt tokens."""
         w = min(self.window_size, query_states.shape[2])
         # .clone(), not a view: a slice keeps the WHOLE [1, H, n, D] prefill query tensor
         # alive for every layer until compress() -- 1 GiB per layer at 128K on
@@ -429,16 +414,16 @@ class TestTimeLookaheadKVCluster:
         self.window_queries = query_states[:, :, -w:, :].detach().clone()
 
     def store_full_kv(self, key_states, value_states):
-        """Full, uncompressed prefill K/V (Eq. 1), kept alive across the whole lookahead rollout."""
+        """Record the full prefill K/V (KV-head count), needed until :meth:`compress`."""
         self.full_key_states = key_states.detach()
         self.full_value_states = value_states.detach()
 
     def capture_lookahead_query(self, particle_idx, query_states):
-        """Eq. 5: one query state from the m-th lookahead trajectory."""
+        """Append one step of Q_look^(m), the queries of lookahead trajectory m."""
         self._lookahead_buffers[particle_idx].append(query_states.detach())
 
     def set_particle_weights(self, weights):
-        """Eq. 8: normalized particle confidence weights omega_m."""
+        """Set the trajectory weights omega (Eq. 4)."""
         self.particle_weights = weights
 
     def release_collected_state(self):
@@ -455,20 +440,18 @@ class TestTimeLookaheadKVCluster:
         self.particle_weights = None
 
     # ------------------------------------------------------------------
-    # Eq. 9-17: output-projection-aware causal score, robustly aggregated over a query batch.
+    # Deletion scores (Eqs. 5-6) aggregated over a query set (psi in Eq. 7).
     # ------------------------------------------------------------------
     def _robust_topbeta_mean(self, scores):
-        """scores: [Q, chunk] -> [chunk]. Eq. 16-17: alpha * TopAvg_beta + (1-alpha) * Mean, over Q."""
+        """psi(E) = alpha * TopAvg_kappa(E) + (1 - alpha) * Mean(E) over queries (App. D-A).
+
+        scores: [Q, chunk] -> [chunk]. The core method uses alpha = 0, i.e. the mean;
+        kappa is ``robust_topk_beta``. Motivated by DefensiveKV (Feng et al., 2025a).
+        """
         q = scores.shape[0]
         if q == 0:
-            # An empty query batch carries no information about any candidate, so it
-            # contributes zero. This is the DESIGNED behaviour, not a workaround:
-            # compress() already builds `self.window_queries[:, :, :0, :]` for a
-            # particle whose buffer is empty (see the q_m line in compress), i.e. a
-            # zero-length batch is an expected input. What was missing is that
-            # topk(k>=1) on a 0-row tensor raises "selected index k out of range", so
-            # the intent was expressible but not reachable. Latent on every backbone;
-            # Gemma 4 is simply the first to produce an empty buffer in practice.
+            # A trajectory with no captured queries (compress() passes an empty batch
+            # for it) carries no information and contributes zero.
             return scores.new_zeros(scores.shape[1:])
         k = max(1, math.ceil(self.robust_topk_beta * q))
         topk_vals, _ = scores.topk(k, dim=0)
@@ -477,29 +460,34 @@ class TestTimeLookaheadKVCluster:
         return self.robust_alpha * topavg + (1.0 - self.robust_alpha) * mean_
 
     def _project_and_score(self, key_states, value_states, query_batches, causal_flags):
-        """Eq. 9-14 scoring, decomposed via the W_O-projection Gram-matrix identity so the
-        [Q, n, hidden] perturbation tensor is never materialized:
+        """Aggregated leave-one-out deletion scores for each query set (Eqs. 5-7).
 
-            delta_y_{q,i} = c_{q,i} * (v_i - y_q),         c_{q,i} = a_{q,i} / (1 - a_{q,i} + eps)
-            delta_o_{q,i} = W_O @ delta_y_{q,i} = c_{q,i} * (W_O v_i - W_O y_q)
-            s_{q,i}       = |c_{q,i}| * || W_O v_i - W_O y_q ||_2
-                          = |c_{q,i}| * sqrt(||Wv_i||^2 + ||Wy_q||^2 - 2 Wv_i . Wy_q)
+        With a_{q,i} the full-cache attention weight and o_q the full-cache output,
+        deleting token i and renormalizing changes the output by (Eq. 5)
 
-        `Wv_i = W_O v_i` depends only on the (shared) value states, so it is computed once per
-        head and reused across the window batch and every lookahead particle's batch.
+            delta_o_{q,i} = c_{q,i} * (v_i - o_q),     c_{q,i} = a_{q,i} / (1 - a_{q,i} + eps),
 
-        `self.score_objective` selects WHAT is measured here (App. C (iii)); the queries,
-        reliability weights, allocation and selection are identical in all three cases:
-            'projected'   s_{q,i} = |c_{q,i}| * || W_O v_i - W_O y_q ||   (Eq. 14, default)
-            'unprojected' s_{q,i} = |c_{q,i}| * ||      v_i -      y_q || (W_O -> identity)
-            'attention'   s_{q,i} = a_{q,i}                               (attention mass)
+        and its residual-stream impact is measured through the head's output-projection
+        block W_O (Eq. 6). The magnitude is computed with the Gram identity
+
+            |c_{q,i}| * ||W_O v_i - W_O o_q|| = |c_{q,i}| * sqrt(||W_O v_i||^2 + ||W_O o_q||^2
+                                                             - 2 <W_O v_i, W_O o_q>),
+
+        so the [Q, n, hidden] perturbation tensor is never materialized; W_O v_i is
+        computed once per head and shared by every query set. Attention is computed
+        explicitly only for the w + M*T scoring queries (App. C.1), so prefill and
+        decoding keep their fused kernels.
+
+        ``self.score_objective`` selects the per-query score (App. D, ablation iii):
+            'projected'   |c_{q,i}| * ||W_O v_i - W_O o_q||   (default)
+            'unprojected' |c_{q,i}| * ||v_i - o_q||
+            'attention'   a_{q,i}
 
         key_states, value_states: [1, H, n, D] (already GQA-repeated to query-head count).
-        query_batches: list of [1, H, Qi, D] tensors.
-        causal_flags: list of bool, True only for the prompt's own observation-window batch
-            (its queries must not attend to *later* window positions; every other candidate is
-            already in the causal past). Lookahead queries postdate the whole prompt, so no mask.
-        Returns: list of [H, n] float32 robust-aggregated scores, S_i,W and S_i,m1..S_i,mM.
+        query_batches: list of [1, H, Qi, D] tensors (Q_W first, then Q_look^(1..M)).
+        causal_flags: True only for Q_W, whose queries must not attend to later window
+            positions; lookahead queries come after the whole prompt and need no mask.
+        Returns: one [H, n] float32 tensor per query set, psi(E_{i,W}), psi(E_{i,1..M}).
         """
         H = key_states.shape[1]
         n = key_states.shape[2]
@@ -522,9 +510,7 @@ class TestTimeLookaheadKVCluster:
                 Pv_h = None
                 normsq_v_h = None
             else:
-                # 'projected' embeds the deletion effect through W_O (Eq. 14); 'unprojected'
-                # is the SAME expression with W_O replaced by the identity, i.e. ||Delta o||
-                # measured in head space. Only this substitution changes between the two.
+                # 'unprojected' is the same expression with W_O replaced by the identity.
                 if objective == "projected":
                     Wo_h = self.o_proj_weight[:, h * D:(h + 1) * D].float()  # [hidden, D]
                     Pv_h = v_h @ Wo_h.T               # [n, hidden]
@@ -543,18 +529,17 @@ class TestTimeLookaheadKVCluster:
                     mc = torch.arange(w, device=device)
                     mask.masked_fill_(mc <= mc.view(-1, 1), 0.0)
                     attn_logits[:, -w:] = attn_logits[:, -w:] + mask
-                attn_w = F.softmax(attn_logits, dim=-1)  # [Q, n] : a_{q,i}
+                attn_w = F.softmax(attn_logits, dim=-1)  # [Q, n]: a_{q,i}
 
                 if attention_only:
-                    # Accumulated attention mass: the criterion H2O/SnapKV use, evaluated on
-                    # the SAME window + lookahead queries and aggregated by the same rho, so
-                    # only Eq. 14 is replaced.
+                    # Accumulated attention mass (the H2O / SnapKV criterion) on the same
+                    # queries, aggregated by the same psi.
                     for start in range(0, n, self.candidate_chunk):
                         end = min(start + self.candidate_chunk, n)
                         out_scores[b][h, start:end] = self._robust_topbeta_mean(attn_w[:, start:end])
                     continue
 
-                y_h = attn_w @ v_h                          # [Q, D] : y_q
+                y_h = attn_w @ v_h                          # [Q, D]: o_q
                 Py_h = (y_h @ Wo_h.T) if Wo_h is not None else y_h   # [Q, hidden] or [Q, D]
                 normsq_y_h = (Py_h * Py_h).sum(-1)           # [Q]
                 c = attn_w / (1.0 - attn_w + self.causal_eps)  # [Q, n]
@@ -568,9 +553,18 @@ class TestTimeLookaheadKVCluster:
         return out_scores
 
     # ------------------------------------------------------------------
-    # Eq. 19-22: adaptive head-wise budget allocation + diversity-aware greedy selection.
+    # Budget allocation and selection (Eq. 8; Eq. 11 and App. D-C as plug-ins).
     # ------------------------------------------------------------------
     def _select_chunks(self, token_score, n, H, key_states, value_states):
+        """Per-head retention mask over chunks: R = P u Select(S, B_h) (Eq. 8).
+
+        Tokens are grouped into chunks of ``chunk_size`` scored by their maximum. The
+        first chunk (attention sink) and the observation-window chunks form the
+        protected set P. Scores are normalized by each head's mean over droppable
+        chunks; the remaining budget is split across heads by Eq. 11 (uniform when
+        tau = 0) and filled by top-k, or by the greedy diversity rule when
+        lambda_k or lambda_v > 0. Returns a bool [H, n_chunk] mask.
+        """
         device = token_score.device
         pad_len = (self.chunk_size - (n % self.chunk_size)) % self.chunk_size
         score_padded = F.pad(token_score, (0, pad_len), value=float('-inf'))
@@ -588,15 +582,15 @@ class TestTimeLookaheadKVCluster:
         normalized = chunk_score / (mean_per_head.unsqueeze(-1) + self.causal_eps)
         normalized = normalized.masked_fill(~drop, float('-inf'))
 
-        # Eq. 19: per-head perturbation mass, from the normalized droppable chunk scores.
+        # E_{l,h}: per-head perturbation mass of the droppable chunks (Eq. 11).
         E = torch.where(drop, normalized.clamp_min(0), zeros).sum(-1)  # [H]
         total_chunks_per_head = self.base_capacity // self.chunk_size
         total_budget = H * total_chunks_per_head - H * num_preserved_per_head
         weight = (E + self.causal_eps).pow(self.budget_tau)
         raw_alloc = total_budget * weight / weight.sum()
         head_budget = raw_alloc.floor().long()
-        # Eq. 20's floor() can undershoot the global budget by a few chunks; hand the remainder
-        # to the heads with the largest fractional part so the total stays exactly on-budget.
+        # floor() in Eq. 11 can undershoot the layer budget by a few chunks; give the
+        # remainder to the heads with the largest fractional part.
         deficit = int(total_budget - head_budget.sum().item())
         if deficit > 0:
             order = torch.argsort(raw_alloc - head_budget.float(), descending=True)
@@ -615,9 +609,12 @@ class TestTimeLookaheadKVCluster:
         return preserve
 
     def _greedy_diverse_select(self, normalized, drop, head_budget, n, n_chunk, key_states, value_states):
-        """Eq. 21: i* = argmax_i [ S_i - lambda_k*max_j cos(k_i,k_j) - lambda_v*max_j cos(v_i,v_j) ],
-        applied chunk-wise (chunks represented by their mean-pooled, L2-normalized key/value), with
-        a per-head budget (Eq. 20) instead of one global flat top-K."""
+        """Diversity-aware greedy selection (App. D-C), inspired by GraphKV (Li et al., 2025b):
+
+            i* = argmax_i [S_i - lambda_k max_{j in R} cos(k_i, k_j) - lambda_v max_{j in R} cos(v_i, v_j)],
+
+        applied per head to chunks represented by their mean key/value, until the
+        head's budget is filled."""
         H = normalized.shape[0]
         device = normalized.device
         D = self.head_dim
@@ -659,10 +656,17 @@ class TestTimeLookaheadKVCluster:
         return ~drop
 
     # ------------------------------------------------------------------
-    # Top-level entry point, called once per layer by lookahead_runner after all M particles
-    # have been rolled out (Algorithm 1, lines 9-34).
+    # Entry point, called once per layer after the rollout (Algorithm 1, lines 11-24).
     # ------------------------------------------------------------------
     def compress(self):
+        """Score, select and gather this layer's compressed cache.
+
+        S_i = psi(E_{i,W}) + lambda_L * sum_m omega_m psi(E_{i,m})   (Eq. 7)
+
+        Layers below ``skip`` and prompts no longer than the budget are kept whole.
+        Returns the flattened per-head K/V and the varlen metadata for
+        :class:`DynamicCacheSplitHeadFlatten`.
+        """
         # GQA-repeat here, transiently, instead of persisting the repeated (num_heads-count, up to
         # 4x larger for Mistral) tensor on self.full_key_states/full_value_states for the whole
         # lookahead rollout -- this local is freed as soon as compress() returns.
@@ -686,7 +690,7 @@ class TestTimeLookaheadKVCluster:
             causal_flags.append(False)
 
         scores = self._project_and_score(key_states, value_states, batches, causal_flags)
-        S_total = scores[0]  # Eq. 18 first term: S_i,W
+        S_total = scores[0]                         # psi(E_{i,W})
         if self.lambda_lookahead > 0 and self.particle_weights is not None:
             for m in range(self.num_particles):
                 S_total = S_total + self.lambda_lookahead * self.particle_weights[m] * scores[1 + m]
@@ -734,6 +738,11 @@ class TestTimeLookaheadKVCluster:
 
 
 def init_lookahead_snapkv(self):
+    """Attach a :class:`TestTimeLookaheadKVCluster` to an attention module on first use.
+
+    Hyper-parameters are read from the module's config, where
+    :func:`lorekv.harness.configure_model` wrote them.
+    """
     assert hasattr(self.config, "window_size"), "window_size not set"
     assert hasattr(self.config, "base_capacity"), "base_capacity not set"
     assert hasattr(self.config, "chunk_size"), "chunk_size not set"
@@ -756,13 +765,9 @@ def init_lookahead_snapkv(self):
             lambda_v=self.config.lambda_v,
             budget_tau=self.config.budget_tau,
             lookahead_temperature=self.config.lookahead_temperature,
-            # getattr-guarded: older configs / checkpoints predate the disagreement term,
-            # and lambda_d=0 reproduces them exactly.
             lambda_d=getattr(self.config, "lambda_d", 0.0),
             divergence_layer_stride=getattr(self.config, "divergence_layer_stride", 1),
             normalize_typicality=getattr(self.config, "normalize_typicality", False),
-            # App. C (iii) perturbation-objective ablation. getattr-guarded so every
-            # pre-existing config keeps the Eq. 14 projected score bit-for-bit.
             score_objective=getattr(self.config, "score_objective", "projected"),
         )
         self.kv_cluster.o_proj_weight = self.o_proj.weight

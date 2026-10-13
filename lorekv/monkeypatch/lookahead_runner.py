@@ -1,22 +1,25 @@
-"""Orchestration for "Training-Free Test-Time Lookahead Causal KV Eviction" (Algorithm 1).
+"""LORE-KV generation for one prompt: lookahead, reliability weighting, eviction, decoding.
 
-This implements the multi-phase pipeline that the per-layer attention hijack
-(causal_mistral_hijack.py / causal_llama_hijack.py) cannot do on its own, since it spans many
-forward calls and an explicit branch point between "generate lookahead continuations" and
-"commit to a single compressed cache":
+:func:`generate_with_lookahead` implements Algorithm 1 of the paper around the
+per-layer state in :class:`lorekv.monkeypatch.scoring.TestTimeLookaheadKVCluster`.
+The patched attention forwards read ``config.lookahead_phase`` to decide what to do:
 
-  1. Prefill on the full prompt with NO eviction ("collect" phase) -- every layer's kv_cluster
-     captures its observation-window queries (Eq. 2/5) and stores the full, uncompressed K/V.
-  2. Roll out M short, sampled continuations from the prefill state ("lookahead" phase, Eq. 1),
-     each on its own cloned cache so particles don't interfere; every attention layer records the
-     query states produced by each particle's tokens, and we record the per-STEP reliability
-     statistics (centered score c_u, entropy H_u, varentropy V_u) of each particle.
-  3. Compute particle weights (Eq. 3/6) and call kv_cluster.compress() on every layer, which scores
-     all candidates with the window + particle-weighted lookahead queries (Eq. 9-18), allocates a
-     head-wise budget (Eq. 19-20), and runs diversity-aware greedy selection (Eq. 21-22) to build
-     the final flattened, evicted cache.
-  4. Discard the lookahead draft tokens (they were never appended to the real cache) and decode
-     the actual answer from the compressed cache ("final" phase).
+1. ``"collect"`` -- full prefill of the prompt with no eviction. Every layer records
+   its observation-window queries Q_W and the full K/V (Algorithm 1, lines 1-2).
+2. ``"lookahead"`` -- M continuations of T tokens are sampled from the frozen model
+   (Eq. 1), each on its own copy of the prefill cache. Every layer records the
+   query states of each trajectory, and the per-step statistics c_u, H_u, V_u of
+   each sampled token are kept (Eqs. 2, 9; lines 3-6).
+3. Trajectory weights omega (Eqs. 3-4, 10; lines 8-10), then ``compress()`` on every
+   layer scores, allocates and selects (Eqs. 5-8; lines 11-24).
+4. ``"final"`` -- the continuations are discarded (they were never appended to the
+   real cache) and the answer is decoded greedily from the compressed cache with
+   varlen flash attention (lines 26-27).
+
+Trajectories are rolled out one after another, each on a cache that shares the
+prefill tensors without copying them, which bounds peak memory at one extra
+growing cache. The first token of a trajectory is sampled from the prefill logits;
+the statistics of step u belong to the token sampled at that step.
 """
 import torch
 from transformers.cache_utils import DynamicCache
@@ -31,16 +34,10 @@ from lorekv.monkeypatch.scoring import (
 
 
 def _phase_configs(model):
-    """Every config object the attention modules might read the phase from.
+    """Every config object an attention module may read the phase from.
 
-    The attention hijack reads `self.config.lookahead_phase`, and `self.config` is
-    whatever config that module was constructed with. On a multimodal backbone those
-    differ: Gemma4UnifiedTextAttention holds the TEXT config while `model.model.config`
-    is the top-level multimodal one. Writing only the latter left the attention
-    modules permanently in "collect" -- so after eviction they kept taking the collect
-    branch and called cache.update() without the head_lens/cu_klen kwargs the
-    flattened layer needs (KeyError: 'head_lens'), instead of the varlen decode path.
-    Set it on both, and on the layers' own config, so the read cannot miss it.
+    On a multimodal backbone (Gemma 4) the attention modules hold the nested text
+    config, not ``model.model.config``, so the phase is written to the whole chain.
     """
     seen, out = set(), []
     for cfg in (getattr(model, "config", None),
@@ -65,11 +62,8 @@ def _set_particle(model, idx):
 def _decoder_layers(model):
     """The decoder layer list, wherever this architecture keeps it.
 
-    `model.model.layers` holds for Mistral/Llama/Qwen2 and for Qwen3.5. It does NOT
-    hold for Gemma 4: Gemma4UnifiedModel is a multimodal wrapper whose decoder lives
-    at `model.model.language_model.layers`. Walk the usual nestings rather than
-    hardcoding one, so a future multimodal backbone does not need another special
-    case here.
+    ``model.model.layers`` for Mistral, Llama, Qwen2 and Qwen3.5;
+    ``model.model.language_model.layers`` for the multimodal Gemma 4 wrapper.
     """
     for path in (("model", "layers"),
                  ("model", "language_model", "layers"),
@@ -89,14 +83,10 @@ def _decoder_layers(model):
 
 
 def _kv_layers(model):
-    """(layer_idx, kv_cluster) for every layer LORE-KV actually owns.
+    """(layer_idx, kv_cluster) for every layer LORE-KV compresses.
 
-    On a uniform backbone that is every layer. On a hybrid one it is only the
-    full-attention layers: Qwen3_5DecoderLayer has NO `self_attn` at all on a
-    linear-attention layer (it builds `linear_attn` instead), so `layer.self_attn`
-    raises rather than returning something falsy. Layers we never patched have no
-    kv_cluster, which is the definitive test -- it also covers Gemma 4, where every
-    layer does have `self_attn` but only the full-attention ones were hijacked.
+    Every layer on a dense backbone; only the full-attention layers on a hybrid one
+    (App. E.2). A layer is ours iff its attention module carries a ``kv_cluster``.
     """
     for idx, layer in enumerate(_decoder_layers(model)):
         attn = getattr(layer, "self_attn", None)
@@ -106,22 +96,15 @@ def _kv_layers(model):
 
 
 def _clone_dynamic_cache(cache):
-    """Deep-copy the prefill cache so one lookahead particle cannot disturb another.
+    """A per-trajectory copy of the prefill cache, so trajectories cannot interfere.
 
-    Two cache layouts to support:
+    transformers 4.44 (``key_cache`` / ``value_cache`` lists): a new cache object over
+    the same tensors. ``DynamicCache.update`` only ever rebinds a layer to a new
+    ``torch.cat`` result, so sharing is safe and saves one full-length cache per
+    trajectory (16 GiB for Llama-3.1-8B at 128K).
 
-    transformers 4.44  `cache.key_cache[i]` / `cache.value_cache[i]` -- flat lists.
-
-    transformers 5.x   `cache.layers[i]`, one object per layer, whose type depends
-                       on the layer (DynamicLayer / DynamicSlidingWindowLayer /
-                       LinearAttentionLayer). Their tensor attributes differ, so the
-                       clone copies every tensor attribute it finds rather than
-                       assuming `keys`/`values` -- which is REQUIRED for a hybrid
-                       backbone, not just tidier: a linear-attention layer carries a
-                       recurrent state and no keys/values at all, and sharing that
-                       state between particles would let each rollout corrupt the
-                       next. Non-tensor attributes (cumulative_length, flags) are
-                       copied by value for the same reason.
+    transformers 5.x (``cache.layers``): every tensor attribute of every layer is
+    cloned, because linear-attention layers update their recurrent state in place.
     """
     if hasattr(cache, "key_cache"):                       # 4.44
         # A new cache OBJECT over the SAME tensors -- no data copy. 4.44's
@@ -151,15 +134,10 @@ def _clone_dynamic_cache(cache):
 
 
 def _deep_clone(val):
-    """Clone a cache layer's state, whatever container transformers put it in.
+    """Clone a cache layer's state through tensors, dicts, lists and tuples.
 
-    A DynamicLayer keeps plain tensors (`keys`, `values`), but a LinearAttentionLayer
-    keeps **dicts keyed by state index** -- `conv_states = {0: tensor}`,
-    `recurrent_states = {0: tensor}`. An earlier version of this clone tested only
-    `torch.is_tensor` and `list/tuple`, so those dicts were copied by reference: all M
-    lookahead particles shared ONE recurrent state and each rollout overwrote the
-    previous one's. That does not crash -- it silently corrupts every particle after
-    the first, which is exactly the kind of damage that shows up only as a bad score.
+    LinearAttentionLayer keeps its conv / recurrent states in dicts keyed by state
+    index; copying those by reference would let trajectories share one state.
     """
     if torch.is_tensor(val):
         return val.clone()
@@ -171,9 +149,11 @@ def _deep_clone(val):
 
 
 def _shape_logits(logits, temperature, top_k=None, top_p=None):
-    """Apply the sampler's temperature/truncation. The particle statistics are centered
-    against exactly this law (see scoring.step_stats), so the two must never drift
-    apart -- both call sites derive their distribution from this one function."""
+    """Apply the sampler's temperature and truncation.
+
+    The trajectory statistics are centered against exactly this distribution (see
+    :func:`lorekv.monkeypatch.scoring.step_stats`), which keeps Eq. 2 zero-mean.
+    """
     from lorekv.monkeypatch.scoring import mask_top_k, mask_top_p
     z = logits.float() / max(float(temperature), 1e-5)
     if top_k is not None:
@@ -185,14 +165,23 @@ def _shape_logits(logits, temperature, top_k=None, top_p=None):
 
 @torch.no_grad()
 def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen, eos_token_ids):
-    """Returns a 1D LongTensor of generated token ids (answer only, prompt excluded)."""
+    """Run Algorithm 1 for one prompt and return the answer's token ids (1D, prompt excluded).
+
+    model          a backbone patched by ``replace_*_lookahead`` and configured by
+                   :func:`lorekv.harness.configure_model` (batch size 1)
+    input_ids      [1, n] prompt token ids; attention_mask the matching mask
+    max_gen        maximum number of answer tokens
+    eos_token_ids  token ids that stop decoding
+
+    The answer is decoded greedily, exactly as the baselines' ``model.generate``.
+    """
     device = input_ids.device
     n = input_ids.shape[1]
 
     cfg = model.model.config
     M = cfg.num_particles
     T = cfg.lookahead_len
-    # Eq. 3: R_m = beta * cbar_m - gamma * Hbar_m - lambda_D * Dhat_m.
+    # Reliability coefficients of Eq. 3.
     beta = getattr(cfg, "particle_beta", 1.0)
     gamma = getattr(cfg, "particle_gamma", 0.0)
     lambda_d = getattr(cfg, "lambda_d", 0.0)
@@ -202,22 +191,18 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     top_k = getattr(cfg, "lookahead_top_k", None)
     top_p = getattr(cfg, "lookahead_top_p", None)
 
-    # ---- Phase 1 (Algorithm 1, line 1): full, uncompressed prefill ----
+    # ---- Phase 1 (Algorithm 1, lines 1-2): full, uncompressed prefill ----
     _set_phase(model, "collect")
     out = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True)
     base_cache = out.past_key_values
     last_logits = out.logits[:, -1, :].float()
 
-    # ---- Phase 2 (Algorithm 1, lines 4-8): M sampled lookahead particles ----
-    # Pre-bind every per-step local to None so the `del` below (which frees the lookahead loop's
-    # cache/activation tensors before the memory-heavy compress() phase) is always valid, even if
-    # M or T is configured to 0.
+    # ---- Phase 2 (Algorithm 1, lines 3-6): M sampled lookahead trajectories (Eq. 1) ----
+    # Pre-bind the loop locals so the `del` before compress() is valid even for M = 0.
     cache_m = step_out = tok = next_tok = logits = q0 = None
     cs = hs = vs = None
     _set_phase(model, "lookahead")
-    # Per-STEP statistics, not only trajectory means: the validation diagnostics
-    # (autocorrelation of c_u, the Prop. 3 variance regression, the V5 scale ratio)
-    # all need the sequence, and it is only M x T floats per prompt.
+    # Per-step statistics (M x T floats); the normalized typicality of App. C.3 needs V_u.
     particle_c = torch.zeros(M, T, device=device)     # centered score c_u = log q + H
     particle_H = torch.zeros(M, T, device=device)     # entropy H_u
     particle_V = torch.zeros(M, T, device=device)     # varentropy V_u
@@ -243,8 +228,7 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
             logits = step_out.logits[:, -1, :].float()
             z = _shape_logits(logits, temperature, top_k, top_p)
             next_tok = torch.multinomial(torch.softmax(z, dim=-1), num_samples=1)
-            # step_stats re-applies the same shaping, so the centering law IS the
-            # sampling law and E[c_u | h_u] = 0 holds exactly (paper Sec. 2.2).
+            # step_stats re-applies the same shaping, so E[c_u | h_u] = 0 (Eq. 2).
             _, h_u, v_u, c_u = step_stats(logits, next_tok.squeeze(-1),
                                           temperature=temperature, top_k=top_k, top_p=top_p)
             cs.append(c_u.squeeze())
@@ -257,51 +241,26 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
         particle_H[m] = torch.stack(hs)
         particle_V[m] = torch.stack(vs)
 
-    # Eq. 3: R_m = beta * cbar_m - gamma * Hbar_m - lambda_D * Dhat_m.
-    #
-    # Three independent channels:
-    #   beta     branch atypicality -- did this particle take steps the model itself
-    #            deemed improbable at the contexts it visited? c_u = log q + H has
-    #            conditional expectation zero, so this channel carries no entropy.
-    #   gamma    context uncertainty -- an explicit preference for low-entropy
-    #            histories, matching the near-greedy deployment operating point.
-    #   lambda_D ensemble disagreement -- how far particle m's future-query trajectory
-    #            sits from the rest of the ensemble (particle_trajectory_divergence).
-    #
-    # Reproducing the published (lambda_H, eta) runs:
-    #   beta = eta, gamma = eta * (1 + lambda_H_old), lambda_D = eta * lambda_D_old.
-    # In particular the old "log-probability only" setting (lambda_H = 0) is gamma = 1,
-    # i.e. a FULL unit of entropy penalty -- it was never a no-penalty control.
-    # Uniform weights are (beta, gamma, lambda_D) = (0, 0, 0).
-    #
-    # This must run before compress()/reset_lookahead_buffers() below, which is what
-    # frees the per-layer lookahead query buffers D_m is computed from.
+    # ---- Algorithm 1, lines 8-10: trajectory weights ----
+    # D_m (Eq. 10) is read from the per-layer lookahead query buffers, so it must be
+    # computed before compress() / reset_lookahead_buffers() free them.
     particle_divergence = torch.zeros(M, device=device)
     if lambda_d != 0.0:
         particle_divergence = particle_trajectory_divergence(
             _decoder_layers(model), M, layer_stride=div_stride, device=device)
     d_hat = standardize_disagreement(particle_divergence)
 
-    # Eq. 6: normalized particle reliability weights (no eta -- it is not identifiable
-    # alongside (beta, gamma, lambda_D) and has been absorbed into them).
+    # omega = softmax(R) (Eqs. 3-4).
     weights, _parts = reliability_weights(
         particle_c, particle_H, particle_V, d_hat,
         beta=beta, gamma=gamma, lambda_d=lambda_d, normalize=normalize)
     for _idx, _kvc in _kv_layers(model):
         _kvc.set_particle_weights(weights)
 
-    # base_cache (the full, uncompressed prefill KV cache for every layer) and the lookahead loop's
-    # locals (each holding a full-length cloned cache / step output) are no longer needed -- everything
-    # compress() needs was already captured per-layer onto kv_cluster.full_key_states/window_queries.
-    # Drop them now: compress() itself needs a sizable transient buffer per head (Eq. 9-14's W_O
-    # projection), and letting these stick around as live references is what was causing the
-    # CUDA OOM (torch.cuda.empty_cache() in pred.py's outer loop can't reclaim memory that's still
-    # referenced by a live Python object).
-    # A hybrid backbone's linear-attention / sliding layers are NOT compressed, but
-    # decoding still needs the state they built during prefill. base_cache is about to
-    # be freed, so keep a reference to exactly those layer objects first -- dropping
-    # them would silently reset 24 of Qwen3.5's 32 layers to empty and produce fluent
-    # nonsense rather than an error.
+    # Everything compress() needs is already stored on each layer's kv_cluster, so free
+    # the prefill cache and the rollout's locals before the memory-heavy scoring.
+    # A hybrid backbone's linear-attention / sliding layers are not compressed but
+    # their prefill state is still needed for decoding, so keep those layer objects.
     _owned = {i for i, _ in _kv_layers(model)}
     _carry = None
     if hasattr(base_cache, "layers"):
@@ -310,7 +269,7 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
     del base_cache, cache_m, step_out, tok, next_tok, logits, q0, cs, hs, vs
     torch.cuda.empty_cache()
 
-    # ---- Phase 3 (Algorithm 1, lines 9-34): score + evict, once per layer ----
+    # ---- Phase 3 (Algorithm 1, lines 11-24): score, allocate, select, gather ----
     if _carry is None:
         compressed_cache = DynamicCacheSplitHeadFlatten()          # 4.44: every layer is ours
     else:
@@ -328,12 +287,10 @@ def generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen
 
     _set_phase(model, "final")
 
-    # ---- Phase 4 (Algorithm 1, line 35-36 + real decoding): discard lookahead drafts, answer
-    # generation continues from the *real* next token (the one sampled right after prefill,
-    # before any lookahead branching) using the now-compressed cache.
-    # 4.44 threads a legacy tuple back through the patched model forward; the 5.x
-    # hybrid path keeps the Cache object (its model forward takes past_key_values
-    # directly and make_hybrid_model_forward already marked this one as flat).
+    # ---- Phase 4 (Algorithm 1, lines 26-27): discard the trajectories, decode greedily ----
+    # The first answer token is the argmax of the prefill logits, as for the full cache.
+    # transformers 4.44 threads a legacy tuple through the patched model forward; the
+    # 5.x hybrid path keeps the Cache object.
     past_key_values = (compressed_cache.to_legacy_cache()
                        if hasattr(compressed_cache, "to_legacy_cache") and _carry is None
                        else compressed_cache)
