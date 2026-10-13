@@ -1,46 +1,26 @@
 #!/usr/bin/env python3
-"""
-Average-length / average-time report over experiments/<BENCHMARK>/pred/.
+"""Average prompt length and per-sample wall-clock time over finished runs (Table 3).
 
-For every (benchmark, config, budget) it locates the prediction folder that
-experiments/<BENCHMARK>/run.sh would have written, reads each per-dataset
-*.jsonl and reports the mean "length" and mean "time" fields that
-LongBench/RULER/NIAH pred.py store on every generated sample.
+For every (benchmark, config, budget) this locates the run folder that
+``scripts/sweep.py`` writes for that config (names come from ``run_naming.py``),
+reads each per-dataset ``*.jsonl`` and averages the ``length`` and ``time`` fields
+that every ``pred.py`` stores per sample. ``time`` covers prefill, the LORE-KV
+lookahead and scoring, and decoding, i.e. the per-sample latency of Table 3.
 
-The folder name is rebuilt exactly the way run.sh builds `out_name`:
+Usage::
 
-  causal_lookahead:
-    <mode>_<MODEL_TAG>_<budget>_chunk_<chunk>_M_<M>_T_<T>_lL_<lL>_lT_<lT>
-    _lH_<lH>_eta_<eta>_alpha_<a>_beta_<b>_lK_<lK>_lV_<lV>_tau_<tau>
-  every other mode (andpro / critical / ...):
-    <mode>_<MODEL_TAG>_<budget>_chunk_<chunk>_red_<LAMBDA_RED>
+    python scripts/report_length_time.py                              # defaults below
+    python scripts/report_length_time.py --benchmarks NIAH RULER \
+        --configs andpro critical --budgets 128 1024
+    python scripts/report_length_time.py --include-partial            # in-flight runs
 
-with MODEL_TAG = basename(MODEL_PATH) and, for NIAH multi-needle runs, a
-leading "multi_". All values come from config/<name>.conf, parsed with the same
-rules as scripts/run_h100.sh::_load_conf (inline `#` comments stripped).
-
-Usage
------
-  # the six configs of interest, all three benchmarks, all four budgets
-  python scripts/report_length_time.py
-
-  # a subset
-  python scripts/report_length_time.py --benchmarks NIAH RULER \
-      --configs andpro critical --budgets 128 1024
-
-  # include runs that are still in flight (reads the *.jsonl_tmp checkpoints)
-  python scripts/report_length_time.py --include-partial
-
-Outputs (default under reports/):
-  length_time_per_dataset.csv   one row per (benchmark, config, budget, dataset)
-  length_time_summary.csv       one row per (benchmark, config, budget)
+Writes ``reports/length_time_per_dataset.csv`` and ``reports/length_time_summary.csv``.
 """
 
 import argparse
 import csv
 import json
 import os
-import re
 import statistics
 import sys
 from collections import OrderedDict
@@ -58,56 +38,16 @@ DEFAULT_CONFIGS = [
 DEFAULT_BENCHMARKS = ["LongBench", "RULER", "NIAH"]
 DEFAULT_BUDGETS = ["128", "256", "512", "1024"]
 
-# run.sh defaults for every key that participates in the folder name, so a
-# config that omits one still resolves to the same path run.sh would use.
-RUN_SH_DEFAULTS = {
-    "MODEL_PATH": "mistralai/Mistral-7B-Instruct-v0.2",
-    "MODE": "andpro",
-    "LAMBDA_RED": "0.0",
-    "NUM_PARTICLES": "4",
-    "LOOKAHEAD_LEN": "8",
-    "LAMBDA_LOOKAHEAD": "1.0",
-    "LOOKAHEAD_TEMPERATURE": "1.0",
-    "BETA": "1.0",
-    "GAMMA": "0.0",
-    "LAMBDA_D": "0.0",
-    "NORMALIZE_TYPICALITY": "0",
-    "ROBUST_ALPHA": "0.5",
-    "ROBUST_TOPK_BETA": "0.5",
-    "LAMBDA_K": "0.0",
-    "LAMBDA_V": "0.0",
-    "BUDGET_TAU": "1.0",
-}
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from run_naming import build_run_name  # noqa: E402
+from sweep import LOREKV, SHARED, load_conf  # noqa: E402
 
-CHUNK_SIZE = "4"  # every run.sh hard-codes chunk_size_scopes=(4)
-
-CONF_LINE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
-
-
-def load_conf(path):
-    """Parse a config/*.conf the way scripts/run_h100.sh::_load_conf does."""
-    conf = {}
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            m = CONF_LINE.match(line.rstrip("\n"))
-            if not m:
-                continue
-            key, value = m.group(1), m.group(2)
-            value = re.split(r"\s+#", value, maxsplit=1)[0]  # strip inline comment
-            value = value.strip()
-            if value.startswith("#"):
-                value = ""
-            conf[key] = value
-    return conf
+DEFAULTS = {var: default for var, _, default in SHARED + LOREKV}
+DEFAULTS["MODEL_PATH"] = "mistralai/Mistral-7B-Instruct-v0.2"
 
 
 def conf_get(conf, key):
-    value = conf.get(key, "")
-    return value if value != "" else RUN_SH_DEFAULTS[key]
+    return conf.get(key) or DEFAULTS[key]
 
 
 def first(value):
@@ -117,21 +57,17 @@ def first(value):
 
 
 def out_names(conf, budget, niah_multi=False, legacy=True):
-    """Rebuild run.sh's out_name for one budget (most-preferred name first).
+    """Candidate run-folder names for one config and budget, most preferred first.
 
-    Names come from scripts/run_naming.py, the same module run.sh uses, so a
-    lookahead run resolves to `lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_...`.
-    Non-lookahead runs predating the `_red_<LAMBDA_RED>` suffix were written to
-    the bare `<mode>_<tag>_<budget>_chunk_<chunk>` folder; it is offered as a
-    fallback unless `legacy` is False.
+    Baseline folders written by older versions of the repository carry a
+    ``_red_0.0`` suffix; that spelling is offered as a fallback unless ``legacy``
+    is False.
     """
-    mode = first(conf_get(conf, "MODE"))
-    model_tag = os.path.basename(conf_get(conf, "MODEL_PATH").rstrip("/"))
-    g = lambda k: first(conf_get(conf, k))  # noqa: E731
-
-    # run_naming.build_run_name is what run.sh itself calls, so this cannot drift.
-    names = [build_run_name(
-        mode=mode, model_tag=model_tag, budget=budget, chunk_size=CHUNK_SIZE,
+    g = lambda k: first(conf.get(k) or DEFAULTS[k])  # noqa: E731
+    mode = g("MODE")
+    model_tag = os.path.basename(g("MODEL_PATH").rstrip("/"))
+    name = build_run_name(
+        mode=mode, model_tag=model_tag, budget=budget, chunk_size=g("CHUNK_SIZE"),
         num_particles=g("NUM_PARTICLES"), lookahead_len=g("LOOKAHEAD_LEN"),
         lambda_lookahead=g("LAMBDA_LOOKAHEAD"),
         lookahead_temperature=g("LOOKAHEAD_TEMPERATURE"),
@@ -139,12 +75,10 @@ def out_names(conf, budget, niah_multi=False, legacy=True):
         normalize_typicality=g("NORMALIZE_TYPICALITY"),
         robust_alpha=g("ROBUST_ALPHA"), robust_topk_beta=g("ROBUST_TOPK_BETA"),
         lambda_k=g("LAMBDA_K"), lambda_v=g("LAMBDA_V"), budget_tau=g("BUDGET_TAU"),
-        lambda_red=g("LAMBDA_RED"))]
+        score_objective=g("SCORE_OBJECTIVE"), name_prefix=conf.get("RUN_NAME_PREFIX") or None)
+    names = [name]
     if mode != "causal_lookahead" and legacy:
-        # Non-lookahead runs predating the `_red_<LAMBDA_RED>` suffix landed in the
-        # bare `<mode>_<tag>_<budget>_chunk_<chunk>` folder.
-        names.append(f"{mode}_{model_tag}_{budget}_chunk_{CHUNK_SIZE}")
-
+        names.append(f"{name}_red_0.0")
     return [f"multi_{n}" for n in names] if niah_multi else names
 
 

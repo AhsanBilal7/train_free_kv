@@ -16,20 +16,19 @@ Scoring, the \\tbd convention and the \\best/\\second markup are reused from
 scripts/longbench_table.py rather than reimplemented, so a number in an appendix
 table is produced by exactly the same code path as the same number in a main
 table. As there, scores are recomputed from the .jsonl files instead of read from
-result.json, which run.sh only writes at the end of a sweep and is therefore stale
-for anything still in flight.
+result.json, which can be stale for a run still in flight.
 
-Usage (from experiments/LongBench):
-    python ../../scripts/longbench_ablations.py                  # both tables to stdout
-    python ../../scripts/longbench_ablations.py --out ../../paper_files/additional_experiments.tex
+Usage:
+    python scripts/longbench_ablations.py                        # LaTeX to stdout
+    python scripts/longbench_ablations.py --out ablations.tex
 """
 
 import argparse
 import os
 import sys
 
-sys.path.insert(0, os.getcwd())                      # experiments/LongBench, for eval.py
-_REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO, "experiments", "LongBench"))   # eval.py
 sys.path.append(_REPO)
 
 from scripts.longbench_table import (            # noqa: E402
@@ -184,7 +183,8 @@ def wrap(env_lines, label, caption, colspec, small=True):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backbone", default="mistral", choices=sorted(BACKBONES))
-    ap.add_argument("--pred-root", default="pred")
+    ap.add_argument("--pred-root", nargs="+",
+                    default=[os.path.join(_REPO, "experiments", "LongBench", "pred")])
     ap.add_argument("--no-highlight", action="store_true")
     ap.add_argument("--no-backbones", action="store_true",
                     help="omit the Qwen2.5-14B / Ministral-3-8B tables")
@@ -192,7 +192,7 @@ def main():
     args = ap.parse_args()
 
     model_tag, _ = BACKBONES[args.backbone]
-    roots = [args.pred_root]
+    roots = args.pred_root
 
     body = [HEADER,
             r"\newcommand{\backboneName}{%s}" % model_tag.replace("_", r"\_"),

@@ -29,19 +29,20 @@ Re-run after any change to a Llama hijack so the copies stay in lockstep:
 import os
 import re
 
-REPO = "/home/u.ab353540/train_free_kv"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# (package, llama hijack file, attention forward, model forward, init symbol)
+# (package, llama hijack file, attention forward, model forward, init symbol,
+#  module that defines the init symbol and DynamicCacheSplitHeadFlatten)
 JOBS = [
     ("andpro_snapkv", "andpro_llama_hijack.py",
-     "andpro_llama_flash_attn2_forward", "andpro_LlamaModel_forward", "init_andpro_snapkv"),
+     "andpro_llama_flash_attn2_forward", "andpro_LlamaModel_forward", "init_andpro_snapkv",
+     "snapkv_utils"),
     ("adaptive_snapkv", "adaptive_llama_hijack.py",
-     "adaptive_llama_flash_attn2_forward", "adaptive_LlamaModel_forward", "init_adaptive_snapkv"),
-    ("causal_andpro_snapkv", "causal_llama_hijack.py",
-     "causal_llama_flash_attn2_forward", "causal_LlamaModel_forward", "init_andpro_snapkv"),
-    ("causal_lookahead_snapkv", "causal_llama_hijack.py",
+     "adaptive_llama_flash_attn2_forward", "adaptive_LlamaModel_forward", "init_adaptive_snapkv",
+     "snapkv_utils"),
+    ("lorekv", "causal_llama_hijack.py",
      "causal_lookahead_llama_flash_attn2_forward", "causal_lookahead_LlamaModel_forward",
-     "init_lookahead_snapkv"),
+     "init_lookahead_snapkv", "scoring"),
 ]
 
 # The q/k/v block every Llama hijack uses, replaced for the models_ext backbones.
@@ -144,7 +145,7 @@ def emit(path, header, imports, bodies):
     print("wrote", path, len(text.splitlines()), "lines")
 
 
-for pkg, src, fwd_name, model_fwd_name, init_sym in JOBS:
+for pkg, src, fwd_name, model_fwd_name, init_sym, utils_mod in JOBS:
     src_path = os.path.join(REPO, pkg, "monkeypatch", src)
     text = open(src_path).read()
     prefix = fwd_name.rsplit("_llama_", 1)[0]
@@ -165,16 +166,16 @@ for pkg, src, fwd_name, model_fwd_name, init_sym in JOBS:
         os.path.join(REPO, pkg, "monkeypatch", f"{prefix}_ext_hijack.py"),
         HEADER.format(names=ext_fwd, plural="", pkg=pkg, src=src,
                       backbone="the models_ext backbones (Ministral3)"),
-        ["from typing import List, Optional, Tuple, Union", "",
+        ["from typing import Optional, Tuple", "",
          "import torch",
-         "from transformers.cache_utils import Cache, DynamicCache, StaticCache",
+         "from transformers.cache_utils import Cache, StaticCache",
          "from transformers.models.llama.modeling_llama import apply_rotary_pos_emb, repeat_kv",
          "from transformers.modeling_flash_attention_utils import _flash_attention_forward",
          "from transformers.utils import logging, is_flash_attn_2_available", "",
-         f"from {pkg}.monkeypatch.snapkv_utils import {init_sym}", "",
+         f"from {pkg}.monkeypatch.{utils_mod} import {init_sym}", "",
          "logger = logging.get_logger(__name__)", "",
          "if is_flash_attn_2_available():",
-         "    from flash_attn import flash_attn_func, flash_attn_varlen_func", "", ""],
+         "    from flash_attn import flash_attn_varlen_func", "", ""],
         [body],
     )
 
@@ -207,16 +208,19 @@ for pkg, src, fwd_name, model_fwd_name, init_sym in JOBS:
                       backbone="Qwen2 (native in transformers 4.44)"),
         ["from typing import List, Optional, Tuple, Union", "",
          "import torch",
-         "from transformers.cache_utils import Cache, DynamicCache, StaticCache",
+         # The LORE-KV model forward builds a plain DynamicCache for the prefill and
+         # lookahead phases; the baselines' forwards do not.
+         "from transformers.cache_utils import Cache, "
+         + ("DynamicCache, " if pkg == "lorekv" else "") + "StaticCache",
          "from transformers.modeling_outputs import BaseModelOutputWithPast",
          "# Qwen2's own apply_rotary_pos_emb, which takes position_ids and indexes the",
          "# cos/sin table -- NOT Llama's, which expects already-gathered embeddings.",
          "from transformers.models.qwen2.modeling_qwen2 import apply_rotary_pos_emb, repeat_kv",
          "from transformers.modeling_flash_attention_utils import _flash_attention_forward",
          "from transformers.utils import logging, is_flash_attn_2_available", "",
-         f"from {pkg}.monkeypatch.snapkv_utils import {init_sym}, DynamicCacheSplitHeadFlatten", "",
+         f"from {pkg}.monkeypatch.{utils_mod} import {init_sym}, DynamicCacheSplitHeadFlatten", "",
          "logger = logging.get_logger(__name__)", "",
          "if is_flash_attn_2_available():",
-         "    from flash_attn import flash_attn_func, flash_attn_varlen_func", "", ""],
+         "    from flash_attn import flash_attn_varlen_func", "", ""],
         [model, attn],
     )

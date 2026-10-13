@@ -1,4 +1,4 @@
-"""Monte-Carlo lookahead, made concrete: what the M sampled trajectories actually are.
+"""Monte Carlo lookahead made concrete (paper Figure 1, App. F.2): what the M trajectories are.
 
 The paper claims that "the $M$ lookahead trajectories form Monte-Carlo samples of
 plausible response-side query states". This script captures exactly that object for a
@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
 import time
@@ -55,7 +54,7 @@ def head_coverage(true_q, src):
     """Per-head coverage of the true queries by one query source.
 
     true_q, src: [H, T, D] and [H, Q, D] -> [H] mean over true steps of the best cosine
-    to any query in the source. This is Eq. (coverage) restricted to a single source, so
+    to any query in the source. This is Eq. 13 restricted to a single source, so
     it is comparable across heads and across sources.
     """
     tq, s = unit(true_q.float()), unit(src.float())
@@ -70,9 +69,8 @@ def capture(model, tokenizer, input_ids, attention_mask, decode_steps, cfg):
     A trimmed copy of common._collect_and_lookahead_impl. The only addition is that the
     sampled and greedy token ids are kept, so the trajectories can be shown as text.
     """
-    from transformers.cache_utils import DynamicCache
-    from causal_lookahead_snapkv.monkeypatch.lookahead_runner import _shape_logits
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import (
+    from lorekv.monkeypatch.lookahead_runner import _shape_logits
+    from lorekv.monkeypatch.scoring import (
         particle_trajectory_divergence, reliability_weights, standardize_disagreement,
         step_stats,
     )

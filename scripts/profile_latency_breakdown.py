@@ -1,12 +1,10 @@
 #!/usr/bin/env python
-"""Per-phase latency anchor values: TTFT / lookahead / scoring / decoding.
+r"""Stage-wise latency of one request: TTFT / lookahead / scoring / decoding (Figure 7a).
 
-Written for the rebuttal point: "split TTFT / lookahead / scoring / decoding
-and show quality vs total latency" (the compute-matched-LAQ++ comment). This is
-NOT a benchmark reproduction -- it takes the first --num_samples (default 10)
-examples per dataset, times four phases per sample, and averages. It is meant
-to produce ANCHOR numbers for a plot/table, not publication-grade throughput
-figures (those would need many more samples and warmup runs).
+Times the four stages of every sample for the first ``--num_samples`` examples
+of LongBench, RULER and NIAH and averages them per (method, budget). It produces
+the stage breakdown of Figure 7(a); end-to-end per-sample latency over full
+benchmarks (Table 3) comes from ``scripts/report_length_time.py`` instead.
 
 Phase definitions
 ------------------
@@ -24,28 +22,27 @@ hand-rolled loop here so the phases are separable):
     decoding  -- every subsequent per-token forward call.
 
 lorekv (causal_lookahead, Algorithm 1's 4 phases -- see
-causal_lookahead_snapkv/monkeypatch/lookahead_runner.py's docstring):
+lorekv/monkeypatch/lookahead_runner.py's docstring):
     ttft      -- Phase 1, the uncompressed "collect" prefill.
     lookahead -- Phase 2, the M x T sampled-continuation rollout.
     scoring   -- particle-weight computation + Phase 3's per-layer compress()
-                 (Eq. 9-22): score, allocate, select, evict.
+                 (Eqs. 3-8): score, allocate, select, evict.
     decoding  -- Phase 4, the real answer's per-token forward calls.
 
 Both families report `ttft` as the non-eviction prefill compute, so it is the
 one column directly comparable across methods; `scoring` and `lookahead` are
 each method's own added cost on top of it, and `total = ttft + lookahead +
-scoring + decoding` is what the reviewer asked to plot against quality.
+scoring + decoding` is the latency plotted against quality in Figure 7(b).
 
 Timing hooks are pure in-process monkeypatches (see _install_hooks): no repo
-file is modified. Each (method, budget) cell loads a fresh model, exactly as a
-real run.sh invocation would, since the hijacks are class-level monkeypatches
-and a stale kv_cluster from a previous mode must not be reused across models.
+file is modified. Each (method, budget) cell loads a fresh model, as a real run
+does, since the hijacks are class-level monkeypatches and a stale kv_cluster
+from a previous mode must not be reused across models.
 
-Usage (from experiments/LongBench, so config/dataset2*.json resolve, and with
-the venv active):
-    python ../../scripts/profile_latency_breakdown.py \\
-        --budgets 128 256 512 1024 --num_samples 10 \\
-        --out ../../analysis/latency_breakdown.json
+Usage (from experiments/LongBench, so config/dataset2*.json resolve)::
+
+    python ../../scripts/profile_latency_breakdown.py \
+        --budgets 128 256 512 1024 --num_samples 10 --out latency_breakdown.json
 """
 import argparse
 import importlib.util
@@ -100,9 +97,9 @@ def _install_lookahead_hooks(clock):
     reliability_weights(...) -> [compress() x layers] -> _set_phase("final") ->
     [decode loop] -> return.
     """
-    lr = sys.modules.get("causal_lookahead_snapkv.monkeypatch.lookahead_runner")
+    lr = sys.modules.get("lorekv.monkeypatch.lookahead_runner")
     if lr is None:
-        import causal_lookahead_snapkv.monkeypatch.lookahead_runner as lr
+        import lorekv.monkeypatch.lookahead_runner as lr
     orig_set_phase = lr._set_phase
     orig_reliab = lr.reliability_weights
 
@@ -183,7 +180,7 @@ def run_baseline(model, input_ids, attention_mask, max_gen, eos_ids, clock, devi
 
 
 def run_lorekv(model, tokenizer, input_ids, attention_mask, max_gen, eos_ids, clock):
-    from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
+    from lorekv.monkeypatch.lookahead_runner import generate_with_lookahead
     clock.reset()
     answer_ids = generate_with_lookahead(model, tokenizer, input_ids, attention_mask, max_gen, eos_ids)
     torch.cuda.synchronize(); t_end = time.perf_counter()
@@ -264,56 +261,20 @@ def niah_samples(tokenizer, num_samples, target_length, max_length, device):
 
 
 # ---------------------------------------------------------------------------
-# Model setup per (method, budget) cell -- mirrors pred.py's mode dispatch and
-# config_compress, kept local so no shared file needs importing at main()-scope.
+# Model setup per (method, budget) cell: the same lorekv.harness calls as pred.py.
 # ---------------------------------------------------------------------------
 def build_model(lb, method, budget, model_path, lorekv_m, lorekv_t):
-    from andpro_snapkv.monkeypatch.monkeypatch import replace_mistral_andpro
-    from adaptive_snapkv.monkeypatch.monkeypatch import replace_mistral_adaptive
-    from causal_lookahead_snapkv.monkeypatch.monkeypatch import replace_mistral_lookahead
-
-    if method == "andpro":
-        replace_mistral_andpro()
-        mode = "andpro"
-    elif method == "critical":
-        replace_mistral_adaptive()
-        mode = "critical"
-    elif method == "lorekv":
-        replace_mistral_lookahead()
-        mode = "causal_lookahead"
-    else:
-        raise ValueError(method)
-
-    model, tokenizer = lb.load_model_and_tokenizer(model_path)
-
-    # One (attr name -> value) entry per _set_compress_attr call in pred.py's
-    # config_compress (experiments/LongBench/pred.py), in the same order, so a
-    # diff against that function is a direct line-for-line check. Keys are the
-    # ATTRIBUTE names actually read by the kv_cluster code, not config_compress's
-    # (sometimes differently-named) local parameter names -- e.g. its `beta` param
-    # is stored as `pyram_beta`, not `beta`.
-    defaults = {
-        "window_size": 32, "base_capacity": budget, "kernel_size": 7,
-        "pooling": "maxpool", "floor_alpha": 0.2, "skip": 0, "normalize": None,
-        "pyram_mode": False, "pyram_beta": 20,
-        "gqa_support": False, "gqa_func": "mean",
-        "chunk_size": 4, "mode": mode, "lambda_red": 0.5,
-        # causal_lookahead (Eq. 1-22) knobs -- lorekv uses the /E core
-        # (lorekv-ent-unif-topk.conf): beta=1.0, gamma=1.3, lambda_d=0.0, unif
-        # budgets (budget_tau=0.0), top-K selection (lambda_k=lambda_v=0.0), mean
-        # aggregation (robust_alpha=0.0, robust_topk_beta=1.0). Irrelevant to
-        # andpro/critical, which never read them.
-        "lookahead_phase": "collect", "lookahead_particle_idx": 0,
-        "num_particles": lorekv_m if method == "lorekv" else 4,
-        "lookahead_len": lorekv_t if method == "lorekv" else 8,
-        "lookahead_temperature": 1.0, "particle_beta": 1.0, "particle_gamma": 1.3,
-        "lambda_d": 0.0, "normalize_typicality": False,
-        "robust_alpha": 0.0, "robust_topk_beta": 1.0, "lambda_lookahead": 1.0,
-        "lambda_k": 0.0, "lambda_v": 0.0, "budget_tau": 0.0,
-        "score_objective": "projected",
-    }
-    for name, value in defaults.items():
-        lb._set_compress_attr(model, name, value)
+    from lorekv.harness import (add_method_args, configure_model, install_method,
+                                load_model_and_tokenizer)
+    mode = {"andpro": "andpro", "critical": "critical", "lorekv": "causal_lookahead"}[method]
+    install_method(mode)
+    model, tokenizer = load_model_and_tokenizer(model_path)
+    # LORE-KV runs its /E core configuration (config/lorekv-ent-unif-topk.conf),
+    # which is the harness default; only M and T are profiled here.
+    args = add_method_args(argparse.ArgumentParser()).parse_args(
+        ["--mode", mode, "--budget", str(budget),
+         "--num_particles", str(lorekv_m), "--lookahead_len", str(lorekv_t)])
+    configure_model(model, args)
     return model, tokenizer
 
 

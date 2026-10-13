@@ -69,7 +69,7 @@ def replace_mistral_slm():
 
 
 # ---------------------------------------------------------------------------
-# Extra backbones beyond Mistral and Llama; see causal_lookahead_snapkv for the
+# Extra backbones beyond Mistral and Llama; see lorekv for the
 # rationale. Both files are generated from the Llama hijack by
 # scripts/gen_ext_hijacks.py.
 #

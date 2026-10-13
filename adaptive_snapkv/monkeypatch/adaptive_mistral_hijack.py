@@ -1,22 +1,13 @@
 import inspect
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import List, Optional, Tuple, Union, Any,Dict
-import warnings
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from typing import List, Optional, Tuple, Union
+from transformers.cache_utils import Cache, StaticCache
 from transformers.models.mistral.modeling_mistral import (
     apply_rotary_pos_emb,
     repeat_kv,
 )
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask_for_sdpa, \
-    _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
-from transformers.models.mistral.modeling_mistral import (
-    apply_rotary_pos_emb,
-    repeat_kv,
-)
 from transformers.utils import (
     logging,
     is_flash_attn_2_available,

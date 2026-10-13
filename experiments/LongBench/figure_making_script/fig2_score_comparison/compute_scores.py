@@ -83,7 +83,7 @@ def main():
     args = ap.parse_args()
 
     common.add_repo_root()
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import repeat_kv
+    from lorekv.monkeypatch.scoring import repeat_kv
 
     conf = common.parse_conf(args.config)
     model_path = args.model or conf.get("MODEL_PATH", "mistralai/Mistral-7B-Instruct-v0.2")

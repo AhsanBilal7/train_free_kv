@@ -1,68 +1,67 @@
-# H100 (sm_90) / A100 and A30 (sm_80)
+# LORE-KV: Monte Carlo future-query estimation for KV-cache eviction.
 #
-#   module purge
-#   module load WebProxy GCC/11.3.0 CUDA/12.1.1
+# Environment for the dense-attention backbones (Mistral-7B-Instruct-v0.2,
+# Llama-3.1-8B-Instruct, Qwen2.5-14B-Instruct, Ministral-3-8B-Instruct-2512).
+# Versions are the ones every reported result was produced with.
 #
-#   export UV_PROJECT_ENVIRONMENT=/scratch/user/$USER/uv_envs/train_free_kv
-#   export UV_CACHE_DIR=/scratch/user/$USER/uv_cache
+#   uv venv --python 3.11 .venv && source .venv/bin/activate
+#   uv sync                # or: uv pip install -e . --no-build-isolation
+#   make install           # builds the varlen-cache CUDA kernel (csrc/)
 #
-#   uv sync
-#   make i
+# The hybrid-attention backbones (Qwen3.5-9B, Gemma-4-12B-it) need transformers
+# 5.x and run in a second environment: see requirements-hybrid.txt.
 #
-# PyTorch must be pinned because flash-attn is a compiled PyTorch extension.
-# The direct flash-attn wheel avoids a large CUDA source compilation.
+# transformers is pinned to 4.44.2 because every eviction hijack patches the
+# *FlashAttention2 classes that 4.48 removed. torch 2.1.2 and Python 3.11 are
+# forced by the prebuilt flash-attn 2.4.0 wheel below (sm_80 / sm_90).
 
 [build-system]
-requires = [
-    "setuptools<81",
-    "wheel",
-    "packaging",
-]
+requires = ["setuptools>=68,<81", "wheel", "packaging"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "andpro"
-version = "0.0.1"
+name = "lorekv"
+version = "1.0.0"
+description = "LORE-KV: training-free KV-cache eviction by Monte Carlo estimation of future decoding queries"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11,<3.12"
-
 dependencies = [
-    # Required compatibility pin for flash-attn 2.4.0.
     "torch==2.1.2",
-    # Requested exact versions.
     "transformers==4.44.2",
+    "tokenizers==0.19.1",
     "flash-attn==2.4.0",
-    # Automatically resolved versions.
-    "tokenizers",
-    "accelerate",
-    # Last 2.x release. datasets>=3.0 removed support for Hub repos that ship a
-    # loading script, and THUDM/LongBench is exactly that (LongBench.py + data.zip),
-    # so anything newer dies with "Dataset scripts are no longer supported".
-    "datasets==2.21.0",
+    "accelerate==1.14.0",
+    "datasets==4.8.4",
+    "huggingface-hub==0.36.2",
+    "safetensors==0.8.0",
     "numpy==1.26.4",
-    "tiktoken",
-    "jieba",
-    "rouge",
-    "rouge_score",
-    "nltk",
-    "fuzzywuzzy",
-    "python-Levenshtein",
-    "fschat",
-    "sentencepiece",
-    "protobuf",
-    "einops",
-    "tqdm",
-    "matplotlib",
-    "ninja",
+    "pandas==3.0.5",
+    "pyarrow==25.0.0",
+    "matplotlib==3.11.1",
+    "tqdm==4.70.0",
+    "sentencepiece==0.2.2",
+    "protobuf==7.35.1",
+    "einops==0.8.2",
+    # LongBench / RULER / NIAH scoring
+    "rouge==1.0.1",
+    "jieba==0.42.1",
+    "fuzzywuzzy==0.18.0",
+    "python-levenshtein==0.27.3",
+    # building csrc/ (torch 2.1's cpp_extension still imports pkg_resources)
+    "ninja==1.13.0",
     "packaging",
-    # torch 2.1 cpp_extension still uses pkg_resources.
     "setuptools>=68,<81",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
 [tool.setuptools.packages.find]
-where = ["."]
+include = ["lorekv*", "andpro_snapkv*", "adaptive_snapkv*", "models_ext*"]
 
 [tool.uv]
-cache-dir = "/scratch/user/u.ab353540/uv_cache"
+no-build-isolation-package = ["flash-attn"]
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
@@ -71,12 +70,13 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }
-
-# Prebuilt Linux x86_64 wheel for:
-#   flash-attn 2.4.0
-#   PyTorch 2.1
-#   Python 3.11
-#   CXX11 ABI false
-#
-# It contains Ampere sm_80 and Hopper sm_90 support.
+# Prebuilt wheel for flash-attn 2.4.0 / torch 2.1 / Python 3.11 / CXX11 ABI off,
+# with Ampere (sm_80) and Hopper (sm_90) kernels. It is not on PyPI.
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.4.0/flash_attn-2.4.0%2Bcu122torch2.1cxx11abiFALSE-cp311-cp311-linux_x86_64.whl" }
+
+[tool.ruff]
+line-length = 110
+extend-exclude = ["experiments/NIAH/PaulGrahamEssays"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

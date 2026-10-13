@@ -1,5 +1,4 @@
 import os
-import re
 import sys
 import csv
 import json
@@ -269,8 +268,8 @@ def print_summary_table(summary, metric, csv_path=None):
     print("\n" + "=" * width)
     if n_partial_total:
         print(f" [warn] {n_partial_total}/{len(summary)} runs are PARTIAL — their OVERALL is averaged over")
-        print(f"        fewer cells than the reference grid for their model. Re-run the missing lengths")
-        print(f"        (delete stale *.jsonl_tmp first) before comparing methods on OVERALL.")
+        print("        fewer cells than the reference grid for their model. Re-run the missing lengths")
+        print("        (delete stale *.jsonl_tmp first) before comparing methods on OVERALL.")
     else:
         print(f" All {len(summary)} runs cover their model's full grid — OVERALL is comparable.")
     print("=" * width)

@@ -3,9 +3,7 @@ import string
 
 import jieba
 from fuzzywuzzy import fuzz
-import difflib
 
-from typing import List
 from collections import Counter
 from rouge import Rouge
 

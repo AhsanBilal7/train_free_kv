@@ -1,61 +1,56 @@
 #!/usr/bin/env python3
-"""Canonical naming for a run's output folder under experiments/<BENCHMARK>/pred/.
+"""Canonical names for run folders under ``experiments/<benchmark>/pred/``.
 
-ONE source of truth, used three ways:
-  * generation -- experiments/*/run.sh calls this as a CLI to build `out_name`
-  * parsing    -- collect_results.py / eval.py import parse_run_name()
-  * migration  -- scripts/rename_pred_runs.py rewrites pre-existing folders
+One module both writes and reads these names: ``scripts/sweep.py`` builds a
+run's folder name with :func:`build_run_name`, and the evaluation / table scripts
+recover its hyper-parameters with :func:`parse_run_name`.
 
-Scheme for `causal_lookahead` runs (mirrors the config file names exactly):
+LORE-KV (``--mode causal_lookahead``) runs::
 
     lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_M_<M>_T_<T>
-                                          _lL_<lL>_lT_<lT>_nrm_<0|1>
-                                          _alpha_<alpha>_kappa_<kappa>
-                                          [_obj_<unprojected|attention>]
+        _lL_<lambda_L>_lT_<temperature>_nrm_<0|1>_alpha_<alpha>_kappa_<kappa>
+        [_obj_<unprojected|attention>]
 
-The leading, hyphenated part is the run's IDENTITY and is the same string as its
-config file (config/lorekv-<cell>-<brule>-<sel>[-llama].conf). The trailing,
-underscored part is everything the config name does not pin down, so two runs that
-differ in any of it never collide.
+The hyphenated head is the run's identity and equals the basename of the config
+that produces it (``config/lorekv-ent-unif-topk-llama.conf`` writes
+``lorekv-ent-unif-topk-llama_B_...``):
 
-    <cell>   the Eq. 3 reliability coefficients (beta, gamma, lambda_D)
-    <brule>  head-budget rule from tau:      unif (0) | adap (1) | adap<tau>
-    <sel>    selection rule from lambda_k/v: topk (0) | div (0.1) | div<lk>-<lv>
-    <model>  '' for Mistral-7B-Instruct-v0.2, '-llama' for Llama-3.1-8B-Instruct,
-             '-qwen2' for Qwen2.5-14B-Instruct, '-ministral3' for
-             Ministral-3-8B-Instruct-2512
+    <cell>   reliability coefficients (beta, gamma, lambda_D) of Eq. 3, see CELLS
+    <brule>  head-budget rule from tau (Eq. 11): unif (0) | adap (1) | adap<tau>
+    <sel>    selection rule from (lambda_k, lambda_v) (App. D-C): topk (0, 0) |
+             div (0.1, 0.1) | div<lk>-<lv>
+    <model>  '' for Mistral-7B-Instruct-v0.2, '-llama', '-qwen2', '-ministral3',
+             otherwise the model tag verbatim
 
-IMPORTANT: <cell>, <brule> and <sel> are derived from the run's ACTUAL numeric
-hyper-parameters, never from the config file name. A sweep such as
-`LAMBDA_D="0.0 0.3" CONFIG_FILE=config/lorekv-typ-dis-unif-topk.conf` therefore
-writes `lorekv-typ-...` and `lorekv-typ-dis-...` folders, and the folder name can
-never disagree with what was actually run. Coefficients that match no named cell
-fall back to `b<beta>g<gamma>lD<lambdaD>`, which is still unique and parseable.
+The identity is derived from the numbers actually used, never from a config file
+name, so a command-line sweep (``LAMBDA_D="0.0 0.3"``) writes one folder per cell
+and a folder name cannot disagree with what was run. Coefficients that match no
+named cell fall back to ``b<beta>g<gamma>lD<lambda_D>``.
 
-Other modes (andpro / critical / causal_forward_only) keep their existing
-`<mode>_<model-tag>_<B>_chunk_<cs>_red_<red>` scheme; both are parsed.
+``RUN_NAME_PREFIX`` replaces the identity for a run whose criterion is another
+method's, e.g. ``config/andpro-compute-eq.conf`` (AnDPro scoring on LORE-KV's own
+lookahead queries, Table 14) writes ``andpro-compute-eq_B_...``; CUSTOM_PREFIXES
+maps such a prefix back to its coefficients.
 
-A `causal_lookahead` run can also override just the identity prefix (RUN_NAME_PREFIX
-in a config / env, --name-prefix here), so a run whose scoring criterion reads as a
-different method's name -- e.g. config/andpro-compute-eq.conf, which is AnDPro's
-projected-perturbation score with omega_m = 1/M weighting, run on LORE-KV's own
-M x T lookahead queries -- writes to a folder that says so (`andpro-compute-eq_B_...`)
-instead of the `lorekv-uniform-unif-topk_B_...` its numeric params would otherwise
-produce. See CUSTOM_PREFIXES for the fixed coefficients such a prefix maps back to
-for parsing.
+Every other method writes ``<mode>_<model-tag>_<B>_chunk_<cs>``. Folders from
+older versions of this repository that end in ``_red_<x>`` are still parsed.
 """
 import argparse
 import re
 
-# --- (beta, gamma, lambda_D) -> cell name; see README "The reliability cells" ---
+# (beta, gamma, lambda_D) of Eq. 3 -> cell name. The four settings of Table 4 are
+# ent (LORE-KV /E), dis (LORE-KV /D), logp (log-probability only: since
+# mean_u log q = c_bar - H_bar it is (1, 1, 0)) and ent-dis; the others are
+# additional controls (uniform weights, typicality only, entropy only).
 CELLS = {
-    (0.0, 0.0, 0.0): "uniform",    # the missing control: omega_m = 1/M
-    (1.0, 0.0, 0.0): "typ",        # pure typicality; the real no-entropy control
-    (1.0, 1.0, 0.0): "logp",       # the old "log-probability only" (gamma = 1!)
-    (1.0, 1.3, 0.0): "ent",        # the old LORE-KV /E core
-    (0.0, 1.0, 0.0): "ent-only",   # pure entropy
-    (1.0, 1.0, 0.3): "dis",        # the old LORE-KV /D core (entropy AND disagreement)
-    (1.0, 0.0, 0.3): "typ-dis",    # disagreement INSTEAD of entropy
+    (0.0, 0.0, 0.0): "uniform",    # omega_m = 1/M
+    (1.0, 0.0, 0.0): "typ",        # centered typicality only
+    (1.0, 1.0, 0.0): "logp",       # log-probability only
+    (1.0, 1.3, 0.0): "ent",        # LORE-KV /E
+    (0.0, 1.0, 0.0): "ent-only",   # entropy only
+    (1.0, 1.0, 0.3): "dis",        # LORE-KV /D
+    (1.0, 0.0, 0.3): "typ-dis",    # disagreement without entropy
+    (1.0, 1.3, 0.3): "ent-dis",    # entropy + disagreement control (Table 4)
 }
 CELL_COEFFS = {v: k for k, v in CELLS.items()}
 
@@ -150,10 +145,11 @@ def build_run_name(*, mode, model_tag, budget, chunk_size,
                    num_particles=None, lookahead_len=None, lambda_lookahead=None,
                    lookahead_temperature=None, beta=None, gamma=None, lambda_d=None,
                    normalize_typicality=None, robust_alpha=None, robust_topk_beta=None,
-                   lambda_k=None, lambda_v=None, budget_tau=None, lambda_red=None,
+                   lambda_k=None, lambda_v=None, budget_tau=None,
                    score_objective=None, name_prefix=None):
+    """The folder name of one run (see the module docstring for the scheme)."""
     if mode != "causal_lookahead":
-        return f"{mode}_{model_tag}_{budget}_chunk_{chunk_size}_red_{lambda_red}"
+        return f"{mode}_{model_tag}_{budget}_chunk_{chunk_size}"
     # RUN_NAME_PREFIX / --name-prefix: override just the identity string. Everything
     # else -- the numeric tail, obj suffix -- is unchanged, so the folder still
     # encodes exactly what was run; only the leading label differs from what the
@@ -175,8 +171,7 @@ def build_run_name(*, mode, model_tag, budget, chunk_size,
 
 
 # --------------------------------------------------------------------------
-# Parsing. Handles the current scheme and both pre-reparametrization schemes,
-# so collect_results.py keeps working on folders written before this change.
+# Parsing
 # --------------------------------------------------------------------------
 _IDENT_RE = re.compile(
     r"^lorekv-(?P<cell>.+?)"
@@ -184,8 +179,8 @@ _IDENT_RE = re.compile(
     r"-(?P<sel>topk|div(?:[0-9.]+-[0-9.]+)?)"
     r"(?P<model>-.*)?$")
 
-# legacy: <mode>_<model>_<B>_chunk_<cs><tail>
-_LEGACY_RE = re.compile(
+# every other method: <mode>_<model>_<B>_chunk_<cs>[_red_<x>]
+_BASELINE_RE = re.compile(
     r"^(?P<mode>.+)_(?P<model>[^_]+)_(?P<budget>\d+)_chunk_(?P<chunk>[^_]+)(?P<tail>.*)$")
 
 
@@ -200,11 +195,9 @@ def _pairs(tail):
 def parse_run_name(name):
     """Folder name -> flat dict of hyper-parameters, or None if unparseable.
 
-    Always populated when it succeeds: mode, model, budget, chunk. For
-    causal_lookahead runs also: cell, brule, sel, b, g, lD, tau, lK, lV, M, T,
-    lL, lT, nrm, alpha, kappa. Legacy folders are translated into the SAME keys
-    via Proposition 1, (beta, gamma, lambda_D) = (eta, eta*(1+lambda_H), eta*lambda_D),
-    so a table can mix old and new folders without special-casing.
+    Always populated on success: mode, model, budget, chunk. LORE-KV runs also
+    carry cell, brule, sel, b, g, lD, tau, lK, lV, M, T, lL, lT, nrm, alpha,
+    kappa and obj. A ``multi_`` prefix (multi-needle NIAH) is ignored.
     """
     name = name[len("multi_"):] if name.startswith("multi_") else name
 
@@ -263,45 +256,13 @@ def parse_run_name(name):
         out["obj"] = p.get("obj", "projected")
         return out
 
-    m = _LEGACY_RE.match(name)
+    m = _BASELINE_RE.match(name)
     if not m:
         return None
     out = {"mode": m.group("mode"), "model": m.group("model"),
            "budget": m.group("budget"), "chunk": m.group("chunk")}
     out.update(_pairs(m.group("tail")))
-    if out["mode"] == "causal_lookahead":
-        # Proposition 1: the (lambda_H, eta) parametrization is the ray
-        # (beta, gamma, lambda_D) = (eta, eta*(1 + lambda_H), eta*lambda_D).
-        if "b" not in out and "lH" in out:
-            eta = float(out.get("eta", 1.0))
-            lh = float(out.get("lH", 0.0))
-            ld = float(out.get("lD", 0.0))
-            out["b"], out["g"], out["lD"] = eta, eta * (1.0 + lh), eta * ld
-            out["nrm"] = out.get("nrm", "0")
-        if "kappa" not in out and "beta" in out:      # old name for the top-fraction
-            out["kappa"] = out.pop("beta")
-        if out.get("b") is not None:
-            out["cell"] = cell_name(out["b"], out["g"], out["lD"])
-            out["brule"] = budget_rule_name(out.get("tau", 0.0))
-            out["sel"] = selection_name(out.get("lK", 0.0), out.get("lV", 0.0))
     return out
-
-
-def canonical_name(old_name):
-    """Old folder name -> its name under the current scheme (None if not applicable)."""
-    p = parse_run_name(old_name)
-    if not p or p.get("mode") != "causal_lookahead" or p.get("b") is None:
-        return None
-    prefix = "multi_" if old_name.startswith("multi_") else ""
-    return prefix + build_run_name(
-        mode="causal_lookahead", model_tag=p["model"], budget=p["budget"],
-        chunk_size=p["chunk"], num_particles=p.get("M"), lookahead_len=p.get("T"),
-        lambda_lookahead=p.get("lL"), lookahead_temperature=p.get("lT"),
-        beta=p["b"], gamma=p["g"], lambda_d=p["lD"],
-        normalize_typicality=p.get("nrm", "0"),
-        robust_alpha=p.get("alpha"), robust_topk_beta=p.get("kappa"),
-        lambda_k=p["lK"], lambda_v=p["lV"], budget_tau=p["tau"],
-        score_objective=p.get("obj"))
 
 
 def main():
@@ -316,7 +277,7 @@ def main():
     ap.add_argument("--normalize-typicality")
     ap.add_argument("--robust-alpha"); ap.add_argument("--robust-topk-beta")
     ap.add_argument("--lambda-k"); ap.add_argument("--lambda-v")
-    ap.add_argument("--budget-tau"); ap.add_argument("--lambda-red")
+    ap.add_argument("--budget-tau")
     ap.add_argument("--score-objective")
     ap.add_argument("--name-prefix", help="Override the identity string (RUN_NAME_PREFIX); "
                      "see CUSTOM_PREFIXES for how it round-trips through parse_run_name.")
@@ -329,7 +290,7 @@ def main():
         normalize_typicality=a.normalize_typicality,
         robust_alpha=a.robust_alpha, robust_topk_beta=a.robust_topk_beta,
         lambda_k=a.lambda_k, lambda_v=a.lambda_v, budget_tau=a.budget_tau,
-        lambda_red=a.lambda_red, score_objective=a.score_objective,
+        score_objective=a.score_objective,
         name_prefix=a.name_prefix))
 
 

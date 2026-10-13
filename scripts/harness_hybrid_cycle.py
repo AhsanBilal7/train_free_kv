@@ -1,18 +1,13 @@
 #!/usr/bin/env python
 """Fast local harness: prefill -> lookahead -> compress -> ragged decode, tiny model.
 
-Why this exists
----------------
-Debugging the hybrid port against a real 9B checkpoint on gpu_debug costs ~8
-minutes and one allocation per iteration, and the failures were coming one at a
-time from the transformers 5.x Cache protocol -- each fix revealing the next
-mismatch. This drives the SAME code path on a randomly-initialised Qwen3.5 with
-2 full-attention + 6 linear-attention layers and tiny dims, so a cycle takes
-seconds and can run on CPU.
+Drives the same LORE-KV / baseline code path as a real hybrid-backbone run on a
+randomly initialised Qwen3.5 (2 full-attention + 6 linear-attention layers) or
+Gemma 4 model with tiny dimensions, so one cycle takes seconds on CPU. Needs the
+transformers 5.x environment of the hybrid backbones.
 
-It is a plumbing test, not a quality test: random weights produce garbage tokens
-by construction. What it asserts is that the pipeline completes and that eviction
-actually happened -- which is exactly the class of bug that was blocking.
+It is a plumbing test, not a quality test: random weights produce meaningless
+tokens. It asserts that the pipeline completes and that eviction happened.
 
     python scripts/harness_hybrid_cycle.py            # qwen3.5-shaped
     python scripts/harness_hybrid_cycle.py --arch gemma4
@@ -25,16 +20,21 @@ import traceback
 
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+# Only the config (layer_types, rope settings) is read from these checkpoints; the
+# weights are never loaded. Override with --base-config.
+BASE_CONFIGS = {"qwen35": os.path.join(REPO_ROOT, "models", "Qwen3.5-9B"),
+                "gemma4": os.path.join(REPO_ROOT, "models", "gemma-4-12B-it")}
 
 
-def build_tiny(arch):
+def build_tiny(arch, base_config=None):
     """A tiny hybrid model with the same layer_types structure as the real one."""
     from transformers import AutoConfig, AutoModelForCausalLM
 
     if arch == "qwen35":
-        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
-        base = AutoConfig.from_pretrained("/scratch/user/u.ab353540/models/Qwen3.5-9B")
+        base = AutoConfig.from_pretrained(base_config or BASE_CONFIGS["qwen35"])
         t = base.text_config
         # 8 layers keeping the 3:1 linear:full ratio, so layer_types is realistic.
         t.num_hidden_layers = 8
@@ -53,7 +53,7 @@ def build_tiny(arch):
         base.vocab_size = 512
         cfg = base
     else:
-        base = AutoConfig.from_pretrained("/scratch/user/u.ab353540/models/gemma-4-12B-it")
+        base = AutoConfig.from_pretrained(base_config or BASE_CONFIGS["gemma4"])
         t = base.text_config
         # Take a PREFIX of the real layer_types rather than inventing a pattern:
         # Gemma 4's config carries per-layer rope settings keyed by layer type, and a
@@ -114,22 +114,24 @@ def main():
     ap.add_argument("--lookahead", type=int, default=3)
     ap.add_argument("--gen", type=int, default=5)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--base-config", default=None,
+                    help="checkpoint dir or Hub id whose config shapes the tiny model")
     ap.add_argument("--method", default="lookahead",
                     choices=["lookahead", "andpro", "adaptive"],
                     help="adaptive == the CriticalKV baseline")
     args = ap.parse_args()
 
-    from causal_lookahead_snapkv.monkeypatch.monkeypatch import (
+    from lorekv.monkeypatch.monkeypatch import (
         replace_gemma4_lookahead, replace_qwen3_5_lookahead)
-    from causal_lookahead_snapkv.monkeypatch.hybrid_support import compressible_layers
+    from lorekv.monkeypatch.hybrid_support import compressible_layers
 
     if args.method == "lookahead":
         (replace_qwen3_5_lookahead if args.arch == "qwen35" else replace_gemma4_lookahead)()
     else:
-        from causal_lookahead_snapkv.monkeypatch.hybrid_baseline_hijack import (
+        from lorekv.monkeypatch.hybrid_baseline_hijack import (
             replace_hybrid_baseline)
         replace_hybrid_baseline(args.method)
-    model = build_tiny(args.arch).to(args.device)
+    model = build_tiny(args.arch, args.base_config).to(args.device)
 
     comp = compressible_layers(model.config)
     tcfg = getattr(model.config, "text_config", None) or model.config
@@ -142,17 +144,17 @@ def main():
                      lookahead_temperature=1.0, particle_beta=1.0, particle_gamma=1.3,
                      lambda_d=0.0, normalize_typicality=False,
                      score_objective="projected", lookahead_phase="collect",
-                     # SnapKV-family keys the baselines assert on; pred.py's
-                     # config_compress() supplies these in a real run.
+                     # SnapKV-family keys the baselines assert on;
+                     # lorekv.harness.configure_model supplies these in a real run.
                      kernel_size=7, pooling="maxpool", floor_alpha=0.5,
                      normalize=False, pyram_mode=False, pyram_beta=20,
                      gqa_support=False, gqa_func="mean", mode="andpro",
-                     lambda_red=0.5, lookahead_particle_idx=0).items():
+                     lookahead_particle_idx=0).items():
         setattr(model.config, k, v)
         if tcfg is not model.config:
             setattr(tcfg, k, v)
 
-    from causal_lookahead_snapkv.monkeypatch.lookahead_runner import generate_with_lookahead
+    from lorekv.monkeypatch.lookahead_runner import generate_with_lookahead
 
     ids = torch.randint(0, 500, (1, args.tokens), device=args.device)
     mask = torch.ones_like(ids)
@@ -182,7 +184,7 @@ def main():
     print(f"\ngenerated {out.numel()} token(s): {out.tolist()}")
     # Prove eviction really happened on the layers we own.
     for idx in comp:
-        from causal_lookahead_snapkv.monkeypatch.lookahead_runner import _decoder_layers
+        from lorekv.monkeypatch.lookahead_runner import _decoder_layers
         _lyr = _decoder_layers(model)[idx]
         kvc = getattr(getattr(_lyr, "self_attn", None), "kv_cluster", None)
         if kvc is not None and getattr(kvc, "head_lens", None) is not None:

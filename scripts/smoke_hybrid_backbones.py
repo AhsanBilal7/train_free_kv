@@ -34,8 +34,8 @@ def main():
     args = ap.parse_args()
 
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-    from causal_lookahead_snapkv.monkeypatch.hybrid_support import (
-        compressible_layers, hybrid_manifest, is_hybrid)
+    from lorekv.monkeypatch.hybrid_support import (
+        hybrid_manifest, is_hybrid)
 
     cfg = AutoConfig.from_pretrained(args.model)
     mt = getattr(cfg, "model_type", "")
@@ -64,7 +64,7 @@ def main():
     torch.cuda.empty_cache()
 
     print("[2/2] patched prefill (collect phase evicts nothing) ...")
-    from causal_lookahead_snapkv.monkeypatch.monkeypatch import (
+    from lorekv.monkeypatch.monkeypatch import (
         replace_gemma4_lookahead, replace_qwen3_5_lookahead)
     if mt == "qwen3_5":
         replace_qwen3_5_lookahead()

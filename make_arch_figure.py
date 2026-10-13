@@ -3,7 +3,7 @@
 Draws the method pipeline of "Training-Free Test-Time Lookahead Causal KV Eviction"
 (LORE-KV) exactly as it is implemented in this repository:
 
-  1. Prefill              causal_lookahead_snapkv/monkeypatch/lookahead_runner.py, phase "collect"
+  1. Prefill              lorekv/monkeypatch/lookahead_runner.py, phase "collect"
                           -> full uncompressed K/V + prompt-window queries Q_W          (Eq. 1-2)
   2. Test-time lookahead  phase "lookahead": M continuations of length T, each on its own
                           cloned cache; post-RoPE query states kept as Q_look^(m)       (Eq. 1-2)

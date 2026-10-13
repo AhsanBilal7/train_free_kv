@@ -1,56 +1,25 @@
 #!/bin/bash
-# =============================================================================
-# Token-ranking demo launcher (ACES / H100)
-#
-# Runs scripts/demo_token_ranking.py on LongBench and RULER and writes every
-# artifact under demos/<run>/ for the comparison figures (CriticalKV vs AnDPro
-# vs LORE-KV token ranking).
-#
-# Submit:
-#   sbatch scripts/run_demo_token_ranking.sh
-#   sbatch --export=ALL,SAMPLES=4,BUDGETS="128 256 512" scripts/run_demo_token_ranking.sh
-#
-# Or inside an existing allocation / an ssh session on the compute node:
-#   cd ~/train_free_kv && bash scripts/run_demo_token_ranking.sh
-#
-# Overridables: CONFIG_FILE MODEL_PATH SAMPLES BUDGETS DECODE_STEPS MAX_LENGTH
-#               LB_DATASETS RULER_DATASETS BENCHMARKS OUT_DIR
-# =============================================================================
 #SBATCH --job-name=lorekv-demo
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:h100:1
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
 #SBATCH --mem=80G
 #SBATCH --time=08:00:00
-#SBATCH --output=/home/u.ab353540/train_free_kv/logs/out_%x_%j.log
-#SBATCH --error=/home/u.ab353540/train_free_kv/logs/err_%x_%j.log
-#SBATCH --account=158535403388
-
-if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-    module purge
-    module load WebProxy
-    module load GCC/11.3.0
-    module load CUDA/12.1.1
-fi
-
+#SBATCH --output=logs/%x_%j.out
+#SBATCH --error=logs/%x_%j.err
+#
+# Token-ranking analysis (paper App. F.3-F.5; Figures 9-11): CriticalKV vs AnDPro
+# vs LORE-KV scored on the same captured prefill state, compared against the
+# future-query oracle. Writes demos/<run>/; draw the figures with
+#   python scripts/plot_token_ranking_demo.py
+#
+#   bash scripts/run_demo_token_ranking.sh
+#   SAMPLES=4 BUDGETS="128 256 512" sbatch scripts/run_demo_token_ranking.sh
+#
+# Overridable: CONFIG_FILE MODEL_PATH SAMPLES BUDGETS DECODE_STEPS MAX_LENGTH
+#              LB_DATASETS RULER_DATASETS BENCHMARKS OUT_DIR
 set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
+_USER_MODEL="${MODEL_PATH:-}"          # only an explicit MODEL_PATH overrides the config
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env.sh"
 cd "$REPO_ROOT"
-
-if [[ -z "${SCRATCH:-}" && -d "/scratch/user/$USER" ]]; then
-    export SCRATCH="/scratch/user/$USER"
-fi
-# .env exports MODEL_PATH unconditionally (mistral by default), so a config's own
-# MODEL_PATH would be silently overridden -- exactly the bug scripts/run_h100.sh
-# documents. Record whether the CALLER set it, before .env is sourced.
-_USER_MODEL="${MODEL_PATH:-}"
-[[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
-source "${VENV_PATH:?VENV_PATH not set — check .env}/bin/activate"
 
 CONFIG_FILE="${CONFIG_FILE:-config/lorekv-ent-unif-topk.conf}"
 [[ "$CONFIG_FILE" != */* && "$CONFIG_FILE" != *.conf ]] && CONFIG_FILE="config/${CONFIG_FILE}.conf"

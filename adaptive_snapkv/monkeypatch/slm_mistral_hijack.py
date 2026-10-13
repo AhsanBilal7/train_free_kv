@@ -1,16 +1,11 @@
 import inspect
-from numpy import diff
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
-import warnings
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from transformers.models.mistral.modeling_mistral import (
     apply_rotary_pos_emb,
-    repeat_kv,
 )
 from transformers.utils import (
     logging,
@@ -25,7 +20,7 @@ except ImportError:            # unused here, and flash-attn is optional on the
 logger = logging.get_logger(__name__)
 
 if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn import flash_attn_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
     _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
 

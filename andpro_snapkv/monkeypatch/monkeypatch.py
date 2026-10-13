@@ -4,7 +4,7 @@ import transformers
 import transformers.models.mistral.modeling_mistral
 from andpro_snapkv.monkeypatch.andpro_mistral_hijack import andpro_mistral_flash_attn2_forward, andpro_MistralModel_forward
 from andpro_snapkv.monkeypatch.andpro_mistral_hijack import prepare_inputs_for_generation_mistral as andpro_prepare_inputs_for_generation_mistral
-from andpro_snapkv.monkeypatch.andpro_llama_hijack import andpro_llama_flash_attn2_forward as andpro_llama_flash_attn2_forward_2, andpro_LlamaModel_forward as andpro_LlamaModel_forward_2, andpro_llama_flash_attn2_forward, andpro_LlamaModel_forward
+from andpro_snapkv.monkeypatch.andpro_llama_hijack import andpro_llama_flash_attn2_forward, andpro_LlamaModel_forward
 from andpro_snapkv.monkeypatch.andpro_llama_hijack import prepare_inputs_for_generation_llama as ada_prepare_inputs_for_generation_llama
 
 def check_version():
@@ -31,8 +31,8 @@ def replace_mistral_andpro():
 def replace_llama_andpro():
     check_version()
     transformers.models.llama.modeling_llama.LlamaForCausalLM.prepare_inputs_for_generation = ada_prepare_inputs_for_generation_llama
-    transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = andpro_llama_flash_attn2_forward_2
-    transformers.models.llama.modeling_llama.LlamaModel.forward = andpro_LlamaModel_forward_2
+    transformers.models.llama.modeling_llama.LlamaFlashAttention2.forward = andpro_llama_flash_attn2_forward
+    transformers.models.llama.modeling_llama.LlamaModel.forward = andpro_LlamaModel_forward
 
 
 # ---------------------------------------------------------------------------

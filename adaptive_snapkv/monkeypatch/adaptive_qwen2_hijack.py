@@ -9,7 +9,7 @@ why.
 from typing import List, Optional, Tuple, Union
 
 import torch
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 # Qwen2's own apply_rotary_pos_emb, which takes position_ids and indexes the
 # cos/sin table -- NOT Llama's, which expects already-gathered embeddings.
@@ -22,7 +22,7 @@ from adaptive_snapkv.monkeypatch.snapkv_utils import init_adaptive_snapkv, Dynam
 logger = logging.get_logger(__name__)
 
 if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn import flash_attn_varlen_func
 
 
 def adaptive_qwen2_Qwen2Model_forward(

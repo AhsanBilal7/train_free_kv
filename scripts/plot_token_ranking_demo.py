@@ -32,7 +32,6 @@ import argparse
 import csv
 import glob
 import os
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 

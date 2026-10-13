@@ -1,28 +1,25 @@
 #!/bin/bash
-# Usage: bash scripts/submit.sh <config-name>
-#   LongBench (default):  bash scripts/submit.sh lorekv-ent-adap-topk
-#   RULER:                EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-adap-topk
+# Submit one config as a SLURM job.
+#
+#   bash scripts/submit.sh lorekv-ent-unif-topk                     # LongBench
+#   EXPERIMENT=RULER bash scripts/submit.sh lorekv-ent-unif-topk     # RULER
+#   BUDGET=128 bash scripts/submit.sh andpro-llama                  # override a key
+#
+# Extra sbatch options (partition, account, GPU type) go in SBATCH_ARGS, e.g.
+#   SBATCH_ARGS="--partition=gpu --gres=gpu:h100:1" bash scripts/submit.sh ...
 set -euo pipefail
 
-NAME="${1:?Usage: $0 <config-name>  (e.g. lorekv-ent-adap-topk)}"
-# Which benchmark to run (experiments/<EXPERIMENT>/). Selects the dataset via
-# that experiment's run.sh; the config file only carries method hyperparameters.
+NAME="${1:?usage: $0 <config-name>  (a file in config/, without .conf)}"
 EXPERIMENT="${EXPERIMENT:-LongBench}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/../config/${NAME}.conf"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONFIG_FILE="$REPO_ROOT/config/${NAME}.conf"
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "Error: config not found: $CONFIG_FILE" >&2
-    exit 1
-fi
+[[ -f "$CONFIG_FILE" ]] || { echo "config not found: $CONFIG_FILE" >&2; exit 1; }
+[[ -d "$REPO_ROOT/experiments/$EXPERIMENT" ]] || { echo "unknown experiment: $EXPERIMENT" >&2; exit 1; }
 
-if [[ ! -d "$SCRIPT_DIR/../experiments/$EXPERIMENT" ]]; then
-    echo "Error: experiment not found: experiments/$EXPERIMENT" >&2
-    exit 1
-fi
-
-JOB_NAME="${EXPERIMENT}-${NAME}"
-echo "Submitting: job=$JOB_NAME  experiment=$EXPERIMENT  config=$CONFIG_FILE"
-sbatch --job-name="$JOB_NAME" \
+mkdir -p "$REPO_ROOT/logs"
+cd "$REPO_ROOT"
+# shellcheck disable=SC2086
+sbatch --job-name="${EXPERIMENT}-${NAME}" ${SBATCH_ARGS:-} \
     --export=ALL,EXPERIMENT="$EXPERIMENT",CONFIG_FILE="$CONFIG_FILE" \
-    "$SCRIPT_DIR/run_h100.sh"
+    scripts/run_experiment.sh

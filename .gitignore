@@ -173,6 +173,9 @@ experiments/LongBench/runall_*.sh
 .idea
 demos/
 analysis/
+logs/
+/models
+/data
 reports/
 experiments/*/pred_org/
 paper_files/

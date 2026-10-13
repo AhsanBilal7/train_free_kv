@@ -1,14 +1,11 @@
-"""Token-ranking demo: CriticalKV vs AnDPro vs LORE-KV on the SAME captured state.
+"""Token-ranking analysis: CriticalKV vs AnDPro vs LORE-KV on the SAME captured state.
 
-Why this script exists
-----------------------
-The end-to-end tables (scripts/run_h100_aces.sh) say LORE-KV wins; they do not say
-*why*. This script produces the score-level evidence for the robustness claim: given
-one prompt, one prefill and one set of lookahead particles, it scores every candidate
-KV pair under each method's own criterion, selects a cache with a shared selector, and
-measures how well each retained cache matches what the model actually needs while
-answering -- the true decoding queries, recorded afterwards from a full-cache greedy
-decode and used only as ground truth.
+Paper App. F.1-F.5 (Figures 9-11): the score-level evidence behind the end-to-end
+tables. Given one prompt, one prefill and one set of lookahead particles, it scores
+every candidate KV pair under each method's own criterion, selects a cache with a
+shared selector, and measures how well each retained cache matches what the model
+actually needs while answering -- the true decoding queries, recorded afterwards
+from a full-cache greedy decode and used only as ground truth.
 
 Criteria (all evaluated on identical captured K/V, window queries and particles)
 -------------------------------------------------------------------------------
@@ -31,9 +28,9 @@ Criteria (all evaluated on identical captured K/V, window queries and particles)
 
 Metrics (per sample x budget x criterion; per layer, then aggregated)
 ---------------------------------------------------------------------
-  recall_at_b      |top_B(S) ∩ top_B(S*)| / B against the oracle ranking (Eq. 24)
+  recall_at_b      |top_B(S) ∩ top_B(S*)| / B against the oracle ranking (Eq. 14)
   spearman         rank correlation with the oracle score
-  fidelity         cos(o_retained, o_full) on the true future queries (Eq. 25)
+  fidelity         cos(o_retained, o_full) on the true future queries (Eq. 15)
   evidence_keep    fraction of gold-answer token positions surviving eviction
   evidence_enrich  P(answer token | retained) / P(answer token | prompt)
   overlap_*        pairwise top-B agreement between criteria (how far the rankings move)
@@ -295,7 +292,7 @@ def find_answer_positions(input_ids, answers, tokenizer):
 @torch.no_grad()
 def run_sample(model, tokenizer, sample, cap, args, cfg):
     """Return (rows, per_sample_arrays, profiles) for one captured prompt."""
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import repeat_kv
+    from lorekv.monkeypatch.scoring import repeat_kv
 
     n = cap["n"]
     M = cap["M"]

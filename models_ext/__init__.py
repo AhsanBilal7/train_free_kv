@@ -1,9 +1,9 @@
 """Backbone support beyond what the pinned Transformers release covers.
 
-The repo is pinned to transformers 4.44 because every eviction hijack in
-adaptive_snapkv / andpro_snapkv / causal_andpro_snapkv / causal_lookahead_snapkv
-patches `*FlashAttention2.forward` and `*Model.forward`, classes that were
-removed in 4.48 when attention moved behind `ALL_ATTENTION_FUNCTIONS`.
+The dense-attention experiments are pinned to transformers 4.44 because every
+eviction hijack in adaptive_snapkv / andpro_snapkv / lorekv patches
+`*FlashAttention2.forward` and `*Model.forward`, classes that were removed in
+4.48 when attention moved behind `ALL_ATTENTION_FUNCTIONS`.
 
 Two backbones need help under that pin, for different reasons:
 
@@ -22,8 +22,10 @@ Two backbones need help under that pin, for different reasons:
         scripts/gen_ext_hijacks.py and wired up through hijack_targets.py.
 
 Correctness is not assumed: scripts/validate_models_ext.py loads the same
-checkpoint under upstream transformers 5.x in a separate venv and asserts the
-logits agree. See README.md in this directory for the recorded results.
+checkpoint under upstream transformers 5.x in a separate environment and
+compares the logits. Under uncompressed fp32 inference the vendored Ministral3
+reproduces the upstream model exactly, including identical top-1 predictions
+(paper App. E.3).
 """
 
 # models_ext vendors Ministral-3 as a subclass of transformers 4.44's Llama modules

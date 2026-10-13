@@ -1,9 +1,6 @@
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
-import warnings
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.cache_utils import Cache, StaticCache
 from transformers.models.llama.modeling_llama import (
     apply_rotary_pos_emb,
     repeat_kv,
@@ -12,17 +9,7 @@ from transformers.utils import (
     logging,
     is_flash_attn_2_available,
 )
-from transformers.modeling_attn_mask_utils import (
-    AttentionMaskConverter,
-    _prepare_4d_attention_mask,
-    _prepare_4d_causal_attention_mask,
-    _prepare_4d_causal_attention_mask_for_sdpa,
-)
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.llama.modeling_llama import (
-    apply_rotary_pos_emb,
-    repeat_kv,
-)
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 from adaptive_snapkv.monkeypatch.snapkv_utils import init_adaptive_snapkv, DynamicCacheSplitHeadFlatten
@@ -30,7 +17,7 @@ from adaptive_snapkv.monkeypatch.snapkv_utils import init_adaptive_snapkv, Dynam
 logger = logging.get_logger(__name__)
 
 if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func, flash_attn_varlen_func
+    from flash_attn import flash_attn_varlen_func
 
 def adaptive_LlamaModel_forward(
     self,

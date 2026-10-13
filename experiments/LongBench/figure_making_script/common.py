@@ -1,4 +1,4 @@
-"""Shared backbone for the LORE-KV / TLC-KV analysis figures.
+"""Shared backbone for the LORE-KV mechanism-analysis figures (paper App. F).
 
 Everything the four figure scripts need that touches the model lives here so the
 compute scripts stay short and every figure is produced from the *same* captured
@@ -9,12 +9,11 @@ What this module gives you
 * `parse_conf(path)`               - read a repo `.conf` file into a dict (first
                                      value of every space-separated sweep field).
 * `add_repo_root()`                - put the repo root on sys.path so the proven
-                                     `causal_lookahead_snapkv` package imports.
-* `load_model_and_tokenizer(path)` - identical settings to experiments/*/pred.py.
-* `apply_lookahead_patch()`        - monkeypatch Mistral/Llama with the paper's
-                                     phase-aware forward (from the method code).
-* `configure_model(model, conf)`   - push the `.conf` hyper-parameters onto
-                                     `model.model.config`, exactly as pred.py does.
+                                     `lorekv` package imports.
+* `load_model_and_tokenizer(path)` - lorekv.harness, as in experiments/*/pred.py.
+* `apply_lookahead_patch()`        - install LORE-KV's phase-aware forwards.
+* `configure_model(model, conf)`   - push the `.conf` hyper-parameters onto the
+                                     model config, exactly as pred.py does.
 * `load_longbench_samples(...)`    - the same prompt-building path pred.py uses.
 * `PostRoPEQueryCapture`           - non-invasive forward-pre-hooks that recompute
                                      the post-RoPE query states for every layer
@@ -29,7 +28,7 @@ What this module gives you
                                      divergence, weight), and the true decode queries.
 * scoring helpers reused straight from `TestTimeLookaheadKVCluster`.
 
-No GPU is available on the login node; run these on the cluster (venv kv44).
+These load a 7B/8B model and need one GPU.
 """
 import gc
 import json
@@ -38,10 +37,8 @@ import glob
 import os
 import pickle
 import re
-import shutil
 import sys
 import tempfile
-import zipfile
 
 import torch
 import torch.nn.functional as F
@@ -63,7 +60,7 @@ def add_repo_root():
 
 
 # ---------------------------------------------------------------------------
-# .conf parsing (same format scripts/run_h100.sh reads: KEY = VALUE, # comments,
+# .conf parsing (the format scripts/sweep.py reads: KEY = VALUE, # comments,
 # blank lines ignored). Sweep fields hold several space-separated values; for a
 # single-setting figure we take the first one, with an optional override map.
 # ---------------------------------------------------------------------------
@@ -95,74 +92,43 @@ def conf_get(conf, key, cast, default):
 
 
 # ---------------------------------------------------------------------------
-# Model / patch / config, matching experiments/LongBench/pred.py exactly.
+# Model / patch / config: the same lorekv.harness calls experiments/*/pred.py uses.
 # ---------------------------------------------------------------------------
 def apply_lookahead_patch():
     add_repo_root()
-    from causal_lookahead_snapkv.monkeypatch.monkeypatch import (
-        replace_mistral_lookahead,
-        replace_llama_lookahead,
-    )
-    replace_mistral_lookahead()
-    replace_llama_lookahead()
+    from lorekv.harness import install_method
+    install_method("causal_lookahead")
 
 
 def load_model_and_tokenizer(path):
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True, device_map="cuda:0")
-    model = AutoModelForCausalLM.from_pretrained(
-        path,
-        torch_dtype=torch.bfloat16,
-        device_map="cuda:0",
-        attn_implementation="flash_attention_2",
-        trust_remote_code=True,
-    )
-    return model.eval(), tokenizer
+    add_repo_root()
+    from lorekv.harness import load_model_and_tokenizer as _load
+    return _load(path)
 
 
 def configure_model(model, conf, budget):
-    """Push .conf hyper-parameters onto model.model.config (mirrors pred.config_compress)."""
-    c = model.model.config
-    c.window_size = 32
-    c.base_capacity = int(budget)
-    c.kernel_size = 7
-    c.pooling = "maxpool"
-    c.floor_alpha = 0.5
-    c.skip = 0
-    c.normalize = None
-    c.pyram_mode = False
-    c.pyram_beta = 20
-    c.gqa_support = False
-    c.gqa_func = "mean"
-    c.chunk_size = conf_get(conf, "CHUNK_SIZE", int, 4)
-    c.mode = "causal_lookahead"
-    c.lambda_red = conf_get(conf, "LAMBDA_RED", float, 0.0)
-
-    c.lookahead_phase = "collect"
-    c.lookahead_particle_idx = 0
-    c.num_particles = conf_get(conf, "NUM_PARTICLES", int, 4)
-    c.lookahead_len = conf_get(conf, "LOOKAHEAD_LEN", int, 8)
-    c.lookahead_temperature = conf_get(conf, "LOOKAHEAD_TEMPERATURE", float, 1.0)
-    # Eq. 3: R_m = beta*cbar_m - gamma*Hbar_m - lambda_D*Dhat_m. Legacy configs that
-    # still carry (LAMBDA_H, PARTICLE_ETA) map onto it exactly via Prop. 1:
-    #   beta = eta, gamma = eta * (1 + lambda_H), lambda_D = eta * lambda_D.
-    _eta = conf_get(conf, "PARTICLE_ETA", float, 1.0)
-    _lh = conf_get(conf, "LAMBDA_H", float, None)
-    c.particle_beta = conf_get(conf, "BETA", float, None)
-    c.particle_gamma = conf_get(conf, "GAMMA", float, None)
-    c.lambda_d = conf_get(conf, "LAMBDA_D", float, 0.0)
-    if c.particle_beta is None or c.particle_gamma is None:
-        c.particle_beta = _eta if c.particle_beta is None else c.particle_beta
-        c.particle_gamma = (_eta * (1.0 + (_lh or 0.0))) if c.particle_gamma is None else c.particle_gamma
-        c.lambda_d = _eta * c.lambda_d
-    c.normalize_typicality = bool(conf_get(conf, "NORMALIZE_TYPICALITY", int, 0))
-    c.divergence_layer_stride = conf_get(conf, "DIVERGENCE_LAYER_STRIDE", int, 1)
-    c.robust_alpha = conf_get(conf, "ROBUST_ALPHA", float, 0.5)
-    c.robust_topk_beta = conf_get(conf, "ROBUST_TOPK_BETA", float, 0.5)
-    c.lambda_lookahead = conf_get(conf, "LAMBDA_LOOKAHEAD", float, 1.0)
-    c.lambda_k = conf_get(conf, "LAMBDA_K", float, 0.0)
-    c.lambda_v = conf_get(conf, "LAMBDA_V", float, 0.0)
-    c.budget_tau = conf_get(conf, "BUDGET_TAU", float, 1.0)
+    """Write a parsed .conf's LORE-KV hyper-parameters onto the model, as pred.py does."""
+    import argparse
+    add_repo_root()
+    from lorekv.harness import add_method_args, configure_model as _configure
+    args = add_method_args(argparse.ArgumentParser()).parse_args([])
+    args.budget = int(budget)
+    for key, attr, cast in (("CHUNK_SIZE", "chunk_size", int),
+                            ("NUM_PARTICLES", "num_particles", int),
+                            ("LOOKAHEAD_LEN", "lookahead_len", int),
+                            ("LOOKAHEAD_TEMPERATURE", "lookahead_temperature", float),
+                            ("BETA", "beta", float), ("GAMMA", "gamma", float),
+                            ("LAMBDA_D", "lambda_d", float),
+                            ("NORMALIZE_TYPICALITY", "normalize_typicality", int),
+                            ("ROBUST_ALPHA", "robust_alpha", float),
+                            ("ROBUST_TOPK_BETA", "robust_topk_beta", float),
+                            ("LAMBDA_LOOKAHEAD", "lambda_lookahead", float),
+                            ("LAMBDA_K", "lambda_k", float), ("LAMBDA_V", "lambda_v", float),
+                            ("BUDGET_TAU", "budget_tau", float)):
+        if key in conf:
+            setattr(args, attr, cast(conf[key]))
+    _configure(model, args)
+    model.model.config.divergence_layer_stride = conf_get(conf, "DIVERGENCE_LAYER_STRIDE", int, 1)
     return model
 
 
@@ -189,56 +155,10 @@ def resolve_datasets(name):
     return name.split(",")
 
 
-# All 16 sub-tasks ship inside a single data.zip in the THUDM/LongBench hub
-# snapshot, but datasets>=4 dropped loading-script support: offline,
-# load_dataset() falls back to the arrow cache and raises "Couldn't find cache
-# for THUDM/LongBench for config '<task>-<hash>'" for every task a previous run
-# never materialised. Extracting that zip once makes all of them loadable.
-def _hf_cache_roots():
-    roots = [os.environ.get("HF_DATASETS_CACHE"), os.environ.get("HF_HOME"),
-             os.path.join(os.path.expanduser("~"), ".cache", "huggingface")]
-    return [r for r in roots if r]
-
-
-def _find_longbench_zip():
-    hub = os.environ.get("HF_HUB_CACHE")
-    hubs = ([hub] if hub else []) + [os.path.join(r, "hub") for r in _hf_cache_roots()]
-    for h in hubs:
-        hits = sorted(glob.glob(os.path.join(h, "datasets--THUDM--LongBench",
-                                             "snapshots", "*", "data.zip")))
-        if hits:
-            return hits[0]
-    return None
-
-
 def _longbench_jsonl(dataset, dataset_path=None):
-    """Path to a local <dataset>.jsonl, or None if we have to go through the Hub."""
-    # 1. a local directory handed in via --dataset-path (dir of jsonl, or its parent)
-    if dataset_path and os.path.isdir(dataset_path):
-        for cand in (os.path.join(dataset_path, f"{dataset}.jsonl"),
-                     os.path.join(dataset_path, "data", f"{dataset}.jsonl")):
-            if os.path.exists(cand):
-                return cand
-    # 2. the hub snapshot's data.zip, extracted once and reused afterwards
-    out_dir = os.path.join(_hf_cache_roots()[0], "longbench_jsonl")
-    cand = os.path.join(out_dir, f"{dataset}.jsonl")
-    if os.path.exists(cand):
-        return cand
-    zip_path = _find_longbench_zip()
-    if zip_path is None:
-        return None
-    os.makedirs(os.path.dirname(out_dir), exist_ok=True)
-    tmp = tempfile.mkdtemp(prefix=".longbench_", dir=os.path.dirname(out_dir))
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            zf.extractall(tmp)
-        try:
-            os.replace(os.path.join(tmp, "data"), out_dir)   # atomic; publishes all 35 files
-        except OSError:
-            pass                                             # a concurrent job won the race
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    return cand if os.path.exists(cand) else None
+    add_repo_root()
+    from lorekv.data import longbench_jsonl
+    return longbench_jsonl(dataset, dataset_path)
 
 
 def _build_chat(tokenizer, prompt, model_name):
@@ -532,8 +452,8 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
     # ---- Phase 2: M sampled lookahead particles (queries captured onto each kv_cluster) ----
     cfg.lookahead_phase = "lookahead"
     add_repo_root()
-    from causal_lookahead_snapkv.monkeypatch.lookahead_runner import _shape_logits
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import step_stats
+    from lorekv.monkeypatch.lookahead_runner import _shape_logits
+    from lorekv.monkeypatch.scoring import step_stats
     particle_lp = torch.zeros(M, T, device=device)   # log q(y_u | h_u)
     particle_c = torch.zeros(M, T, device=device)    # centered score c_u = log q + H
     particle_H = torch.zeros(M, T, device=device)    # entropy H_u
@@ -571,7 +491,7 @@ def _collect_and_lookahead_impl(model, input_ids, attention_mask, decode_steps=3
     # query buffers the runner uses (so the figures and the deployed method score
     # identically). Always computed here -- even when lambda_D == 0 -- because test S4
     # (the incremental value of disagreement over (cbar, Hbar)) must run on ANY capture.
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import (
+    from lorekv.monkeypatch.scoring import (
         particle_trajectory_divergence, reliability_weights, standardize_disagreement,
     )
     particle_divergence = particle_trajectory_divergence(
@@ -764,7 +684,7 @@ def weighting_grid(gamma_E=1.3, lambda_D=0.3):
 def divergence_from_capture(per_layer, num_particles, layer_stride=1, device=None):
     """per_layer: the capture's list of per-layer dicts. Returns D [M] (zeros if M < 2)."""
     add_repo_root()
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import divergence_from_query_stacks
+    from lorekv.monkeypatch.scoring import divergence_from_query_stacks
 
     M = int(num_particles)
 
@@ -784,7 +704,7 @@ def divergence_from_capture(per_layer, num_particles, layer_stride=1, device=Non
 def standardize_scores(x):
     """Zero-mean/unit-std across particles, exactly as R_m consumes D_m in the runner."""
     add_repo_root()
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import standardize_particle_scores
+    from lorekv.monkeypatch.scoring import standardize_particle_scores
     return standardize_particle_scores(x)
 
 
@@ -795,7 +715,7 @@ def standardize_scores(x):
 def get_repeated_kv(kvc):
     """GQA-repeat a layer's compact full K/V to query-head count -> ([1,H,n,D], [1,H,n,D])."""
     add_repo_root()
-    from causal_lookahead_snapkv.monkeypatch.snapkv_utils import repeat_kv
+    from lorekv.monkeypatch.scoring import repeat_kv
     key = repeat_kv(kvc.full_key_states, kvc.num_key_value_groups)
     val = repeat_kv(kvc.full_value_states, kvc.num_key_value_groups)
     return key, val

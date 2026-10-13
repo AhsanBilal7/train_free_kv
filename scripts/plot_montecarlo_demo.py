@@ -33,7 +33,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 PALETTE = {
     "blue_main": "#0F4D92", "blue_secondary": "#3775BA",

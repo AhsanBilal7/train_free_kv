@@ -1,12 +1,11 @@
 import warnings
 
 import torch
-import time
 import torch.nn.functional as F
 import torch.nn as nn
 import math
-from typing import List, Optional, Tuple, Union, Any,Dict
-from transformers.cache_utils import Cache, DynamicCache
+from typing import List, Optional, Tuple
+from transformers.cache_utils import Cache
 try:
     from flash_attn import flash_attn_func
 except ImportError:            # unused here, and flash-attn is optional on the

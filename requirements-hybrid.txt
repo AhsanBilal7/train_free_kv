@@ -1,0 +1,30 @@
+# Second environment for the hybrid-attention backbones (Qwen3.5-9B, Gemma-4-12B-it).
+#
+# These architectures exist only in transformers 5.x, which removed the classes the
+# dense-backbone hijacks patch, so they run in their own environment. Only the
+# full-attention layers are compressed (lorekv/monkeypatch/causal_lookahead_hybrid_hijack.py).
+#
+#   uv venv --python 3.11 .venv-hybrid && source .venv-hybrid/bin/activate
+#   uv pip install -r requirements-hybrid.txt
+#   uv pip install --no-build-isolation flash-attn==2.7.4.post1   # build from source if
+#                                                                 # the wheel needs a newer glibc
+#   make install                                                   # rebuilds csrc/ for torch 2.6
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+transformers==5.16.1
+tokenizers==0.23.2
+accelerate==1.15.0
+datasets==5.0.1
+huggingface-hub==1.31.0
+safetensors==0.8.0
+numpy==2.4.6
+pandas==3.0.5
+sentencepiece==0.2.2
+protobuf==7.36.1
+einops==0.8.2
+rouge==1.0.1
+jieba==0.42.1
+fuzzywuzzy==0.18.0
+ninja
+packaging
+setuptools

@@ -7,17 +7,17 @@ hand from 34 result directories is where transcription errors come from, so this
 reads the predictions, scores them with experiments/LongBench/eval.py's own
 scorer, and prints rows ready to paste.
 
-Scores are recomputed from the .jsonl files rather than read from result.json:
-run.sh writes result.json at the end of a sweep, so a run that is still in
-flight -- or was resumed across allocations -- can have a stale one.
+Scores are recomputed from the .jsonl files rather than read from result.json,
+which eval.py writes only at the end of a sweep and can therefore be stale for a
+run that is still in flight or was resumed.
 
 A cell with no predictions prints \\tbd, and a row's Avg. is \\tbd unless all 16
 datasets are present, so a partially finished table is never silently averaged
 over a subset.
 
-Usage (from experiments/LongBench):
-    python ../../scripts/longbench_table.py --backbone qwen2
-    python ../../scripts/longbench_table.py --backbone ministral3 --budgets 128 256
+Usage:
+    python scripts/longbench_table.py --backbone qwen2
+    python scripts/longbench_table.py --backbone ministral3 --budgets 128 256
 """
 
 import argparse
@@ -25,8 +25,10 @@ import json
 import os
 import sys
 
-sys.path.insert(0, os.getcwd())                      # experiments/LongBench, for eval.py
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LONGBENCH_DIR = os.path.join(REPO_ROOT, "experiments", "LongBench")
+sys.path.insert(0, LONGBENCH_DIR)                    # eval.py and metrics.py
+sys.path.append(REPO_ROOT)
 
 # Column order and headers exactly as the paper's tables have them.
 DATASETS = [
@@ -67,10 +69,8 @@ def lookahead_dir(cell, model_tag, budget):
 def score_dir(pred_root, folder):
     """{dataset: score} for whatever this run has finished. Missing dir -> {}.
 
-    `folder` may be a list of candidate names: the baselines' out_name gained a
-    `_red_<lambda>` suffix at some point, so the earliest Mistral runs are stored
-    as andpro_<tag>_<B>_chunk_4 while everything since is ..._chunk_4_red_0.0.
-    The first candidate that exists wins.
+    `folder` may be a list of candidate names (baseline folders written by older
+    versions of the repository end in `_red_<x>`); the first one that exists wins.
     """
     from eval import scorer, dataset2metric
     candidates = [folder] if isinstance(folder, str) else list(folder)
@@ -148,18 +148,16 @@ def emit(backbone, budgets, pred_root, no_highlight=False):
              "Method & " + " & ".join(h for _, h in DATASETS) + r" & Avg. \\",
              r"\midrule",
              row("Full Cache", score_dir(pred_root,
-                 [f"full_{model_tag}_128_chunk_4_red_0.0",
+                 [f"full_{model_tag}_128_chunk_4", f"full_{model_tag}_128_chunk_4_red_0.0",
                   f"test_{model_tag}_128_chunk_4_red_0.0"]))]
     for b in budgets:
         lines += ["", r"\midrule",
                   r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b, r"\midrule"]
         block = [(label, score_dir(pred_root, folder)) for label, folder in (
-            ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4_red_0.0",
-                            f"critical_{model_tag}_{b}_chunk_4_red_0.5",
-                            f"critical_{model_tag}_{b}_chunk_4"]),
-            ("AnDPro",     [f"andpro_{model_tag}_{b}_chunk_4_red_0.0",
-                            f"andpro_{model_tag}_{b}_chunk_4_red_0.5",
-                            f"andpro_{model_tag}_{b}_chunk_4"]),
+            ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4",
+                            f"critical_{model_tag}_{b}_chunk_4_red_0.0"]),
+            ("AnDPro",     [f"andpro_{model_tag}_{b}_chunk_4",
+                            f"andpro_{model_tag}_{b}_chunk_4_red_0.0"]),
             (r"\lorekvE",  lookahead_dir("ent", model_tag, b)),
             (r"\lorekvD",  lookahead_dir("dis", model_tag, b)),
         )]
@@ -197,14 +195,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--backbone", required=True, choices=sorted(BACKBONES))
     ap.add_argument("--budgets", nargs="+", type=int, default=[128, 256, 512, 1024])
-    # Completed runs get moved off to scratch by scripts/archive_runs_to_scratch.sh,
-    # so a table can span both locations; roots are searched in order.
     ap.add_argument("--no-highlight", action="store_true",
                     help="skip the \\best/\\second per-column markup")
     ap.add_argument("--inject", metavar="TEX",
                     help="rewrite the matching table body in this .tex file instead of printing")
-    ap.add_argument("--pred-root", nargs="+",
-                    default=["pred", "/scratch/user/u.ab353540/train_free_kv_archive/LongBench/pred"])
+    ap.add_argument("--pred-root", nargs="+", default=[os.path.join(LONGBENCH_DIR, "pred")],
+                    help="run-folder roots, searched in order (e.g. add an archive location)")
     args = ap.parse_args()
 
     body = emit(args.backbone, args.budgets, args.pred_root, args.no_highlight)
