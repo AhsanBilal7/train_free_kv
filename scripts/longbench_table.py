@@ -43,7 +43,7 @@ BACKBONES = {
     "llama":      ("Llama-3.1-8B-Instruct", "-llama"),
     "qwen2":      ("Qwen2.5-14B-Instruct", "-qwen2"),
     "ministral3": ("Ministral-3-8B-Instruct-2512", "-ministral3"),
-    "gemma4":     ("gemma-4-12B-it", "-gemma4"),
+    "gemma4":     ("gemma-4-12B-it-chat", "-gemma4"),   # MODEL_TAG of config/*-gemma4.conf
     "qwen35":     ("Qwen3.5-9B", "-qwen35"),
 }
 
@@ -149,8 +149,8 @@ def emit(backbone, budgets, pred_root, no_highlight=False):
         lines += ["", r"\midrule",
                   r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b, r"\midrule"]
         block = [(label, score_dir(pred_root, folder)) for label, folder in (
-            ("CriticalKV", [f"critical_{model_tag}_{b}_chunk_4",
-                            f"critical_{model_tag}_{b}_chunk_4_red_0.0"]),
+            # Only the value-aware runs: older critical_* folders are Ada-KV runs.
+            ("CriticalKV", [f"criticalkv_{model_tag}_{b}_chunk_4"]),
             ("AnDPro",     [f"andpro_{model_tag}_{b}_chunk_4",
                             f"andpro_{model_tag}_{b}_chunk_4_red_0.0"]),
             (r"\lorekvE",  lookahead_dir("ent", model_tag, b)),

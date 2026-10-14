@@ -507,9 +507,10 @@ def figure_criteria(rows, out_base):
 
     spans = [(1.0, 32.0), (34.5, 65.5), (68.0, 99.0)]
     cols = [
-        ("criticalkv", "prompt-window attention mass",
-         r"$S_i=\mathrm{pool}\left(\mathrm{mean}_{q\in\mathcal{Q}_\mathcal{W}}\,a_{q,i}\right)$",
-         "blind to what the value carries:\ntwo tokens with equal attention\nscore the same"),
+        ("criticalkv", "attention times projected value norm",
+         r"$S_i=\left(\mathrm{pool}\left(\mathrm{mean}_{q\in\mathcal{Q}_\mathcal{W}}\,a_{q,i}\right)"
+         r"+\epsilon\right)\,\|\mathbf{v}_i\mathbf{W}^{O}\|_1$",
+         "value-aware, but scored\nonly against prompt-end\nqueries"),
         ("andpro", "anchor-direction value projection",
          r"$S_c=\sum_{q\in\mathcal{Q}_\mathcal{W}}\langle\sum_{i\in c}a_{q,i}\mathbf{v}_i,\ "
          r"\sum_{j\in\mathrm{drop}}a_{q,j}\mathbf{v}_j\rangle$",

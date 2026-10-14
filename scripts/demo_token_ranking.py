@@ -6,9 +6,10 @@ cache with one shared selector. It then measures how well each cache agrees with
 the true decoding queries, which a full-cache greedy decode gives after the fact.
 
 Criteria (all on the same K, V, window queries and trajectories):
-    criticalkv: The ``critical`` mode of this repository: mean attention of the last
-        w prompt queries with max pooling (kernel 7), copied from
-        ``AdaptiveSnapKVCluster`` in ``adaptive_snapkv``.
+    criticalkv: The CriticalKV score (``--mode critical``): the pooled mean attention
+        of the last w prompt queries times the L1 norm of the projected value,
+        (a_i + eps) * ||v_i W_O||_1 (``adaptive_snapkv``). Under the shared selector
+        this is the stage-2 score of CriticalKV, without its attention-only stage 1.
     andpro: The ``andpro`` mode: projection of the attention-weighted value of each
         chunk onto the summed droppable value direction, over the w window
         queries. Copied from ``andpro_snapkv``.
@@ -73,16 +74,19 @@ PAIRS = [("criticalkv", "lorekv"), ("andpro", "lorekv"), ("criticalkv", "andpro"
 
 
 # ---------------------------------------------------------------------------
-# Criterion 1: CriticalKV / MODE=critical  (adaptive_snapkv pooled window attention)
+# Criterion 1: CriticalKV / MODE=critical  (adaptive_snapkv)
 # ---------------------------------------------------------------------------
 @torch.no_grad()
-def score_criticalkv(kvc, key, kernel_size=7, pooling="maxpool"):
-    """Return the CriticalKV score [H, n] (copy of ``AdaptiveSnapKVCluster.calcul_attn_sore``).
+def score_criticalkv(kvc, key, value, kernel_size=7, pooling="maxpool"):
+    """Return the CriticalKV score [H, n]: (a_i + eps) * ||v_i W_O^h||_1.
 
-    The attention of the last w prompt queries (causal inside the window) is averaged
-    over the queries and max-pooled over the candidates. The window columns are
-    protected, so they get -inf, and the shared selector keeps them.
+    a_i is the attention of the last w prompt queries (causal inside the window),
+    averaged over the queries and max-pooled over the candidates, as in
+    ``AdaptiveSnapKVCluster.calcul_attn_sore``. The value term is
+    :func:`adaptive_snapkv.monkeypatch.snapkv_utils.projected_value_l1`. The window
+    columns are protected, so they get -inf, and the shared selector keeps them.
     """
+    from adaptive_snapkv.monkeypatch.snapkv_utils import CRITICAL_EPS, projected_value_l1
     q = kvc.window_queries[0].float()          # [H, w, D]
     k = key[0].float()                         # [H, n, D]
     H, w, D = q.shape
@@ -99,8 +103,11 @@ def score_criticalkv(kvc, key, kernel_size=7, pooling="maxpool"):
     a_mean = attn[:, :, : n - w].mean(dim=1)                        # [H, n-w]
     pool = F.max_pool1d if pooling == "maxpool" else F.avg_pool1d
     a_pool = pool(a_mean, kernel_size=kernel_size, padding=kernel_size // 2, stride=1)
+    v = value[0]                                                    # [H, n, D]
+    l1 = torch.stack([projected_value_l1(v[h, : n - w], kvc.o_proj_weight, [h])
+                      for h in range(H)])                           # [H, n-w]
     out = torch.full((H, n), float("-inf"), device=k.device)
-    out[:, : n - w] = a_pool
+    out[:, : n - w] = (a_pool + CRITICAL_EPS) * l1
     return out
 
 
@@ -323,7 +330,7 @@ def run_sample(model, tokenizer, sample, cap, args, cfg):
             s_lorekv = s_lorekv + lambda_L * float(weights[m]) * parts[1 + m]
 
         scores = {
-            "criticalkv": score_criticalkv(kvc, key, cfg.kernel_size, cfg.pooling),
+            "criticalkv": score_criticalkv(kvc, key, val, cfg.kernel_size, cfg.pooling),
             "andpro": score_andpro(kvc, key, val, chunk, w, cfg.kernel_size, cfg.pooling),
             "lorekv_window": s_window,
             "lorekv": s_lorekv,

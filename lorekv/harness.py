@@ -16,8 +16,8 @@ Methods (``--mode``):
 ========================  ====================================================
 ``causal_lookahead``      LORE-KV (this work), :mod:`lorekv.monkeypatch`
 ``andpro``                AnDPro (Geng et al., NeurIPS 2025), :mod:`andpro_snapkv`
-``critical``              CriticalKV baseline configuration, through the Ada-KV
-                          cluster in :mod:`adaptive_snapkv`
+``critical``              CriticalKV (Feng et al., ICML 2025) on Ada-KV head
+                          budgets, :mod:`adaptive_snapkv`
 ``ada``                   Ada-KV (Feng et al., 2025), :mod:`adaptive_snapkv`
 ``fix``                   SnapKV (Li et al., 2024); ``--pyram`` gives PyramidKV
 ``slm``                   StreamingLLM (Xiao et al., 2024)
@@ -25,7 +25,10 @@ Methods (``--mode``):
 ========================  ====================================================
 
 The ``ada``, ``fix``, ``slm`` and ``critical`` patches and their per-head cache
-come from AdaKV (https://github.com/FFY0/AdaKV, MIT). The ``andpro`` patches come
+come from AdaKV (https://github.com/FFY0/AdaKV, MIT). ``critical`` adds the
+two-stage CriticalKV selection, which scores each entry by its attention and the
+L1 norm of its value after the output projection (see
+:func:`adaptive_snapkv.monkeypatch.snapkv_utils.criticalkv_select`). The ``andpro`` patches come
 from LLM-AnDPro (https://github.com/MIRALab-USTC/LLM-AnDPro, MIT). This
 repository is built on LLM-AnDPro.
 """
@@ -102,9 +105,9 @@ def add_method_args(parser):
     g.add_argument("--lambda_v", default=0.0, type=float,
                    help="lambda_v: value-redundancy penalty of diversity selection (App. D-C)")
     g.add_argument("--score_objective", default="projected",
-                   choices=["projected", "unprojected", "attention"],
-                   help="per-query deletion score: ||W_O dO|| (Eq. 6), ||dO|| or attention "
-                        "mass (App. D, ablation iii)")
+                   choices=["projected", "unprojected", "attention", "andpro"],
+                   help="per-query deletion score: ||W_O dO|| (Eq. 6), ||dO||, attention "
+                        "mass or AnDPro's criterion (App. D, ablation iii; Table 13b)")
     return parser
 
 
@@ -287,6 +290,12 @@ def load_model_and_tokenizer(path, device="cuda:0"):
     register_extra_architectures()
 
     tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+    if "gemma" in str(path).lower() and not getattr(tokenizer, "chat_template", None):
+        # Gemma 4 is evaluated with its chat template (paper App. E.1). Without it the
+        # drivers would send a raw prompt without <bos>.
+        raise ValueError(
+            f"{path} has no chat template. Copy chat_template.jinja from the Hub "
+            "checkpoint into this directory (scripts/prepare_local_checkpoint.py copies it).")
     model = AutoModelForCausalLM.from_pretrained(
         path, torch_dtype=torch.bfloat16, device_map=device,
         attn_implementation=attn_implementation(path), trust_remote_code=True)

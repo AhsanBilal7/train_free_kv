@@ -119,8 +119,8 @@ def main():
     ap.add_argument("--base-config", default=None,
                     help="checkpoint dir or Hub id whose config shapes the tiny model")
     ap.add_argument("--method", default="lookahead",
-                    choices=["lookahead", "andpro", "adaptive"],
-                    help="adaptive == the CriticalKV baseline")
+                    choices=["lookahead", "andpro", "adaptive", "critical"],
+                    help="adaptive is Ada-KV; critical is CriticalKV on Ada-KV budgets")
     args = ap.parse_args()
 
     from lorekv.monkeypatch.monkeypatch import (
@@ -132,7 +132,7 @@ def main():
     else:
         from lorekv.monkeypatch.hybrid_baseline_hijack import (
             replace_hybrid_baseline)
-        replace_hybrid_baseline(args.method)
+        replace_hybrid_baseline("adaptive" if args.method == "critical" else args.method)
     model = build_tiny(args.arch, args.base_config).to(args.device)
 
     comp = compressible_layers(model.config)
@@ -150,7 +150,8 @@ def main():
                      # lorekv.harness.configure_model supplies these in a real run.
                      kernel_size=7, pooling="maxpool", floor_alpha=0.5,
                      normalize=False, pyram_mode=False, pyram_beta=20,
-                     gqa_support=False, gqa_func="mean", mode="andpro",
+                     gqa_support=False, gqa_func="mean",
+                     mode="critical" if args.method == "critical" else "andpro",
                      lookahead_particle_idx=0).items():
         setattr(model.config, k, v)
         if tcfg is not model.config:
@@ -190,8 +191,9 @@ def main():
         _lyr = _decoder_layers(model)[idx]
         kvc = getattr(getattr(_lyr, "self_attn", None), "kv_cluster", None)
         if kvc is not None and getattr(kvc, "head_lens", None) is not None:
+            crit = " (CriticalKV)" if getattr(kvc, "o_proj_weight", None) is not None else ""
             print(f"  layer {idx}: per-head kept = {kvc.head_lens.tolist()} "
-                  f"(prefill was {args.tokens})")
+                  f"(prefill was {args.tokens}){crit}")
     print("\nRESULT: PASS -- full cycle completed")
     return 0
 

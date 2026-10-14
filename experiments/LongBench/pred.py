@@ -56,12 +56,16 @@ def parse_args(args=None):
 def build_chat(tokenizer, prompt, model_name):
     """Apply the instruction format of the backbone to a LongBench prompt (App. E.1).
 
-    Mistral-7B-Instruct-v0.2 gets the raw prompt, as in Geng et al. (2025). Llama-3.1
-    and Qwen use their chat templates. Ministral-3 uses the Mistral format
-    ``[INST]...[/INST]``. Its packaged template adds a system prompt of several
+    Mistral-7B-Instruct-v0.2 gets the raw prompt, as in Geng et al. (2025). Llama-3.1,
+    Qwen2.5, Qwen3.5 and Gemma 4 use their chat templates. Ministral-3 uses the Mistral
+    format ``[INST]...[/INST]``. Its packaged template adds a system prompt of several
     hundred tokens to each input, so the driver does not use it.
     """
     name = model_name.lower()
+    if "gemma" in name:
+        # The Gemma 4 template adds <bos> and turns thinking off by default.
+        return tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)
     if "llama-3" in name and "instruct" in name:
         return tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}], tokenize=False, add_generation_prompt=True)

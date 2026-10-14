@@ -1,4 +1,4 @@
-"""AnDPro and CriticalKV on the hybrid-attention backbones (transformers 5.x).
+"""AnDPro, Ada-KV and CriticalKV on the hybrid-attention backbones (transformers 5.x).
 
 The baselines have no lookahead, so each forward has two cases:
 
@@ -234,7 +234,8 @@ def replace_hybrid_baseline(which: str):
     """Patch Qwen3.5 and Gemma 4 with a baseline.
 
     Args:
-        which: ``"andpro"`` or ``"adaptive"`` (Ada-KV, also used by ``critical``).
+        which: ``"andpro"`` or ``"adaptive"`` (Ada-KV; with ``--mode critical``,
+            ``init_adaptive_snapkv`` adds the CriticalKV selection).
     """
     if which == "andpro":
         from andpro_snapkv.monkeypatch.snapkv_utils import init_andpro_snapkv as init_fn

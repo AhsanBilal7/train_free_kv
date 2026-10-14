@@ -9,7 +9,7 @@ LORE-KV runs (``--mode causal_lookahead``)::
 
     lorekv-<cell>-<brule>-<sel>[-<model>]_B_<B>_chunk_<cs>_M_<M>_T_<T>
         _lL_<lambda_L>_lT_<temperature>_nrm_<0|1>_alpha_<alpha>_kappa_<kappa>
-        [_obj_<unprojected|attention>]
+        [_obj_<unprojected|attention|andpro>]
 
 The part before ``_B_`` identifies the run. It is equal to the name of the config
 file (``config/lorekv-ent-unif-topk-llama.conf`` writes
@@ -32,6 +32,11 @@ CUSTOM_PREFIXES gives the coefficients of each prefix.
 
 Other methods write ``<mode>_<model-tag>_<B>_chunk_<cs>``. The parser also reads
 older folders that end in ``_red_<x>``.
+
+CriticalKV (``--mode critical``) writes ``criticalkv_<model-tag>_<B>_chunk_<cs>``.
+Older ``critical_*`` folders come from a ``critical`` mode that ran the Ada-KV
+cluster without the value term. The parser thus returns ``mode='ada'`` and
+``legacy_critical=True`` for them, and they are not mixed with CriticalKV runs.
 """
 import argparse
 import re
@@ -147,7 +152,8 @@ def build_run_name(*, mode, model_tag, budget, chunk_size,
                    score_objective=None, name_prefix=None):
     """Return the folder name of one run. See the module docstring for the format."""
     if mode != "causal_lookahead":
-        return f"{mode}_{model_tag}_{budget}_chunk_{chunk_size}"
+        label = "criticalkv" if mode == "critical" else mode
+        return f"{label}_{model_tag}_{budget}_chunk_{chunk_size}"
     # RUN_NAME_PREFIX / --name-prefix: override just the identity string. Everything
     # else -- the numeric tail, obj suffix -- is unchanged, so the folder still
     # encodes exactly what was run; only the leading label differs from what the
@@ -258,8 +264,13 @@ def parse_run_name(name):
     m = _BASELINE_RE.match(name)
     if not m:
         return None
-    out = {"mode": m.group("mode"), "model": m.group("model"),
+    mode = m.group("mode")
+    out = {"mode": mode, "model": m.group("model"),
            "budget": m.group("budget"), "chunk": m.group("chunk")}
+    if mode == "criticalkv":
+        out["mode"] = "critical"
+    elif mode == "critical":                 # Ada-KV run under the old mode name
+        out["mode"], out["legacy_critical"] = "ada", True
     out.update(_pairs(m.group("tail")))
     return out
 

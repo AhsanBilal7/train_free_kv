@@ -94,6 +94,48 @@ class DynamicCacheSplitHeadFlatten(Cache):
         return cache
 
 
+SCORE_OBJECTIVES = ("projected", "unprojected", "attention", "andpro")
+
+
+def andpro_chunk_scores(attn_w, values, chunk_size, window_size, kernel_size=7):
+    """Return the AnDPro score of each chunk for each query (Geng et al., NeurIPS 2025).
+
+    For query q, AnDPro scores chunk c by the inner product of the attention-weighted
+    value of the chunk with the anchor direction, the attention-weighted value of all
+    droppable chunks:
+
+        s_{q,c} = < sum_{i in c} a_{q,i} v_i ,  d_q >,    d_q = sum_{j in drop} a_{q,j} v_j.
+
+    The attention is max-pooled over the keys first, as in ``andpro_snapkv``. The first
+    chunk and the observation-window chunks are not droppable. The original method adds
+    s_{q,c} over the window queries. LORE-KV aggregates it with psi, as for its own score.
+
+    Args:
+        attn_w: Tensor [Q, n] of attention weights a_{q,i}.
+        values: Tensor [n, D] of the value states of the head.
+        chunk_size: Number of adjacent tokens in one chunk.
+        window_size: Observation window w.
+        kernel_size: Max-pooling kernel.
+
+    Returns:
+        Tensor [Q, n_chunk].
+    """
+    Q, n = attn_w.shape
+    a = F.max_pool1d(attn_w.unsqueeze(0), kernel_size=kernel_size,
+                     padding=kernel_size // 2, stride=1).squeeze(0)
+    pad = (chunk_size - (n % chunk_size)) % chunk_size
+    a = F.pad(a, (0, pad))
+    v = F.pad(values, (0, 0, 0, pad))
+    n_chunk = (n + pad) // chunk_size
+    drop = torch.ones(n_chunk, dtype=torch.bool, device=a.device)
+    drop[0] = False
+    drop[-window_size // chunk_size:] = False
+    drop_tok = drop.repeat_interleave(chunk_size).to(a.dtype)      # [n + pad]
+    anchor = (a * drop_tok) @ v                                     # [Q, D]: d_q
+    per_token = a * (anchor @ v.T)                                  # a_{q,i} <v_i, d_q>
+    return per_token.view(Q, n_chunk, chunk_size).sum(-1)
+
+
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
@@ -369,10 +411,13 @@ class TestTimeLookaheadKVCluster:
         #   'projected'   |c_{q,i}| * || W_O v_i - W_O o_q ||   (Eqs. 5-6, the core method)
         #   'unprojected' |c_{q,i}| * ||      v_i -      o_q ||   (W_O dropped)
         #   'attention'   a_{q,i}                                (accumulated attention mass)
+        #   'andpro'      AnDPro's chunk criterion (Geng et al., 2025) on the same queries
         self.score_objective = str(score_objective).lower()
-        if self.score_objective not in ("projected", "unprojected", "attention"):
+        if self.score_objective not in SCORE_OBJECTIVES:
             raise ValueError(
-                f"score_objective must be projected|unprojected|attention, got {score_objective!r}")
+                f"score_objective must be one of {SCORE_OBJECTIVES}, got {score_objective!r}")
+        # Attention pooling of the 'andpro' objective, as in andpro_snapkv (kernel 7, max).
+        self.andpro_kernel_size = 7
 
         self.causal_eps = causal_eps
         self.candidate_chunk = candidate_chunk
@@ -483,7 +528,9 @@ class TestTimeLookaheadKVCluster:
 
         ``score_objective`` selects the per-query score (App. D, ablation iii):
         ``projected`` uses |c_{q,i}| * ||W_O v_i - W_O o_q||, ``unprojected`` uses
-        |c_{q,i}| * ||v_i - o_q||, and ``attention`` uses a_{q,i}.
+        |c_{q,i}| * ||v_i - o_q||, and ``attention`` uses a_{q,i}. ``andpro`` uses the
+        AnDPro criterion (see :func:`andpro_chunk_scores`); this is the control "AnDPro
+        scoring with the same continuations" (Table 13b and Table 14).
 
         Args:
             key_states: Tensor [1, H, n, D], repeated to the query-head count.
@@ -506,7 +553,7 @@ class TestTimeLookaheadKVCluster:
         out_scores = [torch.zeros(H, n, device=device, dtype=torch.float32) for _ in query_batches]
 
         objective = self.score_objective
-        attention_only = (objective == "attention")
+        attention_only = objective in ("attention", "andpro")
 
         for h in range(H):
             v_h = value_f[h]   # [n, D]
@@ -537,6 +584,12 @@ class TestTimeLookaheadKVCluster:
                     attn_logits[:, -w:] = attn_logits[:, -w:] + mask
                 attn_w = F.softmax(attn_logits, dim=-1)  # [Q, n]: a_{q,i}
 
+                if objective == "andpro":
+                    per_query = andpro_chunk_scores(attn_w, v_h, self.chunk_size,
+                                                    self.window_size, self.andpro_kernel_size)
+                    chunk_scores = self._robust_topbeta_mean(per_query)        # [n_chunk]
+                    out_scores[b][h] = chunk_scores.repeat_interleave(self.chunk_size)[:n]
+                    continue
                 if attention_only:
                     # Accumulated attention mass (the H2O / SnapKV criterion) on the same
                     # queries, aggregated by the same psi.
@@ -587,7 +640,9 @@ class TestTimeLookaheadKVCluster:
         zeros = torch.zeros_like(chunk_score)
         masked_for_mean = torch.where(drop, chunk_score, zeros)
         mean_per_head = masked_for_mean.sum(-1) / drop.sum(-1).clamp(min=1)
-        normalized = chunk_score / (mean_per_head.unsqueeze(-1) + self.causal_eps)
+        # abs(): the 'andpro' objective can have a negative mean, which must not reverse
+        # the order. The other objectives are non-negative, so abs() does not change them.
+        normalized = chunk_score / (mean_per_head.abs().unsqueeze(-1) + self.causal_eps)
         normalized = normalized.masked_fill(~drop, float('-inf'))
 
         # E_{l,h}: per-head perturbation mass of the droppable chunks (Eq. 11).

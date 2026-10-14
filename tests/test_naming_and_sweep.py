@@ -39,7 +39,11 @@ def test_baselines_and_legacy_names_parse():
     assert run_naming.build_run_name(mode="andpro", model_tag="Qwen2.5-14B-Instruct",
                                      budget=256, chunk_size=4) == "andpro_Qwen2.5-14B-Instruct_256_chunk_4"
     p = run_naming.parse_run_name("critical_Llama-3.1-8B-Instruct_512_chunk_4_red_0.0")
-    assert (p["mode"], p["budget"]) == ("critical", "512")
+    assert (p["mode"], p["budget"], p["legacy_critical"]) == ("ada", "512", True)
+    name = run_naming.build_run_name(mode="critical", model_tag="Llama-3.1-8B-Instruct",
+                                     budget=512, chunk_size=4)
+    assert name == "criticalkv_Llama-3.1-8B-Instruct_512_chunk_4"
+    assert run_naming.parse_run_name(name)["mode"] == "critical"
 
 
 def test_every_config_parses_and_names_its_runs():

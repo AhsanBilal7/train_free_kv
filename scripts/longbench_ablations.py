@@ -2,8 +2,9 @@
 """Write the LaTeX of the appendix ablation tables.
 
 Tables:
-    (i) Score objective: projected (default), attention and unprojected, for each
-        budget and the 16 datasets.
+    (i) Score objective: projected (default), attention, unprojected and AnDPro's
+        criterion on the same continuations (``config/andpro-compute-eq.conf``), for
+        each budget and the 16 datasets.
     (ii) Lookahead geometry: the M x T matrix of averages at B = 128.
     (iii) The Qwen2.5-14B and Ministral-3-8B tables, made with
         ``longbench_table.emit()``. Their labels are ``tab:new_backbone_*``.
@@ -53,6 +54,17 @@ def run_dir(model_tag, budget, num_particles, lookahead_len, score_objective):
         score_objective=score_objective, **ENT)
 
 
+def andpro_control_dir(model_tag, budget, num_particles=4, lookahead_len=8):
+    """Return the run folder of AnDPro's criterion on the same continuations (uniform weights)."""
+    return build_run_name(
+        mode="causal_lookahead", model_tag=model_tag, budget=budget, chunk_size=4,
+        num_particles=num_particles, lookahead_len=lookahead_len,
+        lambda_lookahead="1.0", lookahead_temperature="1.0",
+        normalize_typicality="0", robust_alpha="0.0", robust_topk_beta="1.0",
+        lambda_k="0.0", lambda_v="0.0", budget_tau="0.0", beta="0.0", gamma="0.0",
+        lambda_d="0.0", score_objective="andpro", name_prefix="andpro-compute-eq")
+
+
 def objective_table(pred_root, model_tag, no_highlight=False):
     lines = [r"\toprule",
              "Objective & " + " & ".join(h for _, h in DATASETS) + r" & Avg. \\"]
@@ -61,6 +73,8 @@ def objective_table(pred_root, model_tag, no_highlight=False):
                   r"\multicolumn{18}{c}{\textit{Budget} $=%d$} \\" % b, r"\midrule"]
         block = [(label, score_dir(pred_root, run_dir(model_tag, b, 4, 8, obj)))
                  for obj, label in OBJECTIVES]
+        block.append(("AnDPro, same continuations",
+                      score_dir(pred_root, andpro_control_dir(model_tag, b))))
         lines += [row(l, s) for l, s in block] if no_highlight else highlight(block)
     lines.append(r"\bottomrule")
     return lines

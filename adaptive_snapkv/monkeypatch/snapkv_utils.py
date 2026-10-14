@@ -6,10 +6,16 @@ Classes:
         ``pyram_mode`` it uses the PyramidKV layer schedule (Cai et al., 2025).
     AdaptiveSnapKVCluster: Ada-KV (Feng et al., 2025). It uses the same scores and
         divides the layer budget adaptively across heads. Each head keeps a
-        ``floor_alpha`` fraction of its budget. The ``ada`` and ``critical`` modes
-        use this class.
+        ``floor_alpha`` fraction of its budget. The ``ada`` mode uses this class.
+        With an output projection set (``--mode critical``), the class is
+        CriticalKV on Ada-KV budgets (Feng et al., ICML 2025): see
+        :func:`criticalkv_select`.
     StreamingLLMKVCluster: Attention sink and recent window (Xiao et al., 2024).
     DynamicCacheSplitHeadFlatten: The ragged per-head cache for decoding.
+
+CriticalKV follows "Identify Critical KV Cache in LLM Inference from an Output
+Perturbation Perspective" (Feng et al., ICML 2025), as implemented in AdaKV and in
+kvpress (``CriticalAdaKVPress``, https://github.com/NVIDIA/kvpress, Apache-2.0).
 
 Adapted from AdaKV (Feng et al., 2025; https://github.com/FFY0/AdaKV, MIT). AdaKV contains code from SnapKV
 (https://github.com/FasterDecoding/SnapKV) and PyramidKV
@@ -316,6 +322,63 @@ class SnapKVCluster():
             return key_states, value_states
    
 
+# CriticalKV defaults (Feng et al., ICML 2025; kvpress CriticalAdaKVPress).
+CRITICAL_FIRST_STAGE_RATIO = 0.5
+CRITICAL_EPS = 1e-4
+
+
+def projected_value_l1(values, o_proj_weight, head_ids):
+    """Return ||v_i W_O^h||_1 for each position, averaged over the query heads ``head_ids``.
+
+    This is the value term of the CriticalKV perturbation bound. ``W_O^h`` is the
+    slice of the output projection that reads query head ``h``.
+
+    Args:
+        values: Tensor [n, d] of the value states of one KV head.
+        o_proj_weight: The ``o_proj.weight`` tensor [hidden, num_heads * d].
+        head_ids: The query heads that read this KV head.
+
+    Returns:
+        Float32 tensor [n].
+    """
+    d = values.shape[-1]
+    out = None
+    for h in head_ids:
+        w_h = o_proj_weight[:, h * d:(h + 1) * d].to(values.dtype)        # [hidden, d]
+        norm = torch.linalg.vector_norm(values @ w_h.T, ord=1, dim=-1, dtype=torch.float32)
+        out = norm if out is None else out + norm
+    return out / len(head_ids)
+
+
+def criticalkv_select(attn_score, order, budget, value_l1,
+                      first_stage_ratio=CRITICAL_FIRST_STAGE_RATIO, eps=CRITICAL_EPS):
+    """Select the CriticalKV entries of one head (two-stage selection).
+
+    Stage 1 keeps the ``first_stage_ratio * budget`` entries with the highest
+    attention score. Stage 2 fills the rest of the budget by the output-perturbation
+    bound ``(a_i + eps) * ||v_i W_O||_1``.
+
+    Args:
+        attn_score: Tensor [..., n] of the pooled window attention of the head.
+        order: Tensor [..., n] of the positions sorted by ``attn_score``, descending.
+        budget: Number of entries to keep.
+        value_l1: Tensor [n] from :func:`projected_value_l1`.
+        first_stage_ratio: Fraction of the budget selected by attention only.
+        eps: Additive constant of the attention term.
+
+    Returns:
+        Tensor with the shape of ``order[..., :budget]``: the kept positions.
+    """
+    budget = min(int(budget), order.shape[-1])
+    n_first = int(budget * first_stage_ratio)
+    score = (attn_score.float().reshape(-1) + eps) * value_l1
+    flat_order = order.reshape(-1)
+    if n_first > 0:
+        score[flat_order[:n_first]] = float("inf")
+    keep = torch.topk(score, k=budget, dim=-1).indices
+    return keep.view(*order.shape[:-1], budget).to(order.dtype)
+
+
 class AdaptiveSnapKVCluster():
     def __init__(self, window_size = 32, kernel_size = 7, pooling = 'maxpool',base_capacity=None,floor_alpha = None,skip = None,normalize=None, 
                  layer_idx = None, num_hidden_layers = None, pyram_mode = False, pyram_beta = 20,gqa_support=False,num_key_value_groups = 1, gqa_func=None):
@@ -352,6 +415,18 @@ class AdaptiveSnapKVCluster():
             assert gqa_func in ['max','mean'], "currently gqa_func should be in ['max','mean']"
             if self.num_key_value_groups == 1:
                 warnings.warn("gqa_support is enabled, but num_key_value_groups is 1, which means the model is not using gqa. Please check the model configuration.")
+
+        # CriticalKV: init_adaptive_snapkv sets the output projection for --mode critical.
+        # If it is None, the cluster is Ada-KV.
+        self.o_proj_weight = None
+
+    def _select(self, head_idx, attn_score, order, budget, values, head_ids):
+        """Return the kept prefix positions of one head: Ada-KV top-k, or CriticalKV if ``o_proj_weight`` is set."""
+        if self.o_proj_weight is None:
+            return order[..., :budget]
+        value_l1 = projected_value_l1(
+            values.reshape(-1, values.shape[-1])[:-self.window_size], self.o_proj_weight, head_ids)
+        return criticalkv_select(attn_score[:, head_idx], order, budget, value_l1)
 
 
     def calcul_attn_sore(self, key_states, query_states):
@@ -496,8 +571,12 @@ class AdaptiveSnapKVCluster():
         self.cu_klen = 0
 
 
+        g = self.num_key_value_groups
         for head_idx in range(num_heads//self.num_key_value_groups):
-            cache_index = sorted_attn_score_indices[head_idx][...,:head_adaptive_capacity[0][head_idx]]
+            cache_index = self._select(head_idx, attn_score, sorted_attn_score_indices[head_idx],
+                                       head_adaptive_capacity[0][head_idx],
+                                       origin_heads_value_states[head_idx],
+                                       range(head_idx * g, (head_idx + 1) * g))
 
             l = cache_index.shape[-1] + self.window_size
             k_lens.append(l)
@@ -615,7 +694,9 @@ class AdaptiveSnapKVCluster():
 
 
         for head_idx in range(num_heads):
-            cache_index = sorted_attn_score_indices[head_idx][...,:head_adaptive_capacity[0][head_idx]]
+            cache_index = self._select(head_idx, attn_score, sorted_attn_score_indices[head_idx],
+                                       head_adaptive_capacity[0][head_idx],
+                                       origin_heads_value_states[head_idx], [head_idx])
 
             l = cache_index.shape[-1] + self.window_size
             k_lens.append(l)
@@ -696,10 +777,12 @@ def init_adaptive_snapkv(self):
             num_key_value_groups = self.config.num_attention_heads // self.config.num_key_value_heads,
             gqa_func = self.config.gqa_func
             )
+        if getattr(self.config, "mode", None) == "critical":
+            self.kv_cluster.o_proj_weight = self.o_proj.weight
         if self.config.gqa_support:
             if self.config.model_type != "mistral":
                 warnings.warn("GQA currently supports only for mistral-7B-v0.2 model")
-        print(f"Compress config(Ada): window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor_alpha={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}", flush=True)
+        print(f"Compress config({'CriticalKV' if self.kv_cluster.o_proj_weight is not None else 'Ada'}): window_size={self.kv_cluster.window_size}, base_capacity={self.kv_cluster.base_capacity}, kernel_size={self.kv_cluster.kernel_size}, pooling={self.kv_cluster.pooling}, floor_alpha={self.kv_cluster.floor_ratio}, pyram_mode={self.kv_cluster.pyram_mode}, beta={self.kv_cluster.pyram_beta}", flush=True)
 
 
 

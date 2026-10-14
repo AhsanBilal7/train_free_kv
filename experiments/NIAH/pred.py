@@ -259,6 +259,7 @@ def build_niah_input(tokenizer, context_text, question, guidance, max_length, de
             [{"role": "user", "content": user_content}],
             add_generation_prompt=True,
             return_tensors="pt",
+            return_dict=False,         # a tensor on transformers 4.x and 5.x
             # See build_ruler_input in experiments/RULER/pred.py: the
             # non-thinking switch, ignored by templates that do not use it.
             enable_thinking=False,

@@ -195,6 +195,8 @@ python scripts/convert_ministral3.py --src mistralai/Ministral-3-8B-Instruct-251
 ```
 
 For the hybrid backbones, download the checkpoints into `models/Qwen3.5-9B` and `models/gemma-4-12B-it`.
+Download the full snapshot, including `chat_template.jinja`: Gemma 4 is evaluated with its chat template, and
+the harness stops with an error if the template is missing.
 
 ## 🚀 Quick start
 
@@ -240,7 +242,9 @@ print(tok.decode(answer_ids, skip_special_tokens=True))
 ```
 
 `--mode` also accepts the baselines: `andpro`, `critical`, `ada` (Ada-KV), `fix` (SnapKV; add `--pyram` for
-PyramidKV), `slm` (StreamingLLM) and `full` (uncompressed).
+PyramidKV), `slm` (StreamingLLM) and `full` (uncompressed). `critical` is CriticalKV (Feng et al., ICML 2025) on
+Ada-KV head budgets: half of each head budget is selected by window attention, and the rest by
+$(a_i+\epsilon)\,\lVert \mathbf{v}_i \mathbf{W}^{O}\rVert_1$. Its runs write `criticalkv_*` folders.
 
 ## 🔁 Reproducing the paper
 
@@ -274,9 +278,9 @@ Each table is the listed configs on the listed benchmark (`EXPERIMENT=LongBench 
 |---|---|
 | Lookahead budget $M$ (Table 14) | `NUM_PARTICLES="0 1 2 4 8"` with `lorekv-ent-unif-topk` |
 | Geometry $M\times T$ (Table 13a) | `NUM_PARTICLES="1 2 4 8" LOOKAHEAD_LEN="2 4 8 16 32" BUDGET=128` |
-| Matched lookahead-token budget (Table 13b) | `andpro-compute-eq` with the same sweep |
+| Matched lookahead-token budget (Table 13b) | `andpro-compute-eq` with the same sweep (AnDPro's criterion on the same continuations) |
 | Reliability weighting | `lorekv-logp-unif-topk`, `lorekv-ent-dis-unif-topk` |
-| Deletion objective | `lorekv-obj-attn`, `lorekv-obj-unproj`, `andpro-compute-eq` |
+| Deletion objective (Table 14) | `lorekv-obj-attn`, `lorekv-obj-unproj`, `andpro-compute-eq` (`SCORE_OBJECTIVE=andpro`) |
 | Adaptive budgets / diversity | `lorekv-{ent,dis,logp}-adap-topk`, `lorekv-{ent,dis,logp}-adap-div` |
 | Robust aggregation | `ROBUST_ALPHA=0.5 ROBUST_TOPK_BETA=0.5` with `lorekv-ent-unif-topk` |
 
@@ -329,7 +333,7 @@ lorekv/                       the method
     causal_*_hijack.py        phase-aware attention and model forwards per backbone
     *hybrid*.py               Qwen3.5 / Gemma 4 support
 andpro_snapkv/                AnDPro baseline
-adaptive_snapkv/              SnapKV, PyramidKV, Ada-KV, StreamingLLM baselines (also `critical`)
+adaptive_snapkv/              SnapKV, PyramidKV, Ada-KV, CriticalKV, StreamingLLM baselines
 models_ext/                   Ministral-3 for transformers 4.44
 csrc/                         CUDA kernel for the ragged per-head cache
 experiments/

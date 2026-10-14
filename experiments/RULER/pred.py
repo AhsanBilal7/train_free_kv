@@ -78,6 +78,7 @@ def build_ruler_input(tokenizer, context, question, answer_prefix, max_length, d
             [{"role": "user", "content": user_content}],
             add_generation_prompt=True,
             return_tensors="pt",
+            return_dict=False,         # a tensor on transformers 4.x and 5.x
             # Inert for Qwen2.5, Mistral and Llama, whose templates do not read
             # the variable; passed so a hybrid-reasoning Qwen checkpoint cannot
             # silently open a <think> block and consume the whole answer budget.

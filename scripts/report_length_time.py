@@ -65,7 +65,7 @@ def out_names(conf, budget, niah_multi=False, legacy=True):
     """
     g = lambda k: first(conf.get(k) or DEFAULTS[k])  # noqa: E731
     mode = g("MODE")
-    model_tag = os.path.basename(g("MODEL_PATH").rstrip("/"))
+    model_tag = conf.get("MODEL_TAG") or os.path.basename(g("MODEL_PATH").rstrip("/"))
     name = build_run_name(
         mode=mode, model_tag=model_tag, budget=budget, chunk_size=g("CHUNK_SIZE"),
         num_particles=g("NUM_PARTICLES"), lookahead_len=g("LOOKAHEAD_LEN"),
@@ -216,7 +216,8 @@ def main():
             continue
         conf = load_conf(cfg_path)
         mode = first(conf_get(conf, "MODE"))
-        model_tag = os.path.basename(conf_get(conf, "MODEL_PATH").rstrip("/"))
+        model_tag = conf.get("MODEL_TAG") or os.path.basename(
+            conf_get(conf, "MODEL_PATH").rstrip("/"))
         budgets = (
             conf_get(conf, "BUDGET").split()
             if args.budgets == ["from-config"]

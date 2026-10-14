@@ -3,6 +3,7 @@ import math
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from lorekv.monkeypatch.scoring import TestTimeLookaheadKVCluster as Cluster
 from lorekv.monkeypatch.scoring import (
@@ -189,3 +190,35 @@ def test_adaptive_head_budget_conserves_layer_budget():
     cl = _cluster(H=H, budget=24, chunk=4, window=8, budget_tau=1.0)
     _, _, meta = _compress(cl, n=96, H=H)
     assert int(meta["head_lens"].sum()) == 24 * H
+
+
+def test_andpro_criterion_matches_andpro_snapkv():
+    """The 'andpro' objective is the per-query term of AnDPro's chunk score (andpro_snapkv)."""
+    from lorekv.monkeypatch.scoring import andpro_chunk_scores
+    torch.manual_seed(0)
+    Q, n, D, cs, w = 8, 30, 4, 4, 8
+    a = torch.softmax(torch.randn(Q, n), -1)
+    v = torch.randn(n, D)
+    got = andpro_chunk_scores(a, v, cs, w)                                   # [Q, n_chunk]
+    # The loop of AndProAdaptiveSnapKVCluster.update_kv_wo_gqa, one head.
+    a_p = F.max_pool1d(a[None], kernel_size=7, padding=3, stride=1)[0]
+    pad = (cs - n % cs) % cs
+    a_p, v_p = F.pad(a_p, (0, pad)), F.pad(v, (0, 0, 0, pad))
+    n_chunk = (n + pad) // cs
+    drop = torch.ones(n_chunk, dtype=torch.bool)
+    drop[0] = False
+    drop[-w // cs:] = False
+    for q in range(Q):
+        chunk_v = (v_p * a_p[q, :, None]).view(n_chunk, cs, D).sum(1)        # [n_chunk, D]
+        anchor = chunk_v[drop].sum(0)
+        assert torch.allclose(got[q], chunk_v @ anchor, atol=1e-5)
+
+
+def test_andpro_objective_compresses_to_budget():
+    """compress() with the 'andpro' objective keeps B tokens per head and the protected set."""
+    H = 2
+    cl = _cluster(H=H, budget=16, chunk=4, window=8, score_objective="andpro")
+    k, _, meta = _compress(cl, n=64, H=H)
+    assert meta["head_lens"].tolist() == [16] * H
+    for row in torch.cat([cl.full_key_states[0, 0, :4], cl.full_key_states[0, 0, -8:]]):
+        assert any(torch.equal(row, r) for r in k[:16])
